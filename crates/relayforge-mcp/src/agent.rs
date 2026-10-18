@@ -70,13 +70,38 @@ pub fn file_inspect(args: &Value) -> Result<String, String> {
             if !valid_read_path(path) {
                 return Err("file denied".into());
             }
-            invoke_agent(
+            let raw = invoke_agent(
                 host,
                 json!({"version":PROTOCOL_VERSION,"operation":"file.read","path":path}),
-            )
+            )?;
+            normalize_read_result(&raw, path)
         }
         _ => Err("read-only file action denied".into()),
     }
+}
+
+/// The agent uses a field named `content`, which can be interpreted as an
+/// MCP result envelope field by external plugin adapters. Keep the agent's
+/// wire protocol unchanged and present an unambiguous application payload.
+fn normalize_read_result(raw: &str, requested_path: &str) -> Result<String, String> {
+    let value: Value = serde_json::from_str(raw).map_err(|_| "invalid file read response")?;
+    let file_path = value
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or("invalid file read response")?;
+    let utf8_text = value
+        .get("content")
+        .and_then(Value::as_str)
+        .ok_or("invalid file read response")?;
+    if file_path != requested_path {
+        return Err("file path mismatch".into());
+    }
+    Ok(json!({
+        "file_path":file_path,
+        "utf8_text":utf8_text,
+        "byte_length":utf8_text.len(),
+    })
+    .to_string())
 }
 
 pub fn file_tool() -> Value {
@@ -279,6 +304,22 @@ mod tests {
         assert!(restart_probe(&json!({"host":"ru0","unit":"ssh.service"})).is_err());
         assert!(restart_probe(&json!({"host":"ru0","action":"stop"})).is_err());
     }
+    #[test]
+    fn file_read_response_avoids_reserved_content_field() {
+        let raw = r#"{"content":"RelayForge MCP integration test — 2026-10-18","path":"relayforge-mcp-test.txt"}"#;
+        let response = normalize_read_result(raw, "relayforge-mcp-test.txt").unwrap();
+        let parsed: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            parsed["utf8_text"],
+            "RelayForge MCP integration test — 2026-10-18"
+        );
+        assert_eq!(parsed["byte_length"], 46);
+        assert_eq!(parsed["file_path"], "relayforge-mcp-test.txt");
+        assert!(parsed.get("content").is_none());
+        assert!(normalize_read_result(raw, "/etc/hostname").is_err());
+        assert!(normalize_read_result("{}", "relayforge-mcp-test.txt").is_err());
+    }
+
     #[test]
     fn remote_file_inspection_never_accepts_mutations() {
         for req in [

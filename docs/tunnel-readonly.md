@@ -64,6 +64,11 @@ A distinct remote `relayforge_file_inspect` tool allows `list` and
 `read` against existing Rust-agent public OS metadata allowlists and the
 private scratch directory. It never accepts a write operation or arbitrary
 filesystem paths, and the agent checks the allowlist again.
+The public MCP read result uses the unambiguous JSON fields
+`file_path`, `utf8_text` and `byte_length`; the underlying agent still
+returns `content`. This avoids a collision with the MCP `content` envelope
+field in ChatGPT's plugin result conversion. The output is verified to match
+the requested allowlisted path.
 
 The only remotely available change actions are `sandbox.create` on
 `ru0`, `ru1`, or `srv0` (flat file with .txt, .md, .json extension,
