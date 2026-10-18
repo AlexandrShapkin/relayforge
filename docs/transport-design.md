@@ -39,3 +39,14 @@ without restarting the coordinator.
 Choose a maintained TLS library and an authenticated enrollment mechanism,
 add adversarial transport tests and a persistent revocation store, then
 implement a loopback-only transport pilot before exposing any network listener.
+
+
+## Session reconnect capacity
+
+Active sessions expire after the configured TTL. Recently used nonces are
+held for the same TTL to reject replay after explicit revocation, then
+pruned. The nonce history is bounded to 32× the active session limit;
+extreme reconnection bursts fail closed until earlier records expire.
+Authenticated transport MUST issue fresh, unpredictable CSPRNG nonces on
+every connection. These in-memory protections do not yet survive process
+restart and do not authenticate the device by themselves.
