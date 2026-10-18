@@ -1,6 +1,6 @@
 //! A local, read-only MCP JSON-RPC stdio transport.
 //! No device is reachable from this implementation.
-use crate::{bridge, routeros};
+use crate::{android, bridge, routeros};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 
@@ -32,12 +32,37 @@ pub fn handle(input: &Value) -> Option<Value> {
         "ping" => json!({}),
         "tools/list" => json!({"tools":[{"name":"relayforge_status",
             "description":"Read the status of this local RelayForge MCP adapter. No device operations are available.",
-            "inputSchema":{"type":"object","properties":{},"additionalProperties":false}}, bridge::tool(), routeros::tool()]}),
+            "inputSchema":{"type":"object","properties":{},"additionalProperties":false}}, bridge::tool(), routeros::tool(), android::list_tool(), android::diagnostic_tool()]}),
         "tools/call" => {
             let name = input.pointer("/params/name").and_then(Value::as_str);
             match name {
                 Some("relayforge_status") => {
                     json!({"content":[{"type":"text","text":"RelayForge diagnostic bridge ready."}],"isError":false})
+                }
+                Some("relayforge_android_devices") => {
+                    let args = input
+                        .pointer("/params/arguments")
+                        .unwrap_or(&json!({}))
+                        .clone();
+                    match android::list(&args) {
+                        Ok(value) => {
+                            json!({"content":[{"type":"text","text":value}],"isError":false})
+                        }
+                        Err(message) => {
+                            json!({"content":[{"type":"text","text":message}],"isError":true})
+                        }
+                    }
+                }
+                Some("relayforge_android_diagnostic") => {
+                    let args = input.pointer("/params/arguments").unwrap_or(&Value::Null);
+                    match android::diagnostic(args) {
+                        Ok(value) => {
+                            json!({"content":[{"type":"text","text":value}],"isError":false})
+                        }
+                        Err(message) => {
+                            json!({"content":[{"type":"text","text":message}],"isError":true})
+                        }
+                    }
                 }
                 Some("relayforge_routeros_diagnostic") => {
                     let args = input.pointer("/params/arguments").unwrap_or(&Value::Null);
@@ -125,7 +150,7 @@ mod tests {
         .unwrap();
         assert_eq!(init["result"]["serverInfo"]["name"], "relayforge");
         let list = handle(&json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 3);
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 5);
     }
     #[test]
     fn no_remote_execution_or_unknown_tool() {

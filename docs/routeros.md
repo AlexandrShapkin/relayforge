@@ -13,9 +13,17 @@ SSH identity must be granted the minimum necessary read-only RouterOS rights.
 The tool reports a failure when the router is unavailable; it does not try
 alternative hosts, ports or credentials.
 
-Note: initial reachability test from ThinkPad to its existing SSH alias
-failed with connection reset. This adapter is implemented and tested for
-argument validation, but live RouterOS diagnostic success is NOT yet verified.
+## Verified access (ThinkPad)
+
+Access and live MCP diagnostic operations `resource` and `identity` were
+verified on hAP ax S (RouterOS 7.19.5). Its SSH service on port 2224
+restricts source IPs to `192.168.88.115/32` and `192.168.88.116/32`.
+The ThinkPad also has Ethernet `192.168.88.113`, which was rejected
+before SSH key exchange. The ThinkPad's local `~/.ssh/config` entry for
+`mikrotik` now uses `BindInterface wlp2s0`, selecting its authorized
+Wi-Fi source address. This depends on Wi-Fi remaining connected and the
+router's source-IP allowlist remaining current. The router's configuration
+was not changed.
 
 Before enabling configuration changes, implement authenticated actor policy,
 backup, explicit confirmation and safe rollback. Do not expose this local
