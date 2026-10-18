@@ -19,18 +19,49 @@ fn battery(raw: &str) -> Option<(u8, bool)> {
     let mut level = None;
     let mut status = None;
     let mut powered = false;
+    let mut power_sources = [false; 3];
     for line in raw.lines() {
         let Some((k, v)) = line.split_once(':') else {
             continue;
         };
         match k.trim() {
-            "level" => level = v.trim().parse::<u8>().ok().filter(|x| *x <= 100),
-            "status" => status = v.trim().parse::<u8>().ok(),
-            "USB powered" | "AC powered" | "Wireless powered" => powered |= v.trim() == "true",
+            "level" => {
+                if level.is_some() {
+                    return None;
+                }
+                level = Some(v.trim().parse::<u8>().ok().filter(|x| *x <= 100)?);
+            }
+            "status" => {
+                if status.is_some() {
+                    return None;
+                }
+                status = Some(
+                    v.trim()
+                        .parse::<u8>()
+                        .ok()
+                        .filter(|x| (1..=5).contains(x))?,
+                );
+            }
+            key @ ("USB powered" | "AC powered" | "Wireless powered") => {
+                let index = match key {
+                    "USB powered" => 0,
+                    "AC powered" => 1,
+                    _ => 2,
+                };
+                if power_sources[index] {
+                    return None;
+                }
+                power_sources[index] = true;
+                powered |= match v.trim() {
+                    "true" => true,
+                    "false" => false,
+                    _ => return None,
+                };
+            }
             _ => {}
         }
     }
-    Some((level?, status.is_some_and(|s| s == 2 || s == 5) || powered))
+    Some((level?, matches!(status?, 2 | 5) || powered))
 }
 fn storage_mib(raw: &str) -> Option<u64> {
     if raw.len() > 16 * 1024 {
@@ -186,6 +217,66 @@ mod tests {
             }
         });
         assert_eq!(v["status"], "unverified");
+    }
+    #[test]
+    fn battery_accepts_valid_boundaries_and_charging_sources() {
+        for (raw, expected) in [
+            ("level: 0\nstatus: 3", (0, false)),
+            ("level: 100\nstatus: 5", (100, true)),
+            ("level: 83\nstatus: 2", (83, true)),
+            ("level: 83\nstatus: 1", (83, false)),
+            ("level: 83\nstatus: 4", (83, false)),
+            ("level: 83\nstatus: 3\nUSB powered: true", (83, true)),
+            ("level: 83\nstatus: 3\nAC powered: true", (83, true)),
+            ("level: 83\nstatus: 3\nWireless powered: true", (83, true)),
+            (
+                " level: 83 \nstatus: 3\nUSB powered: false\nAC powered: false\nWireless powered: false\nvoltage: 4200",
+                (83, false),
+            ),
+        ] {
+            assert_eq!(battery(raw), Some(expected), "{raw:?}");
+        }
+    }
+    #[test]
+    fn missing_invalid_and_multiple_battery_values_never_report_green() {
+        for raw in [
+            "",
+            "status: 2",
+            "level: 83",
+            "level: \nstatus: 2",
+            "level: invalid\nlevel: 83\nstatus: 2",
+            "level: 83\nlevel: invalid\nstatus: 2",
+            "level: 101\nstatus: 2",
+            "level: -1\nstatus: 2",
+            "level: 256\nstatus: 2",
+            "level: 83\nlevel: 83\nstatus: 2",
+            "level: 5\nlevel: 83\nstatus: 2",
+            "level: 83\nstatus: invalid",
+            "level: 83\nstatus: 0",
+            "level: 83\nstatus: 6",
+            "level: 83\nstatus: invalid\nstatus: 2",
+            "level: 83\nstatus: 2\nstatus: 2",
+            "level: 83\nstatus: 3\nUSB powered: invalid",
+            "level: 83\nstatus: 2\nAC powered: ",
+            "level: 83\nstatus: 2\nWireless powered: TRUE",
+            "level: 83\nstatus: 2\nUSB powered: false\nUSB powered: true",
+            "level: 83\nstatus: 2\nAC powered: false\nAC powered: false",
+            "level: 83\nstatus: 2\nWireless powered: true\nWireless powered: true",
+        ] {
+            assert_eq!(battery(raw), None, "{raw:?}");
+            let v = aggregate(&["TEST123".to_owned()], &|s, c| {
+                if c == "battery" {
+                    Ok(raw.to_owned())
+                } else {
+                    mock(s, c)
+                }
+            });
+            assert_eq!(v["status"], "unverified", "{raw:?}");
+            assert_eq!(v["devices"][0]["status"], "unverified", "{raw:?}");
+            assert!(v["devices"][0]["battery_percent"].is_null());
+            assert!(v["devices"][0]["charging"].is_null());
+            assert_eq!(v["devices"][0]["findings"], json!(["adb_read_incomplete"]));
+        }
     }
     #[test]
     fn rejects_malformed_data_and_untrusted_arguments() {
