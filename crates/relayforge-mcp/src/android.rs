@@ -54,7 +54,7 @@ fn parse_authorized_devices(output: &str) -> Vec<String> {
         .collect()
 }
 
-fn adb_devices() -> Result<Vec<String>, String> {
+pub(crate) fn adb_devices() -> Result<Vec<String>, String> {
     let output = Command::new("timeout")
         .args(["6s", "adb", "devices"])
         .stdin(Stdio::null())

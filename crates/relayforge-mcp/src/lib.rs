@@ -27,6 +27,7 @@ pub mod stdio;
 
 pub mod agent;
 pub mod android;
+pub mod android_health;
 pub mod bridge;
 pub mod changes;
 pub mod fleet;
