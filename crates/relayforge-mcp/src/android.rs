@@ -33,6 +33,7 @@ pub fn diagnostic_tool() -> Value {
 
 fn valid_serial(serial: &str) -> bool {
     !serial.is_empty()
+        && !serial.starts_with('-')
         && serial.len() <= 128
         && serial
             .bytes()
@@ -122,6 +123,20 @@ mod tests {
             parse_authorized_devices(output),
             ["serial-01", "192.168.1.3:4343"]
         );
+    }
+
+    #[test]
+    fn rejects_option_like_serials() {
+        for serial in ["-", "--help", "-s", "-device123"] {
+            assert!(!valid_serial(serial));
+            assert_eq!(
+                diagnostic(&json!({"serial":serial,"check":"model"})),
+                Err("invalid serial".into())
+            );
+            assert!(parse_authorized_devices(&format!("{serial} device\n")).is_empty());
+        }
+        assert!(valid_serial("device-123"));
+        assert!(valid_serial("192.168.1.3:4343"));
     }
 
     #[test]
