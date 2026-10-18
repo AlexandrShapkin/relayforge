@@ -46,6 +46,11 @@ After activation, inspect:
 `systemctl --user status relayforge-tunnel.service`,
 `journalctl --user -u relayforge-tunnel.service -n 30 --no-pager`
 (without printing bearer credentials),
-and the local `/readyz` URL written into `%t/relayforge-tunnel-health.url`.
+and the local `/readyz` URL written into `%t/relayforge-tunnel/health.url`. The systemd unit creates that private
+runtime directory and grants write access only there while preserving
+`ProtectHome=read-only`. The user service has `RuntimeDirectory=relayforge-tunnel`
+(mode 0700) and only that runtime directory is writable for the health
+URL file. Startup checks require `tunnel-client health --require-control-plane-poll`
+to succeed; `systemctl active` alone does not imply remote connectivity.
 Finally create or connect the **private** ChatGPT MCP plugin for this tunnel
 and verify a real `relayforge_agent_query` call.

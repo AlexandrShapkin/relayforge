@@ -8,7 +8,7 @@ StartLimitBurst=4
 
 [Service]
 Type=simple
-ExecStart=%h/.local/libexec/relayforge/tunnel-client run --profile relayforge-local --health.listen-addr 127.0.0.1:0 --health.url-file %t/relayforge-tunnel-health.url
+ExecStart=%h/.local/libexec/relayforge/tunnel-client run --profile relayforge-local --health.listen-addr 127.0.0.1:0 --health.url-file %t/relayforge-tunnel/health.url
 Restart=on-failure
 RestartSec=10
 TimeoutStopSec=15
@@ -16,6 +16,9 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=read-only
+RuntimeDirectory=relayforge-tunnel
+RuntimeDirectoryMode=0700
+ReadWritePaths=%t/relayforge-tunnel
 UMask=0077
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 

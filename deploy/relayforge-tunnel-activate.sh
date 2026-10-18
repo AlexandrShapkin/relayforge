@@ -45,6 +45,30 @@ fi
 
 systemctl --user daemon-reload
 systemctl --user enable --now relayforge-tunnel.service
-echo "Tunnel service state:"
+
+# Starting successfully only means systemd launched the binary. Require
+# evidence of authenticated control-plane polling before claiming readiness.
+HEALTH_FILE="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/relayforge-tunnel/health.url"
+ready=false
+for attempt in {1..30}; do
+    if "$CLIENT" health --url-file "$HEALTH_FILE" \
+        --require-control-plane-poll >/dev/null 2>&1; then
+        ready=true
+        break
+    fi
+    if ! systemctl --user is-active --quiet relayforge-tunnel.service; then
+        echo "Tunnel process stopped before its first successful poll." >&2
+        systemctl --user show relayforge-tunnel.service -p ActiveState -p SubState -p NRestarts
+        exit 3
+    fi
+    sleep 3
+done
+if [[ "$ready" != true ]]; then
+    echo "Tunnel is running, but a successful OpenAI control-plane poll was not confirmed." >&2
+    echo "Inspect the user service logs without printing runtime credentials." >&2
+    exit 4
+fi
+
+echo "Secure MCP Tunnel is healthy, ready and has completed a successful control-plane poll."
 systemctl --user show relayforge-tunnel.service -p ActiveState -p SubState -p NRestarts
-echo "Private tunnel setup requested. Verify readyz and ChatGPT plugin discovery before treating it as connected."
+echo "Complete private MCP plugin discovery in ChatGPT and verify an actual tool call."
