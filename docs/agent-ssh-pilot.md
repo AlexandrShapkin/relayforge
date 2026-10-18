@@ -14,10 +14,16 @@ Response: `{"ok":true,"data":{"hostname":"...",...}}`
 Request: `{"version":1,"operation":"service.status","unit":"ssh.service"}`
 Response: `{"ok":true,"data":{"Id":"ssh.service","ActiveState":"active",...}}`
 
+Additional fixed read-only operations:
+- `service.list`: up to 64 running/failed services with names and states.
+- `process.top`: up to 20 processes by resident RAM, with PID and process
+  name only. No argv, environment, secrets, shell commands or credentials.
+
 The agent validates both operation and service name independently from
-MCP. It permits only device status and selected fixed systemd properties.
+MCP. It permits only device status, service/process inventories and selected
+fixed systemd properties.
 Unsupported, malformed, oversized and mutating requests are denied.
-No arbitrary command execution, file writes or listener is enabled.
+No arbitrary command execution, file writes or listener is enabled. These operations were deployed and exercised on `ru0`, `ru1`, and `srv0` with a read-only MCP smoke test on `ru1` and `srv0`.
 
 **Trust boundary:** SSH authentication identifies the Unix account, not
 the requesting MCP actor. The local stdio MCP process must only be

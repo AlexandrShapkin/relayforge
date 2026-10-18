@@ -43,6 +43,80 @@ fn device_status() -> io::Result<Value> {
     }))
 }
 
+/// A bounded inventory of running/failed services; never reads ExecStart or
+/// environment values from units.
+fn service_inventory() -> io::Result<Value> {
+    let output = Command::new("systemctl")
+        .args([
+            "list-units",
+            "--type=service",
+            "--state=running,failed",
+            "--plain",
+            "--no-legend",
+            "--no-pager",
+        ])
+        .stdin(Stdio::null())
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other("systemctl unavailable"));
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let units: Vec<Value> = text
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim().trim_start_matches('●').trim();
+            let mut columns = line.split_whitespace();
+            let name = columns.next()?;
+            if !valid_unit(name) {
+                return None;
+            }
+            Some(json!({
+                "unit": name,
+                "load": columns.next()?,
+                "active": columns.next()?,
+                "sub": columns.next()?,
+            }))
+        })
+        .take(64)
+        .collect();
+    Ok(json!({"units":units, "limit":64}))
+}
+
+/// /proc exposes process statistics without command lines or environment.
+/// Return only names, PIDs and resident memory (never secrets from argv).
+fn top_processes() -> io::Result<Value> {
+    let mut entries = Vec::new();
+    for item in fs::read_dir("/proc")?.take(2048) {
+        let Ok(item) = item else { continue };
+        let Ok(pid) = item.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let path = format!("/proc/{pid}/status");
+        let Ok(status) = read_short(&path, 4096) else {
+            continue;
+        };
+        let name = status
+            .lines()
+            .find_map(|l| l.strip_prefix("Name:"))
+            .unwrap_or("unknown")
+            .trim();
+        let rss = status
+            .lines()
+            .find_map(|l| l.strip_prefix("VmRSS:"))
+            .and_then(|s| s.split_whitespace().next())
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+        entries.push((rss, pid, name.to_owned()));
+    }
+    entries.sort_by_key(|(rss, _, _)| std::cmp::Reverse(*rss));
+    let processes: Vec<Value> = entries
+        .into_iter()
+        .take(20)
+        .map(|(rss_kb, pid, name)| json!({"pid":pid,"name":name,"rss_kb":rss_kb}))
+        .collect();
+    Ok(json!({"processes":processes,"limit":20}))
+}
+
 pub fn valid_unit(value: &str) -> bool {
     value.len() >= 9
         && value.len() <= 100
@@ -102,6 +176,8 @@ pub fn handle(request: &Value) -> Value {
     }
     let result = match obj.get("operation").and_then(Value::as_str) {
         Some("device.status") if obj.len() == 2 => device_status(),
+        Some("service.list") if obj.len() == 2 => service_inventory(),
+        Some("process.top") if obj.len() == 2 => top_processes(),
         Some("service.status") if obj.len() == 3 => match obj.get("unit").and_then(Value::as_str) {
             Some(unit) if valid_unit(unit) => service_status(unit),
             _ => return err("invalid service unit"),
@@ -167,6 +243,20 @@ mod tests {
             serde_json::from_slice::<Value>(&output).unwrap()["error"],
             "invalid JSON"
         );
+    }
+
+    #[test]
+    fn inventories_return_bounded_read_only_data() {
+        let processes = handle(&json!({"version":1,"operation":"process.top"}));
+        assert_eq!(processes["ok"], true);
+        assert!(processes["data"]["processes"].as_array().unwrap().len() <= 20);
+        // no argv/env fields exposed
+        for proc in processes["data"]["processes"].as_array().unwrap() {
+            assert_eq!(proc.as_object().unwrap().len(), 3);
+        }
+        let services = handle(&json!({"version":1,"operation":"service.list"}));
+        assert_eq!(services["ok"], true);
+        assert!(services["data"]["units"].as_array().unwrap().len() <= 64);
     }
 
     #[test]
