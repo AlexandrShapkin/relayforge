@@ -128,6 +128,37 @@ fn metadata(section: &str, key: &str) -> Option<String> {
     })
 }
 
+fn service_source_unrestricted(address: &str) -> Result<bool, String> {
+    let invalid = || "RouterOS management service scope unknown".to_owned();
+    let address = if let Some(quoted) = address.strip_prefix('"') {
+        quoted.strip_suffix('"').ok_or_else(invalid)?
+    } else {
+        address
+    };
+    if address.is_empty() {
+        return Ok(true);
+    }
+    let mut unrestricted = false;
+    for entry in address.split(',') {
+        let (ip, prefix) = match entry.split_once('/') {
+            Some((ip, prefix)) => (ip, Some(prefix)),
+            None => (entry, None),
+        };
+        let ip = ip.parse::<std::net::IpAddr>().map_err(|_| invalid())?;
+        if let Some(prefix) = prefix {
+            if prefix.is_empty() || !prefix.bytes().all(|c| c.is_ascii_digit()) {
+                return Err(invalid());
+            }
+            let prefix = prefix.parse::<u8>().map_err(|_| invalid())?;
+            if prefix > if ip.is_ipv4() { 32 } else { 128 } {
+                return Err(invalid());
+            }
+            unrestricted |= prefix == 0;
+        }
+    }
+    Ok(unrestricted)
+}
+
 fn parse(raw: &str) -> Result<Value, String> {
     let output = sections(raw)?;
     let board = metadata(&output[0], "board-name").ok_or("RouterOS board unknown")?;
@@ -188,15 +219,22 @@ fn parse(raw: &str) -> Result<Value, String> {
         {
             continue;
         }
-        // Dynamic RouterOS service connection rows carry D c flags,
-        // local=/remote= instead of the configured address= restriction.
-        if disabled(line, "name=") || flags(line, "name=").iter().any(|flag| flag.contains('D')) {
+        // Connection rows describe sessions, not configured source restrictions.
+        if disabled(line, "name=")
+            || flags(line, "name=")
+                .iter()
+                .any(|flag| flag.contains('D') || flag.contains('c'))
+            || property(line, "local").is_some()
+            || property(line, "remote").is_some()
+        {
             continue;
         }
-        match property(line, "address") {
-            Some("") => unscoped.push(name),
-            Some(_) => scoped.push(name),
-            None => return Err("RouterOS management service scope unknown".into()),
+        let address =
+            property(line, "address").ok_or("RouterOS management service scope unknown")?;
+        if service_source_unrestricted(address)? {
+            unscoped.push(name);
+        } else {
+            scoped.push(name);
         }
     }
     if unscoped.len() + scoped.len() > 8 {
@@ -370,6 +408,92 @@ mod tests {
             parsed["management_services"]["source_unrestricted"],
             json!([])
         );
+    }
+
+    #[test]
+    fn service_allowlists_distinguish_hosts_subnets_and_unrestricted_ranges() {
+        for (address, unrestricted) in [
+            ("", true),
+            ("\"\"", true),
+            ("0.0.0.0/0", true),
+            ("::/0", true),
+            ("192.0.2.0/24,::/0", true),
+            ("0.0.0.0/0,2001:db8::/32", true),
+            ("\"192.0.2.0/24,::/0\"", true),
+            ("192.0.2.15", false),
+            ("2001:db8::1", false),
+            ("192.0.2.15/32,2001:db8::1/128", false),
+            ("\"192.0.2.0/24,2001:db8::/32\"", false),
+            ("0.0.0.0/32,::/128", false),
+        ] {
+            let raw = fixture().replace(
+                "2 name=ssh port=2224 address=192.0.2.15/32",
+                &format!("2 name=ssh port=2224 address={address}"),
+            );
+            let value = parse(&raw).unwrap();
+            let services = &value["management_services"];
+            assert_eq!(
+                services["source_unrestricted"],
+                if unrestricted {
+                    json!(["ftp", "ssh", "winbox"])
+                } else {
+                    json!(["ftp", "winbox"])
+                },
+                "{address}"
+            );
+            assert_eq!(
+                services["source_restricted"],
+                if unrestricted {
+                    json!([])
+                } else {
+                    json!(["ssh"])
+                },
+                "{address}"
+            );
+            assert_eq!(
+                services["scope_note"],
+                "Service-level address restrictions only; firewall/WAN reachability not evaluated"
+            );
+            assert_eq!(value["status"], "attention");
+        }
+    }
+
+    #[test]
+    fn malformed_or_missing_service_allowlists_fail_closed() {
+        for address in [
+            "bad",
+            "192.0.2.1/33",
+            "::/129",
+            "192.0.2.1/",
+            "192.0.2.1/-1",
+            "192.0.2.1,",
+            "0.0.0.0/0,bad",
+            "\"192.0.2.1",
+            "192.0.2.1\"",
+        ] {
+            assert!(
+                parse(&fixture().replace("address=192.0.2.15/32", &format!("address={address}")))
+                    .is_err(),
+                "{address}"
+            );
+        }
+        assert!(parse(&fixture().replace(" address=192.0.2.15/32", "")).is_err());
+    }
+
+    #[test]
+    fn connections_and_disabled_services_do_not_affect_configured_scope() {
+        let baseline = parse(&fixture()).unwrap();
+        for row in [
+            "5 D c name=ssh local=192.0.2.1 remote=192.0.2.15:50000",
+            "5 Dc name=ssh address=0.0.0.0/0",
+            "5 c name=ssh address=",
+            "5 name=ssh local=192.0.2.1 remote=192.0.2.15:50000",
+            "5 X name=ssh address=0.0.0.0/0",
+            "5 X name=ssh",
+        ] {
+            let raw = format!("{}{row}\n", fixture());
+            assert_eq!(parse(&raw).unwrap(), baseline, "{row}");
+        }
     }
 
     #[test]

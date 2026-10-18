@@ -59,9 +59,14 @@ firewall rules, network credentials or complete export are returned.
 The summary distinguishes operational faults (inactive PPPoE, missing
 main-table active default route or inactive DHCP server) from
 management-service configuration advisories. RouterOS supports an
-address= allowlist on individual IP services. A blank address= for an
-enabled FTP, API or WinBox service is reported as source_unrestricted
-with status attention. **This does not prove internet exposure:**
+address= allowlist on individual IP services. A blank address= (including
+`address=""`) or an allowlist containing an IPv4 or IPv6 `/0` entry for an
+enabled management service is reported as source_unrestricted with status
+attention. Valid host addresses and narrower subnets are source_restricted;
+missing or malformed restrictions fail the snapshot as unknown. Dynamic
+connection rows (dynamic/connection flags or local=/remote= endpoints) and
+disabled services do not contribute to the configured service scope.
+**This does not prove internet exposure:**
 the RouterOS input firewall may independently block all external
 connections. Do not change service access restrictions remotely without
 a verified alternate management path, a local rollback mechanism and a
