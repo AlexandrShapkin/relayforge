@@ -21,10 +21,10 @@ const DONE_RETENTION_SECONDS: u64 = 7 * 86400;
 
 pub fn prepare_tool() -> Value {
     json!({"name":"relayforge_change_prepare",
-        "description":"Prepare a tightly scoped change requiring separate interactive ThinkPad terminal approval. Does not perform it. Only scratch file creation on ru0/ru1/srv0 or inert probe restart on ru0.",
+         "description":"Prepare a tightly scoped change requiring local terminal approval. No action is performed until approval. Allowed: scratch create, inert probe restart, or a noncritical ru1 health snapshot job.",
         "inputSchema":{"type":"object","properties":{
             "host":{"type":"string","enum":["ru0","ru1","srv0"]},
-            "action":{"type":"string","enum":["sandbox.create","probe.restart"]},
+            "action":{"type":"string","enum":["sandbox.create","probe.restart","monitor.run"]},
             "name":{"type":"string","maxLength":64,"description":"Only for sandbox.create: flat .txt/.md/.json filename"},
             "content":{"type":"string","maxLength":2048,"description":"Only for sandbox.create: up to 2048 UTF-8 bytes"}
         },"required":["host","action"],"additionalProperties":false}})
@@ -114,6 +114,9 @@ fn parse_action(args: &Value) -> Result<Value, String> {
         }
         Some("probe.restart") if host == "ru0" && obj.len() == 2 => {
             Ok(json!({"host":"ru0","action":"probe.restart"}))
+        }
+        Some("monitor.run") if host == "ru1" && obj.len() == 2 => {
+            Ok(json!({"host":"ru1","action":"monitor.run"}))
         }
         _ => Err("operation denied".into()),
     }
@@ -351,6 +354,15 @@ impl Store {
         let host = prop["host"].as_str().ok_or("invalid record")?;
         println!("RelayForge approval ID: {id}");
         println!("Target host: {host} | Exact action: {action}");
+        match action {
+            "monitor.run" => {
+                println!("Exact user service: assistant-hub-monitor.service (start once on ru1)")
+            }
+            "probe.restart" => {
+                println!("Exact user service: relayforge-probe.service (restart on ru0)")
+            }
+            _ => {}
+        }
         if action == "sandbox.create" {
             println!(
                 "Scratch filename: {}",
@@ -487,6 +499,7 @@ pub fn commit(args: &Value) -> Result<String, String> {
                 "name":proposal["name"],"content":proposal["content"]
             })),
             Some("probe.restart") => crate::agent::restart_probe(&json!({"host":proposal["host"]})),
+            Some("monitor.run") => crate::agent::trigger_ru1_monitor(),
             _ => Err("operation denied".into()),
         })
         .map(|value| value.to_string())
@@ -547,6 +560,9 @@ mod tests {
             json!({"host":"ru0","action":"sandbox.create","name":"../evil.md","content":"x"}),
             json!({"host":"ru0","action":"sandbox.create","name":"ok.sh","content":"x"}),
             json!({"host":"ru1","action":"probe.restart"}),
+            json!({"host":"ru0","action":"monitor.run"}),
+            json!({"host":"srv0","action":"monitor.run"}),
+            json!({"host":"ru1","action":"monitor.run","unit":"remote-desktop.service"}),
             json!({"host":"srv0","action":"service.restart","unit":"sshd.service"}),
             json!({"host":"ru0","action":"probe.restart","unit":"ssh.service"}),
             json!({"host":"ru0","action":"sandbox.create","name":"x.txt","content":"x","actor":"admin"}),
@@ -554,6 +570,27 @@ mod tests {
             assert!(parse_action(&bad).is_err());
         }
     }
+    #[test]
+    fn ru1_monitor_request_requires_approval_and_is_host_bound() {
+        assert_eq!(
+            parse_action(&json!({"host":"ru1","action":"monitor.run"})).unwrap(),
+            json!({"host":"ru1","action":"monitor.run"})
+        );
+        let s = store();
+        let request = s
+            .prepare(&json!({"host":"ru1","action":"monitor.run"}))
+            .unwrap();
+        let id = request["approval_id"].as_str().unwrap();
+        let mut executions = 0;
+        assert!(s
+            .commit_with(id, |_| {
+                executions += 1;
+                Ok("unexpected".into())
+            })
+            .is_err());
+        assert_eq!(executions, 0);
+    }
+
     #[test]
     fn no_execution_without_operator_approval() {
         let s = store();
