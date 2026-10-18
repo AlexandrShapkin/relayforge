@@ -9,3 +9,6 @@ mod tests {
         assert!(!super::enabled());
     }
 }
+
+/// Narrow, read-only stdio agent operations over an authenticated SSH account.
+pub mod stdio;
