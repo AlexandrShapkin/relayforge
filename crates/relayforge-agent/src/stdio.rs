@@ -168,6 +168,22 @@ fn service_status(unit: &str) -> io::Result<Value> {
     Ok(Value::Object(values))
 }
 
+// Deliberately limited to a dedicated inert one-shot test unit. No
+// caller-supplied unit, shell command, root service or arbitrary restart.
+fn restart_probe() -> io::Result<Value> {
+    const UNIT: &str = "relayforge-probe.service";
+    let status = Command::new("systemctl")
+        .args(["--user", "restart", "--", UNIT])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if !status.success() {
+        return Err(io::Error::other("probe service restart denied"));
+    }
+    Ok(json!({"restarted":true,"unit":UNIT}))
+}
+
 pub fn handle(request: &Value) -> Value {
     let Some(obj) = request.as_object() else {
         return err("invalid request");
@@ -178,6 +194,7 @@ pub fn handle(request: &Value) -> Value {
     let result = match obj.get("operation").and_then(Value::as_str) {
         Some("device.status") if obj.len() == 2 => device_status(),
         Some("service.list") if obj.len() == 2 => service_inventory(),
+        Some("probe.restart") if obj.len() == 2 => restart_probe(),
         Some("process.top") if obj.len() == 2 => top_processes(),
         Some("file.list") if obj.len() == 2 => files::list_files(),
         Some("file.read") if obj.len() == 3 => match obj.get("path").and_then(Value::as_str) {
@@ -235,6 +252,7 @@ mod tests {
         for req in [
             json!({"version":1,"operation":"process.execute","command":"id"}),
             json!({"version":1,"operation":"service.restart","unit":"ssh.service"}),
+            json!({"version":1,"operation":"probe.restart","unit":"ssh.service"}),
             json!({"version":1,"operation":"device.status","actor_id":"admin"}),
             json!({"version":2,"operation":"device.status"}),
             json!({"version":1,"operation":"service.status","unit":"ssh.service;id"}),

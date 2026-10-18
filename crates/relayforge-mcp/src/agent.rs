@@ -19,6 +19,25 @@ pub fn tool() -> Value {
         },"required":["host","operation"],"additionalProperties":false}})
 }
 
+pub fn probe_tool() -> Value {
+    json!({"name":"relayforge_agent_probe_restart",
+        "description":"Restart only the inert RelayForge pilot probe systemd user service on ru0. This cannot restart production services.",
+        "inputSchema":{"type":"object","properties":{
+            "host":{"type":"string","enum":["ru0"]}
+        },"required":["host"],"additionalProperties":false}})
+}
+
+pub fn restart_probe(args: &Value) -> Result<String, String> {
+    let obj = args.as_object().ok_or("arguments must be an object")?;
+    if obj.len() != 1 || obj.get("host").and_then(Value::as_str) != Some("ru0") {
+        return Err("probe operation denied".into());
+    }
+    invoke_agent(
+        "ru0",
+        json!({"version":PROTOCOL_VERSION,"operation":"probe.restart"}),
+    )
+}
+
 pub fn file_tool() -> Value {
     json!({"name":"relayforge_agent_file",
         "description":"Access fixed public OS metadata or create/list/read tiny files within a dedicated private RelayForge scratch directory. No arbitrary paths, deletes, overwrites, or service files.",
@@ -213,6 +232,12 @@ fn invoke_agent(host: &str, message: Value) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn probe_restart_is_only_on_dedicated_test_unit_and_host() {
+        assert!(restart_probe(&json!({"host":"srv0"})).is_err());
+        assert!(restart_probe(&json!({"host":"ru0","unit":"ssh.service"})).is_err());
+        assert!(restart_probe(&json!({"host":"ru0","action":"stop"})).is_err());
+    }
     #[test]
     fn files_require_sandboxed_paths() {
         for args in [
