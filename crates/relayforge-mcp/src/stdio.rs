@@ -45,16 +45,42 @@ pub fn handle(input: &Value) -> Option<Value> {
     Some(json!({"jsonrpc":"2.0","id":id,"result":result}))
 }
 
-pub fn serve(reader: impl BufRead, mut writer: impl Write) -> io::Result<()> {
-    for line in reader.lines() {
-        let line = line?;
-        if line.len() > MAX_LINE_BYTES {
+pub fn serve(mut reader: impl BufRead, mut writer: impl Write) -> io::Result<()> {
+    loop {
+        // Bound memory use before allocating the full line. Drain oversize input
+        // until newline so subsequent requests remain correctly framed.
+        let mut line = Vec::new();
+        let mut oversized = false;
+        loop {
+            let chunk = reader.fill_buf()?;
+            if chunk.is_empty() {
+                if line.is_empty() && !oversized {
+                    return Ok(());
+                }
+                break;
+            }
+            let count = chunk
+                .iter()
+                .position(|b| *b == b'\n')
+                .map_or(chunk.len(), |p| p + 1);
+            if !oversized {
+                let remaining = MAX_LINE_BYTES.saturating_add(1).saturating_sub(line.len());
+                line.extend_from_slice(&chunk[..count.min(remaining)]);
+                oversized = line.len() > MAX_LINE_BYTES;
+            }
+            let finished = chunk[count - 1] == b'\n';
+            reader.consume(count);
+            if finished {
+                break;
+            }
+        }
+        if oversized {
             let response = error(Value::Null, -32600, "Request too large");
             writeln!(writer, "{response}")?;
             writer.flush()?;
             continue;
         }
-        let response = match serde_json::from_str::<Value>(&line) {
+        let response = match serde_json::from_slice::<Value>(&line) {
             Ok(input) => handle(&input),
             Err(_) => Some(error(Value::Null, -32700, "Parse error")),
         };
@@ -63,7 +89,6 @@ pub fn serve(reader: impl BufRead, mut writer: impl Write) -> io::Result<()> {
             writer.flush()?;
         }
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -85,6 +110,22 @@ mod tests {
         .unwrap();
         assert_eq!(result["error"]["code"], -32602);
     }
+    #[test]
+    fn oversized_request_is_drained_without_losing_next_message() {
+        let mut input = vec![b'x'; MAX_LINE_BYTES + 512];
+        input.extend_from_slice(b"\n{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"ping\"}\n");
+        let mut output = Vec::new();
+        serve(input.as_slice(), &mut output).unwrap();
+        let results: Vec<Value> = output
+            .split(|b| *b == b'\n')
+            .filter(|s| !s.is_empty())
+            .map(|s| serde_json::from_slice(s).unwrap())
+            .collect();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["error"]["message"], "Request too large");
+        assert_eq!(results[1]["id"], 4);
+    }
+
     #[test]
     fn notifications_are_silent_and_malformed_is_rejected() {
         assert!(handle(&json!({"jsonrpc":"2.0","method":"notifications/initialized"})).is_none());
