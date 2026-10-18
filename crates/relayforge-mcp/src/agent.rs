@@ -38,6 +38,47 @@ pub fn restart_probe(args: &Value) -> Result<String, String> {
     )
 }
 
+pub fn file_inspect_tool() -> Value {
+    json!({"name":"relayforge_file_inspect",
+        "description":"Read a fixed public OS metadata file or list/read a tiny RelayForge scratch file on an allowlisted host. Strictly read-only; no create, overwrite or delete.",
+        "inputSchema":{"type":"object","properties":{
+            "host":{"type":"string","enum":HOSTS},
+            "action":{"type":"string","enum":["list","read"]},
+            "path":{"type":"string","maxLength":64,"description":"Only for read: allowed OS metadata path or flat scratch filename"}
+        },"required":["host","action"],"additionalProperties":false}})
+}
+
+pub fn file_inspect(args: &Value) -> Result<String, String> {
+    let obj = args.as_object().ok_or("arguments must be an object")?;
+    let host = obj
+        .get("host")
+        .and_then(Value::as_str)
+        .ok_or("missing host")?;
+    if !HOSTS.contains(&host) {
+        return Err("host denied".into());
+    }
+    match obj.get("action").and_then(Value::as_str) {
+        Some("list") if obj.len() == 2 => invoke_agent(
+            host,
+            json!({"version":PROTOCOL_VERSION,"operation":"file.list"}),
+        ),
+        Some("read") if obj.len() == 3 => {
+            let path = obj
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or("missing path")?;
+            if !valid_read_path(path) {
+                return Err("file denied".into());
+            }
+            invoke_agent(
+                host,
+                json!({"version":PROTOCOL_VERSION,"operation":"file.read","path":path}),
+            )
+        }
+        _ => Err("read-only file action denied".into()),
+    }
+}
+
 pub fn file_tool() -> Value {
     json!({"name":"relayforge_agent_file",
         "description":"Access fixed public OS metadata or create/list/read tiny files within a dedicated private RelayForge scratch directory. No arbitrary paths, deletes, overwrites, or service files.",
@@ -238,6 +279,26 @@ mod tests {
         assert!(restart_probe(&json!({"host":"ru0","unit":"ssh.service"})).is_err());
         assert!(restart_probe(&json!({"host":"ru0","action":"stop"})).is_err());
     }
+    #[test]
+    fn remote_file_inspection_never_accepts_mutations() {
+        for req in [
+            json!({"host":"ru0","action":"create","name":"x.txt","content":"x"}),
+            json!({"host":"ru0","action":"delete","path":"test.txt"}),
+            json!({"host":"ru0","action":"read","path":"/etc/shadow"}),
+            json!({"host":"ru0","action":"read","path":"../../.ssh/id_rsa"}),
+            json!({"host":"ru0","action":"read","path":"valid.txt","actor":"root"}),
+            json!({"host":"example.com","action":"list"}),
+            json!({"host":"ru0","action":"list","path":"x.txt"}),
+        ] {
+            assert!(file_inspect(&req).is_err());
+        }
+        // Successful read/list requires a running SSH agent; parsing is
+        // covered here without initiating unauthorized service changes.
+        assert!(valid_read_path("/etc/os-release"));
+        assert!(valid_read_path("safe-note.md"));
+        assert!(!valid_read_path("/etc/ssh/sshd_config"));
+    }
+
     #[test]
     fn files_require_sandboxed_paths() {
         for args in [

@@ -28,6 +28,7 @@ pub mod stdio;
 pub mod agent;
 pub mod android;
 pub mod bridge;
+pub mod changes;
 pub mod http;
 pub mod routeros;
 pub mod ssh;

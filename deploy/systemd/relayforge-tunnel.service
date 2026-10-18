@@ -18,7 +18,7 @@ ProtectSystem=full
 ProtectHome=read-only
 RuntimeDirectory=relayforge-tunnel
 RuntimeDirectoryMode=0700
-ReadWritePaths=%t/relayforge-tunnel
+ReadWritePaths=%t/relayforge-tunnel %h/.local/state/relayforge
 UMask=0077
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 
