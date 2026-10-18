@@ -25,6 +25,7 @@ mod tests {
 
 pub mod stdio;
 
+pub mod agent;
 pub mod android;
 pub mod bridge;
 pub mod routeros;
