@@ -34,3 +34,50 @@ port 2224 remains LAN-restricted.
 Before enabling configuration changes, implement authenticated actor policy,
 backup, explicit confirmation and safe rollback. Do not expose this local
 MCP process publicly.
+
+## Extended live diagnostics and posture snapshot
+
+The read-only RouterOS diagnostic tool additionally accepts:
+dhcp_servers, bridge_ports, firewall_filter_count, firewall_nat_count,
+wifi_clients_count, and dhcp_leases_count. All of these map to constant
+RouterOS print commands; the MCP caller cannot choose a command or host.
+
+New MCP tool: relayforge_routeros_health (no arguments).
+
+It sends one fixed, delimiter-marked, read-only RouterOS script over
+the existing strict-key SSH connection, falling back from Ethernet to
+Wi-Fi only when required. The fixed script reads resource, interfaces,
+routes, DHCP server status, wireless radios, firewall/NAT rule counts,
+wireless association count, lease count and IP management service
+settings. No configuration is changed and no new listener or privileged
+SSH identity is required.
+
+Results are filtered before leaving the ThinkPad: no MAC addresses,
+DHCP client names/IDs, IP addresses, SSIDs, wireless secrets, full
+firewall rules, network credentials or complete export are returned.
+
+The summary distinguishes operational faults (inactive PPPoE, missing
+main-table active default route or inactive DHCP server) from
+management-service configuration advisories. RouterOS supports an
+address= allowlist on individual IP services. A blank address= for an
+enabled FTP, API or WinBox service is reported as source_unrestricted
+with status attention. **This does not prove internet exposure:**
+the RouterOS input firewall may independently block all external
+connections. Do not change service access restrictions remotely without
+a verified alternate management path, a local rollback mechanism and a
+separate operator-approved change.
+
+The diagnostic provides a snapshot, not a monitoring SLA. PPPoE may be
+running while an upstream network is unusable; configured NAT/filter
+rule counts do not validate effective firewall policy. Disabled
+interfaces may be intentionally unused.
+
+### First verified result, RouterOS 7.19.5 hAP ax S
+
+PPPoE running, main default route active, two Wi-Fi radios running,
+three associated Wi-Fi clients, five DHCP leases, one DHCP server,
+11 filter rules and eight NAT rules. The FTP, WinBox and API services
+have no service-level source restriction; SSH has an allowlist. This is
+a configuration advisory, not an assertion of WAN reachability.
+
+Configuration changes remain disabled at this stage.

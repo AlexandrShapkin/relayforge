@@ -32,4 +32,5 @@ pub mod changes;
 pub mod fleet;
 pub mod http;
 pub mod routeros;
+pub mod routeros_health;
 pub mod ssh;
