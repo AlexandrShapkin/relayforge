@@ -10,3 +10,5 @@ build/
 *.sqlite*
 *.pem
 *.key
+
+/target/

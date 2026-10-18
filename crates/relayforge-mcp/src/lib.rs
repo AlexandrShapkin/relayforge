@@ -1,0 +1,24 @@
+//! MCP adapter boundary. A future standards-compliant MCP server must authenticate
+//! each caller, map its identity to grants, and route through coordinator policy.
+//! ClientKind is descriptive only, never proof of authorization.
+use relayforge_policy::Policy;
+use relayforge_protocol::Request;
+pub fn authorize(policy: &Policy, request: &Request) -> bool {
+    policy.allows(request)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use relayforge_protocol::{Capability, PROTOCOL_VERSION};
+    #[test]
+    fn default_deny_for_any_client() {
+        let request = Request {
+            version: PROTOCOL_VERSION,
+            request_id: "id".into(),
+            actor_id: "codex".into(),
+            device_id: "laptop".into(),
+            capability: Capability::ProcessExecute,
+        };
+        assert!(!authorize(&Policy::default(), &request));
+    }
+}
