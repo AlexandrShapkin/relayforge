@@ -1,8 +1,8 @@
 # MCP clients
 
 RelayForge exposes a standard JSON-RPC MCP adapter. The initial implementation
-supports **local stdio** only and advertises a single read-only diagnostic tool,
-`relayforge_status`. No devices can be controlled by this version.
+supports **local stdio** only and advertises read-only diagnostic tools,
+`relayforge_status`. The optional SSH pilot can query a small allowlist of remote devices using existing SSH credentials; no mutating operations are available. See `docs/ssh-pilot.md`.
 
 ## Codex and other local stdio clients
 

@@ -1,5 +1,6 @@
 //! A local, read-only MCP JSON-RPC stdio transport.
 //! No device is reachable from this implementation.
+use crate::bridge;
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 
@@ -31,14 +32,26 @@ pub fn handle(input: &Value) -> Option<Value> {
         "ping" => json!({}),
         "tools/list" => json!({"tools":[{"name":"relayforge_status",
             "description":"Read the status of this local RelayForge MCP adapter. No device operations are available.",
-            "inputSchema":{"type":"object","properties":{},"additionalProperties":false}}]}),
+            "inputSchema":{"type":"object","properties":{},"additionalProperties":false}}, bridge::tool()]}),
         "tools/call" => {
             let name = input.pointer("/params/name").and_then(Value::as_str);
-            if name != Some("relayforge_status") {
-                return Some(error(id, -32602, "Unknown tool"));
+            match name {
+                Some("relayforge_status") => {
+                    json!({"content":[{"type":"text","text":"RelayForge diagnostic bridge ready."}],"isError":false})
+                }
+                Some("relayforge_diagnostic") => {
+                    let args = input.pointer("/params/arguments").unwrap_or(&Value::Null);
+                    match bridge::diagnostic(args) {
+                        Ok(value) => {
+                            json!({"content":[{"type":"text","text":value}],"isError":false})
+                        }
+                        Err(message) => {
+                            json!({"content":[{"type":"text","text":message}],"isError":true})
+                        }
+                    }
+                }
+                _ => return Some(error(id, -32602, "Unknown tool")),
             }
-            json!({"content":[{"type":"text","text":"RelayForge local adapter ready; remote device access disabled."}],
-                "isError":false})
         }
         _ => return Some(error(id, -32601, "Method not found")),
     };
@@ -101,7 +114,7 @@ mod tests {
         .unwrap();
         assert_eq!(init["result"]["serverInfo"]["name"], "relayforge");
         let list = handle(&json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 2);
     }
     #[test]
     fn no_remote_execution_or_unknown_tool() {

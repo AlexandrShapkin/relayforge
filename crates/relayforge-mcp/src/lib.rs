@@ -24,3 +24,5 @@ mod tests {
 }
 
 pub mod stdio;
+
+pub mod bridge;
