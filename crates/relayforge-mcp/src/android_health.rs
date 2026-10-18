@@ -36,9 +36,26 @@ fn storage_mib(raw: &str) -> Option<u64> {
     if raw.len() > 16 * 1024 {
         return None;
     }
-    raw.lines().rev().find_map(|line| {
+    let mut lines = raw.lines().filter(|line| !line.trim().is_empty());
+    let header: Vec<_> = lines.next()?.split_ascii_whitespace().collect();
+    // Only these df layouts establish that Available is measured in KiB.
+    if !matches!(
+        header.as_slice(),
+        [
+            "Filesystem",
+            "1K-blocks" | "1024-blocks",
+            "Used",
+            "Available" | "Avail",
+            "Use%",
+            "Mounted",
+            "on"
+        ]
+    ) {
+        return None;
+    }
+    lines.find_map(|line| {
         let columns: Vec<_> = line.split_ascii_whitespace().collect();
-        if columns.len() < 6 || columns.last() != Some(&"/data") {
+        if columns.len() != 6 || columns.last() != Some(&"/data") {
             return None;
         }
         columns[3].parse::<u64>().ok().map(|n| n / 1024)
@@ -186,6 +203,70 @@ mod tests {
             }
         });
         assert_eq!(v["status"], "unverified");
+    }
+    #[test]
+    fn storage_requires_known_units_and_exact_data_mount() {
+        for units in ["1K-blocks", "1024-blocks"] {
+            let raw = format!(
+                "\nFilesystem {units} Used Available Use% Mounted on\r\n\
+                 /dev/other 9000000 1 8000000 1% /data/local\r\n\
+                 /dev/data\t9000000\t1\t1048577\t1%\t/data\r\n"
+            );
+            assert_eq!(storage_mib(&raw), Some(1024));
+        }
+        for raw in [
+            "",
+            "/dev/data 9000000 1 1048576 1% /data",
+            "Filesystem 512-blocks Used Available Use% Mounted on\n/dev/data 9000000 1 1048576 1% /data",
+            "Filesystem Size Used Avail Use% Mounted on\n/dev/data 9G 1G 8G 1% /data",
+            "Filesystem 1K-blocks Used Available Use% Mounted on\n/dev/data 9 1 -1 1% /data",
+            "Filesystem 1K-blocks Used Available Use% Mounted on\n/dev/data 9 1 18446744073709551616 1% /data",
+            "Filesystem 1K-blocks Used Available Use% Mounted on\n/dev/data 9 1 8 1% /data/local",
+        ] {
+            assert_eq!(storage_mib(raw), None, "{raw:?}");
+        }
+        assert_eq!(storage_mib(&"x".repeat(16 * 1024 + 1)), None);
+    }
+    #[test]
+    fn storage_threshold_controls_device_and_aggregate_health() {
+        for (available, mib, status, findings) in [
+            (0, 0, "attention", json!(["storage_low"])),
+            (512 * 1024 - 1, 511, "attention", json!(["storage_low"])),
+            (512 * 1024, 512, "healthy", json!([])),
+            (512 * 1024 + 1024, 513, "healthy", json!([])),
+        ] {
+            let v = aggregate(&["TEST123".into()], &|s, c| {
+                if c == "storage" {
+                    Ok(format!("Filesystem 1K-blocks Used Available Use% Mounted on\n/dev/data 9000000 1 {available} 1% /data"))
+                } else {
+                    mock(s, c)
+                }
+            });
+            assert_eq!(v["status"], status);
+            assert_eq!(v["devices"][0]["status"], status);
+            assert_eq!(v["devices"][0]["storage_free_mib"], mib);
+            assert_eq!(v["devices"][0]["findings"], findings);
+        }
+    }
+    #[test]
+    fn missing_or_invalid_storage_is_unverified_not_low() {
+        for result in [
+            Err("offline".into()),
+            Ok(String::new()),
+            Ok("/data not mounted".into()),
+        ] {
+            let v = aggregate(&["TEST123".into()], &|s, c| {
+                if c == "storage" {
+                    result.clone()
+                } else {
+                    mock(s, c)
+                }
+            });
+            assert_eq!(v["status"], "unverified");
+            assert_eq!(v["devices"][0]["status"], "unverified");
+            assert_eq!(v["devices"][0]["storage_free_mib"], Value::Null);
+            assert_eq!(v["devices"][0]["findings"], json!(["adb_read_incomplete"]));
+        }
     }
     #[test]
     fn rejects_malformed_data_and_untrusted_arguments() {
