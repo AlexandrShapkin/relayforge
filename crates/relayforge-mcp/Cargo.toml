@@ -1,0 +1,10 @@
+[package]
+name = "relayforge-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+relayforge-protocol = { path = "../relayforge-protocol" }
+relayforge-policy = { path = "../relayforge-policy" }

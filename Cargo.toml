@@ -1,0 +1,15 @@
+[workspace]
+members = [
+  "crates/relayforge-protocol",
+  "crates/relayforge-policy",
+  "crates/relayforge-agent",
+  "crates/relayforge-server",
+  "crates/relayforge-mcp",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+version = "0.1.0"
