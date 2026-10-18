@@ -11,13 +11,28 @@ const CHECKS: &[(&str, &str)] = &[
     ("routes", "/ip/route/print terse"),
     ("dhcp_leases", "/ip/dhcp-server/lease/print terse"),
     ("wifi", "/interface/wifi/print terse"),
+    ("dhcp_servers", "/ip/dhcp-server/print terse"),
+    ("bridge_ports", "/interface/bridge/port/print terse"),
+    (
+        "firewall_filter_count",
+        "/ip/firewall/filter/print count-only",
+    ),
+    ("firewall_nat_count", "/ip/firewall/nat/print count-only"),
+    (
+        "wifi_clients_count",
+        "/interface/wifi/registration-table/print count-only",
+    ),
+    (
+        "dhcp_leases_count",
+        "/ip/dhcp-server/lease/print count-only",
+    ),
 ];
 
 pub fn tool() -> Value {
     json!({"name":"relayforge_routeros_diagnostic",
         "description":"Read a fixed RouterOS diagnostic via the preconfigured mikrotik SSH alias; no changes are allowed.",
         "inputSchema":{"type":"object","properties":{
-            "check":{"type":"string","enum":["resource","identity","interfaces","addresses","routes","dhcp_leases","wifi"]}
+            "check":{"type":"string","enum":["resource","identity","interfaces","addresses","routes","dhcp_leases","wifi","dhcp_servers","bridge_ports","firewall_filter_count","firewall_nat_count","wifi_clients_count","dhcp_leases_count"]}
         },"required":["check"],"additionalProperties":false}})
 }
 
@@ -76,8 +91,16 @@ fn ssh_diagnostic(host: &str, command: &str) -> Result<String, String> {
     if !output.status.success() {
         return Err("router diagnostic unavailable".into());
     }
-    let data = &output.stdout[..output.stdout.len().min(16 * 1024)];
-    Ok(String::from_utf8_lossy(data).into_owned())
+    if output.stdout.len() > 16 * 1024 {
+        return Err("RouterOS diagnostic response exceeds limit".into());
+    }
+    String::from_utf8(output.stdout).map_err(|_| "RouterOS response invalid UTF-8".into())
+}
+
+/// A constant read-only RouterOS script run through the same validated
+/// fallback aliases as individual diagnostics. No user-controlled commands.
+pub(crate) fn health_snapshot_transport(script: &str) -> Result<String, String> {
+    try_hosts(&["mikrotik", "mikrotik-wifi"], script, ssh_diagnostic)
 }
 
 #[cfg(test)]
