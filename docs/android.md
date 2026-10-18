@@ -63,6 +63,13 @@ Health states:
 - capacity_exceeded: more than four authorized devices; no partial
   health snapshot is presented as complete.
 
+Battery readings require both a percentage in 0–100 and a numeric Android
+battery status in 1–5. A missing, nonnumeric or out-of-range status makes
+the device and aggregate health `unverified`, even if USB power is reported
+as connected. Battery percentage and charging are then null, with the
+`adb_read_incomplete` finding. Mock-only regression tests cover this boundary
+without invoking ADB or contacting a device.
+
 The tool never performs ADB pairing, connects to remote TCP endpoints,
 sends input events or changes device settings. Android Debug Bridge
 authorization must be granted by the physical device user, using USB

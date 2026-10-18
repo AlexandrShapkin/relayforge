@@ -25,12 +25,13 @@ fn battery(raw: &str) -> Option<(u8, bool)> {
         };
         match k.trim() {
             "level" => level = v.trim().parse::<u8>().ok().filter(|x| *x <= 100),
-            "status" => status = v.trim().parse::<u8>().ok(),
+            "status" => status = v.trim().parse::<u8>().ok().filter(|s| (1..=5).contains(s)),
             "USB powered" | "AC powered" | "Wireless powered" => powered |= v.trim() == "true",
             _ => {}
         }
     }
-    Some((level?, status.is_some_and(|s| s == 2 || s == 5) || powered))
+    let status = status?;
+    Some((level?, status == 2 || status == 5 || powered))
 }
 fn storage_mib(raw: &str) -> Option<u64> {
     if raw.len() > 16 * 1024 {
@@ -186,6 +187,37 @@ mod tests {
             }
         });
         assert_eq!(v["status"], "unverified");
+    }
+    #[test]
+    fn missing_or_invalid_battery_status_is_unverified() {
+        for status in [
+            "",
+            "status: invalid\n",
+            "status: 0\n",
+            "status: 6\n",
+            "status: 256\n",
+        ] {
+            let raw = format!("level: 83\nUSB powered: true\n{status}");
+            let v = aggregate(&["TEST123".to_owned()], &|s, c| {
+                if c == "battery" {
+                    Ok(raw.clone())
+                } else {
+                    mock(s, c)
+                }
+            });
+            assert_eq!(v["status"], "unverified", "{status:?}");
+            let device = &v["devices"][0];
+            assert_eq!(device["status"], "unverified");
+            assert!(device["battery_percent"].is_null());
+            assert!(device["charging"].is_null());
+            assert_eq!(device["findings"], json!(["adb_read_incomplete"]));
+        }
+        for status in 1..=5 {
+            assert_eq!(
+                battery(&format!("level: 83\nstatus: {status}\n")),
+                Some((83, status == 2 || status == 5))
+            );
+        }
     }
     #[test]
     fn rejects_malformed_data_and_untrusted_arguments() {
