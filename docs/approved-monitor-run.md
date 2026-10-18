@@ -35,3 +35,17 @@ Xray, nginx, tunnel) are not in this allowlist.
 Test readiness using `relayforge_agent_query` `user.service.status`
 on ru1. Do not invoke the action until a human has reviewed the
 approval text and approved the exact single-use request.
+
+## Independent approval and execution expiry
+
+A `monitor.run` proposal remains available for manual approval for
+**300 seconds after preparation**. Once approved through the local
+terminal, a separate **180-second** commit window starts. A successful
+one-time grant is consumed before the agent receives `monitor.run`.
+The previous legacy five-minute combined expiry is not extended for
+already-issued approvals. Both deadlines and current stage are visible
+through `relayforge_change_status`, without revealing file content.
+
+The CLI prints the exact post-confirmation execution expiration. If the
+execution window expires, create and individually approve a new request;
+do not attempt to reuse or bypass the expired authorization.
