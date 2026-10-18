@@ -82,10 +82,16 @@ fn latest_entry(
         return Err("backup_directory_insecure");
     }
     let mut selected: Option<PathBuf> = None;
-    for entry in fs::read_dir(dir)
+    for (index, entry) in fs::read_dir(dir)
         .map_err(|_| "backup_directory_unreadable")?
-        .take(MAX_SNAPSHOTS + 1)
+        .enumerate()
     {
+        // Entries may arrive in any filesystem order. Never present an
+        // arbitrary older backup as the latest when the listing exceeds
+        // our bounded inspection budget.
+        if index >= MAX_SNAPSHOTS {
+            return Err("backup_inventory_over_limit");
+        }
         let entry = entry.map_err(|_| "backup_entry_unreadable")?;
         let name = entry
             .file_name()
@@ -420,6 +426,24 @@ mod tests {
         assert_eq!(
             latest_entry(&dir, ".sqlite3.gz", dated_ru1_archive, false).unwrap_err(),
             "latest_snapshot_path_insecure"
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn over_limit_backup_listing_fails_closed() {
+        let dir = std::env::temp_dir().join(format!(
+            "relayforge-artifact-overflow-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        for i in 0..=MAX_SNAPSHOTS {
+            fs::write(dir.join(format!("ignored-{i}.txt")), b"x").unwrap();
+        }
+        assert_eq!(
+            latest_entry(&dir, ".sqlite3.gz", dated_ru1_archive, false).unwrap_err(),
+            "backup_inventory_over_limit"
         );
         fs::remove_dir_all(dir).unwrap();
     }
