@@ -144,3 +144,35 @@ guarantee freshness. Compare the `control_plane_poll.value` timestamp to
 the current Unix time, and inspect `commands_poll_errors_total` before
 declaring the connection currently healthy. A running systemd process
 alone is also insufficient evidence of remote reachability.
+
+
+## Control-plane short-poll pilot (October 2026)
+
+A 12s long-poll request with a 10s client deadline guardrail suffered
+persistent RouterOS-independent timeouts on ThinkPad, routed through
+the current host's happ-xray virtual interface. HTTPS connectivity to
+api.openai.com/v1/models was otherwise responsive, so ordinary HTTPS
+reachability is not a sufficient tunnel liveness test. The unit now
+requests a 6s control-plane long poll and a 5s deadline guardrail, to
+reduce idle HTTP duration. The initial poll timeout also uses 6s;
+the client help notes it does not itself shorten the client deadline.
+
+Live pilot: 12 consecutive 10-second health observations all showed
+a successful control-plane poll within 6 seconds, with 0 timed-out poll
+warnings during 120 seconds of observation. The private ChatGPT
+relayforge_status tool also responded in this pilot. This does **not**
+prove permanent resilience, especially if the proxy or upstream MCP
+control plane changes.
+
+Operator verification should measure the age of the most recent
+successful control-plane poll, not merely a service-active signal
+or a health status meaning only "ever succeeded since startup".
+A sample command (local trusted ThinkPad shell only):
+
+    tunnel-client health --url-file "$XDG_RUNTIME_DIR/relayforge-tunnel/health.url" --require-control-plane-poll --json
+
+Roll back the unit to its previous 12s/10s values if repeated polling
+errors appear or control-plane traffic becomes excessive. A pre-pilot
+local unit backup was preserved at
+~/.config/systemd/user/relayforge-tunnel.service.pre-short-poll.bak.
+No changes to RouterOS, proxy routing, remote agents or credentials.
