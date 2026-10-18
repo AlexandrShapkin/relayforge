@@ -92,9 +92,17 @@ Approval is available through an interactive ThinkPad OS-user terminal
 ~/Projects/relayforge/target/release/relayforge-mcp --approve-change APPROVAL_ID
 ```
 Review target host, exact operation and JSON-escaped file content before
-typing the displayed `APPROVE APPROVAL_ID` phrase. Every grant expires
-after 300 seconds and cannot authorize a different action or device.
-Expiry also releases queued capacity for subsequent requests. At most
+typing the displayed `APPROVE APPROVAL_ID` phrase. The **preparation
+deadline is five minutes** from `prepare`; confirmation before that
+deadline creates a distinct **three-minute execution window**, starting
+at the moment of local approval. The `commit` call must begin before
+its own execution deadline, even if the original preparation deadline
+has already passed. Both deadlines are returned in `change_status`.
+Pre-upgrade approvals lacking an explicit confirmation timestamp retain
+their original shorter expiry and are never extended retroactively.
+One-time approvals cannot authorize a different action or device.
+Expiry of either the unapproved or approved stage releases queued capacity
+for subsequent requests. No expired approval executes. At most
 24 awaiting grants are retained; completed receipts are retained for
 seven days. Audit events are persisted locally as JSONL under
 `~/.local/state/relayforge/audit.jsonl` (0600), capped at 16 MiB;

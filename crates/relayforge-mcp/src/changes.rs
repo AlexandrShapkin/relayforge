@@ -12,7 +12,11 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-const TTL_SECONDS: u64 = 300;
+// A request must be approved within five minutes of preparation.
+const APPROVAL_TTL_SECONDS: u64 = 300;
+// Once approved, execution gets its own short window. An old approved
+// record (without approval timestamp) retains its original earlier expiry.
+const EXECUTION_TTL_SECONDS: u64 = 180;
 const MAX_QUEUE: usize = 24;
 const MAX_CONTENT: usize = 2048;
 const ID_LEN: usize = 32;
@@ -21,7 +25,7 @@ const DONE_RETENTION_SECONDS: u64 = 7 * 86400;
 
 pub fn prepare_tool() -> Value {
     json!({"name":"relayforge_change_prepare",
-         "description":"Prepare a tightly scoped change requiring local terminal approval. No action is performed until approval. Allowed: scratch create, inert probe restart, or a noncritical ru1 health snapshot job.",
+          "description":"Prepare a tightly scoped change for manual approval within five minutes. After local approval, execution has its own 180-second window. Allowed: scratch create, inert probe restart, or ru1 health snapshot.",
         "inputSchema":{"type":"object","properties":{
             "host":{"type":"string","enum":["ru0","ru1","srv0"]},
             "action":{"type":"string","enum":["sandbox.create","probe.restart","monitor.run"]},
@@ -32,7 +36,7 @@ pub fn prepare_tool() -> Value {
 
 pub fn commit_tool() -> Value {
     json!({"name":"relayforge_change_commit",
-        "description":"Execute an exact pre-approved, unexpired, single-use change. Approval is issued from a local interactive ThinkPad terminal, not by the RelayForge MCP tools.",
+         "description":"Execute a single-use approved change within 180 seconds of local terminal approval. No approval is possible through MCP; replay and expired grants are denied.",
         "inputSchema":{"type":"object","properties":{
             "approval_id":{"type":"string","minLength":32,"maxLength":32}
         },"required":["approval_id"],"additionalProperties":false}})
@@ -40,7 +44,7 @@ pub fn commit_tool() -> Value {
 
 pub fn status_tool() -> Value {
     json!({"name":"relayforge_change_status",
-        "description":"Show the status of an approval by its identifier, without revealing file contents.",
+         "description":"Check approval status and both separate approval/execution deadlines without revealing file contents.",
         "inputSchema":{"type":"object","properties":{
             "approval_id":{"type":"string","minLength":32,"maxLength":32}
         },"required":["approval_id"],"additionalProperties":false}})
@@ -74,6 +78,31 @@ fn random_id() -> io::Result<String> {
         write!(result, "{byte:02x}").map_err(io::Error::other)?;
     }
     Ok(result)
+}
+
+/// Effective execution deadline. Legacy approvals without the new fields
+/// keep their original deadline: deploys must NEVER revive an old grant.
+/// Partial/malformed new fields fail closed.
+fn execution_deadline(record: &Value) -> Option<u64> {
+    let prepared_expiry = record.get("expires")?.as_u64()?;
+    match (
+        record.get("approved_at_unix"),
+        record.get("execution_expires_at_unix"),
+    ) {
+        (None, None) => Some(prepared_expiry),
+        (Some(approved), Some(deadline)) => {
+            let created = record.get("created")?.as_u64()?;
+            let approved_at = approved.as_u64()?;
+            let exec_expiry = deadline.as_u64()?;
+            let expected = approved_at.checked_add(EXECUTION_TTL_SECONDS)?;
+            if approved_at < created || approved_at >= prepared_expiry || exec_expiry != expected {
+                None
+            } else {
+                Some(exec_expiry)
+            }
+        }
+        _ => None,
+    }
 }
 
 fn valid_file_name(name: &str) -> bool {
@@ -264,10 +293,12 @@ impl Store {
                 let Ok(record) = self.load(stage, &id) else {
                     continue;
                 };
-                if record["expires"]
-                    .as_u64()
-                    .is_some_and(|expiry| expiry.saturating_add(keep_for) <= now)
-                {
+                let deadline = if stage == "prepared" {
+                    record["expires"].as_u64()
+                } else {
+                    execution_deadline(&record)
+                };
+                if deadline.is_none_or(|expiry| expiry.saturating_add(keep_for) <= now) {
                     fs::remove_file(self.file(stage, &id))?;
                 }
             }
@@ -330,13 +361,16 @@ impl Store {
         let operation = proposal["action"].as_str().ok_or("invalid action")?;
         let host = proposal["host"].as_str().ok_or("invalid host")?;
         let record = json!({"id":id,"created":created,
-            "expires":created + TTL_SECONDS,"proposal":proposal});
+            "expires":created + APPROVAL_TTL_SECONDS,"proposal":proposal});
         self.audit(&id, operation, host, "prepared")
             .map_err(|_| "audit unavailable")?;
         self.save("prepared", &id, &record)
             .map_err(|_| "store unavailable")?;
         Ok(json!({"approval_id":id,"status":"awaiting_local_approval",
-            "action":operation,"host":host,"expires_at_unix":created+TTL_SECONDS,
+            "action":operation,"host":host,
+            "expires_at_unix":created+APPROVAL_TTL_SECONDS,
+            "approval_expires_at_unix":created+APPROVAL_TTL_SECONDS,
+            "execution_window_seconds":EXECUTION_TTL_SECONDS,
             "approval_command":format!("~/Projects/relayforge/target/release/relayforge-mcp --approve-change {id}")}))
     }
 
@@ -395,23 +429,63 @@ impl Store {
         if input.trim_end() != format!("APPROVE {id}") {
             return Err("approval rejected".into());
         }
-        if record["expires"]
-            .as_u64()
-            .is_none_or(|ts| ts <= time_now().unwrap_or(u64::MAX))
-        {
-            return Err("request expired".into());
-        }
-        self.audit(id, action, host, "operator_approved")
-            .map_err(|_| "audit unavailable")?;
-        self.move_stage("prepared", "approved", id)
-            .map_err(|_| "approval already processed")?;
+        let confirmed_at = time_now().map_err(|_| "clock unavailable")?;
+        let execution_expires = self.approve_confirmed(id, &record, confirmed_at)?;
         Ok(format!(
-            "Approved single use for {host} / {action}; expires at {}",
-            record["expires"]
+            "Approved single use for {host} / {action}; execute within {EXECUTION_TTL_SECONDS} seconds (expires at {execution_expires})"
         ))
     }
 
-    fn commit_with<F>(&self, id: &str, mut execute: F) -> Result<Value, String>
+    /// This function is private and reachable in production only after the
+    /// terminal displays the exact proposal and checks the typed phrase.
+    /// Tests can provide explicit timestamps without sleeping.
+    fn approve_confirmed(&self, id: &str, original: &Value, now: u64) -> Result<u64, String> {
+        let prepared_expiry = original["expires"].as_u64().ok_or("invalid record")?;
+        if now < original["created"].as_u64().ok_or("invalid record")? || now >= prepared_expiry {
+            return Err("request expired".into());
+        }
+        if original.get("approved_at_unix").is_some()
+            || original.get("execution_expires_at_unix").is_some()
+        {
+            return Err("prepared record already contains approval fields".into());
+        }
+        if self.load("prepared", id).map_err(|_| "request not found")? != *original {
+            return Err("request modified since review".into());
+        }
+        let proposal = &original["proposal"];
+        if parse_action(proposal)? != *proposal || original["id"].as_str() != Some(id) {
+            return Err("request payload invalid".into());
+        }
+        let expiry = now
+            .checked_add(EXECUTION_TTL_SECONDS)
+            .ok_or("invalid clock")?;
+        let mut approved = original.clone();
+        approved["approved_at_unix"] = json!(now);
+        approved["execution_expires_at_unix"] = json!(expiry);
+        let action = proposal["action"].as_str().ok_or("invalid action")?;
+        let host = proposal["host"].as_str().ok_or("invalid host")?;
+
+        // Audit before granting execution rights: if auditing is broken,
+        // nothing is approved. create_new prevents two approvers overwriting
+        // one grant; its file is completely synced before the draft is deleted.
+        self.audit(id, action, host, "operator_approved")
+            .map_err(|_| "audit unavailable")?;
+        self.save("approved", id, &approved)
+            .map_err(|_| "approval already processed or store unavailable")?;
+        fs::remove_file(self.file("prepared", id))
+            .map_err(|_| "approved, but failed to clean pending record")?;
+        Ok(expiry)
+    }
+
+    fn commit_with<F>(&self, id: &str, execute: F) -> Result<Value, String>
+    where
+        F: FnMut(&Value) -> Result<String, String>,
+    {
+        let now = time_now().map_err(|_| "clock unavailable")?;
+        self.commit_with_at(id, now, execute)
+    }
+
+    fn commit_with_at<F>(&self, id: &str, now: u64, mut execute: F) -> Result<Value, String>
     where
         F: FnMut(&Value) -> Result<String, String>,
     {
@@ -424,11 +498,14 @@ impl Store {
         let prop = &record["proposal"];
         let action = prop["action"].as_str().ok_or("invalid record")?;
         let host = prop["host"].as_str().ok_or("invalid record")?;
-        if record["expires"]
+        if execution_deadline(&record).is_none_or(|expires| now >= expires) {
+            return Err("execution approval expired or invalid".into());
+        }
+        if record["approved_at_unix"]
             .as_u64()
-            .is_none_or(|ts| ts <= time_now().unwrap_or(u64::MAX))
+            .is_some_and(|approved| now < approved)
         {
-            return Err("approval expired".into());
+            return Err("approval timestamp is in the future".into());
         }
         // Revalidate the approved payload before using the network.
         if parse_action(prop)? != *prop {
@@ -449,7 +526,17 @@ impl Store {
         self.audit(id, action, host, event)
             .map_err(|_| "audit unavailable")?;
         let saved = json!({"id":id,"created":record["created"],"expires":record["expires"],
+            "approved_at_unix":record.get("approved_at_unix"),
+            "execution_expires_at_unix":record.get("execution_expires_at_unix"),
             "proposal":{"host":host,"action":action},"result":result});
+        let mut saved = saved;
+        if record.get("approved_at_unix").is_none() {
+            saved.as_object_mut().unwrap().remove("approved_at_unix");
+            saved
+                .as_object_mut()
+                .unwrap()
+                .remove("execution_expires_at_unix");
+        }
         self.save("done", id, &saved)
             .map_err(|_| "audit unavailable")?;
         fs::remove_file(self.file("claimed", id)).map_err(|_| "audit unavailable")?;
@@ -467,8 +554,27 @@ impl Store {
             ("prepared", "awaiting_local_approval"),
         ] {
             if let Ok(record) = self.load(stage, id) {
-                return Ok(json!({"approval_id":id,"status":label,
-                    "expires_at_unix":record["expires"],
+                let deadline = if stage == "prepared" {
+                    record["expires"].as_u64()
+                } else {
+                    execution_deadline(&record)
+                };
+                let now = time_now().map_err(|_| "clock unavailable")?;
+                let status = if (stage == "prepared" || stage == "approved")
+                    && deadline.is_none_or(|expiry| now >= expiry)
+                {
+                    "expired"
+                } else {
+                    label
+                };
+                return Ok(json!({"approval_id":id,"status":status,
+                    "expires_at_unix":deadline,
+                    "approval_expires_at_unix":record["expires"],
+                    "execution_expires_at_unix":if stage=="prepared" {
+                        Value::Null
+                    } else {
+                        record.get("execution_expires_at_unix").cloned().unwrap_or(Value::Null)
+                    },
                     "result":if stage=="done" {record["result"].clone()} else {Value::Null}}));
             }
         }
@@ -680,6 +786,259 @@ mod tests {
         let s = store();
         fs::set_permissions(&s.dir, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(Store::at(s.dir).is_err());
+    }
+
+    #[test]
+    fn late_confirmation_gets_fresh_execution_window() {
+        let s = store();
+        let prepared = s
+            .prepare(&json!({"host":"ru1","action":"monitor.run"}))
+            .unwrap();
+        let id = prepared["approval_id"].as_str().unwrap();
+        let original = s.load("prepared", id).unwrap();
+        let original_expiry = original["expires"].as_u64().unwrap();
+        let confirmed_at = original_expiry - 1;
+        let execution_expiry = s.approve_confirmed(id, &original, confirmed_at).unwrap();
+        assert_eq!(execution_expiry, confirmed_at + EXECUTION_TTL_SECONDS);
+        assert!(execution_expiry > original_expiry);
+        let new_record = s.load("approved", id).unwrap();
+        assert_eq!(execution_deadline(&new_record), Some(execution_expiry));
+        assert!(!s.file("prepared", id).exists());
+        assert_eq!(
+            s.status(id).unwrap()["execution_expires_at_unix"],
+            execution_expiry
+        );
+        let mut runs = 0;
+        let result = s
+            .commit_with_at(id, original_expiry + 90, |_| {
+                runs += 1;
+                Ok("mock monitor success".into())
+            })
+            .unwrap();
+        assert_eq!(result["status"], "succeeded");
+        assert_eq!(runs, 1);
+        assert_eq!(s.status(id).unwrap()["status"], "finished");
+        assert_eq!(s.status(id).unwrap()["expires_at_unix"], execution_expiry);
+    }
+
+    #[test]
+    fn confirmation_must_happen_before_original_deadline() {
+        let s = store();
+        let data = s
+            .prepare(&json!({"host":"ru0","action":"probe.restart"}))
+            .unwrap();
+        let id = data["approval_id"].as_str().unwrap();
+        let orig = s.load("prepared", id).unwrap();
+        let prepared_expires = orig["expires"].as_u64().unwrap();
+        assert!(s.approve_confirmed(id, &orig, prepared_expires).is_err());
+        assert!(s
+            .approve_confirmed(id, &orig, prepared_expires + 20)
+            .is_err());
+        assert!(s
+            .approve_confirmed(id, &orig, orig["created"].as_u64().unwrap() - 1)
+            .is_err());
+        assert!(!s.file("approved", id).exists());
+        assert_eq!(s.status(id).unwrap()["status"], "awaiting_local_approval");
+    }
+
+    #[test]
+    fn execution_expiry_is_exclusive_and_approval_is_single_use() {
+        let s = store();
+        let data = s
+            .prepare(&json!({"host":"ru1","action":"monitor.run"}))
+            .unwrap();
+        let id = data["approval_id"].as_str().unwrap();
+        let orig = s.load("prepared", id).unwrap();
+        let approved_at = orig["created"].as_u64().unwrap() + 1;
+        let expires = s.approve_confirmed(id, &orig, approved_at).unwrap();
+        let mut attempts = 0;
+        assert!(s
+            .commit_with_at(id, expires, |_| {
+                attempts += 1;
+                Ok("unexpected".into())
+            })
+            .is_err());
+        assert!(s
+            .commit_with_at(id, expires + 1, |_| {
+                attempts += 1;
+                Ok("unexpected".into())
+            })
+            .is_err());
+        assert!(s
+            .commit_with_at(id, approved_at - 1, |_| {
+                attempts += 1;
+                Ok("unexpected".into())
+            })
+            .is_err());
+        assert_eq!(attempts, 0);
+        assert!(s.file("approved", id).exists());
+        assert!(s
+            .commit_with_at(id, expires - 1, |_| {
+                attempts += 1;
+                Ok("mock".into())
+            })
+            .is_ok());
+        assert_eq!(attempts, 1);
+        assert!(s
+            .commit_with_at(id, expires - 1, |_| {
+                attempts += 1;
+                Ok("replay".into())
+            })
+            .is_err());
+        assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn legacy_approved_grants_are_not_extended_on_upgrade() {
+        let s = store();
+        let data = s
+            .prepare(&json!({"host":"ru0","action":"probe.restart"}))
+            .unwrap();
+        let id = data["approval_id"].as_str().unwrap();
+        let original = s.load("prepared", id).unwrap();
+        let original_expiry = original["expires"].as_u64().unwrap();
+        s.move_stage("prepared", "approved", id).unwrap();
+        assert_eq!(
+            execution_deadline(&s.load("approved", id).unwrap()),
+            Some(original_expiry)
+        );
+        let mut calls = 0;
+        assert!(s
+            .commit_with_at(id, original_expiry, |_| {
+                calls += 1;
+                Ok("unexpected".into())
+            })
+            .is_err());
+        assert_eq!(calls, 0);
+        assert!(s
+            .commit_with_at(id, original_expiry - 1, |_| {
+                calls += 1;
+                Ok("legacy mock".into())
+            })
+            .is_ok());
+        assert_eq!(calls, 1);
+        assert_eq!(
+            s.status(id).unwrap()["execution_expires_at_unix"],
+            Value::Null
+        );
+        assert_eq!(s.status(id).unwrap()["expires_at_unix"], original_expiry);
+    }
+
+    #[test]
+    fn tampered_execution_window_fails_closed() {
+        let s = store();
+        let data = s
+            .prepare(&json!({"host":"ru1","action":"monitor.run"}))
+            .unwrap();
+        let id = data["approval_id"].as_str().unwrap();
+        let original = s.load("prepared", id).unwrap();
+        let at = original["created"].as_u64().unwrap() + 1;
+        let expires = s.approve_confirmed(id, &original, at).unwrap();
+        let trusted = s.load("approved", id).unwrap();
+        for mut bad in [
+            {
+                let mut v = trusted.clone();
+                v["execution_expires_at_unix"] = json!(expires + 100);
+                v
+            },
+            {
+                let mut v = trusted.clone();
+                v["execution_expires_at_unix"] = Value::Null;
+                v
+            },
+            {
+                let mut v = trusted.clone();
+                v["approved_at_unix"] = Value::Null;
+                v
+            },
+            {
+                let mut v = trusted.clone();
+                v["approved_at_unix"] = json!(original["expires"].as_u64().unwrap());
+                v
+            },
+            {
+                let mut v = trusted.clone();
+                v["approved_at_unix"] = json!(0);
+                v
+            },
+        ] {
+            assert_eq!(execution_deadline(&bad), None, "{bad}");
+            // Do not permit partial approval metadata to become a legacy
+            // grant accidentally, which could revive expired permissions.
+            bad["execution_expires_at_unix"] = json!("invalid");
+            assert_eq!(execution_deadline(&bad), None);
+        }
+        let mut partial = trusted.clone();
+        partial.as_object_mut().unwrap().remove("approved_at_unix");
+        assert_eq!(execution_deadline(&partial), None);
+    }
+
+    #[test]
+    fn approved_window_survives_cleanup_until_its_own_expiry() {
+        let s = store();
+        let data = s
+            .prepare(&json!({"host":"ru1","action":"monitor.run"}))
+            .unwrap();
+        let id = data["approval_id"].as_str().unwrap();
+        let original = s.load("prepared", id).unwrap();
+        let prepared_expires = original["expires"].as_u64().unwrap();
+        let exec_expires = s
+            .approve_confirmed(id, &original, prepared_expires - 1)
+            .unwrap();
+        s.prune_expired(prepared_expires + 1).unwrap();
+        assert!(s.file("approved", id).exists());
+        s.prune_expired(exec_expires).unwrap();
+        assert!(!s.file("approved", id).exists());
+    }
+
+    #[test]
+    fn audit_failure_prevents_confirmed_grant_creation() {
+        let s = store();
+        let prepared = s
+            .prepare(&json!({"host":"ru1","action":"monitor.run"}))
+            .unwrap();
+        let id = prepared["approval_id"].as_str().unwrap();
+        let original = s.load("prepared", id).unwrap();
+        let path = s.dir.join("audit.jsonl");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let now = original["created"].as_u64().unwrap() + 2;
+        assert!(s.approve_confirmed(id, &original, now).is_err());
+        assert!(!s.file("approved", id).exists());
+        assert!(s.file("prepared", id).exists());
+    }
+
+    #[test]
+    fn competing_commits_execute_a_grant_at_most_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let s = store();
+        let prepared = s
+            .prepare(&json!({"host":"ru0","action":"probe.restart"}))
+            .unwrap();
+        let id = prepared["approval_id"].as_str().unwrap();
+        let record = s.load("prepared", id).unwrap();
+        let approved_at = record["created"].as_u64().unwrap() + 1;
+        s.approve_confirmed(id, &record, approved_at).unwrap();
+        let runs = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            let jobs: Vec<_> = (0..8)
+                .map(|_| {
+                    let store = s.clone();
+                    let runs = &runs;
+                    scope.spawn(move || {
+                        store.commit_with_at(id, approved_at + 1, |_| {
+                            runs.fetch_add(1, Ordering::SeqCst);
+                            Ok("mock".into())
+                        })
+                    })
+                })
+                .collect();
+            let succeeded = jobs
+                .into_iter()
+                .map(|j| usize::from(j.join().unwrap().is_ok()))
+                .sum::<usize>();
+            assert_eq!(succeeded, 1);
+        });
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
     }
 
     #[test]
