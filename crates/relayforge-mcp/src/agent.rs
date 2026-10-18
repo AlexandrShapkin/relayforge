@@ -14,7 +14,7 @@ pub fn tool() -> Value {
         "description":"Query a real read-only Rust agent on an allowlisted server using authenticated SSH.",
         "inputSchema":{"type":"object","properties":{
             "host":{"type":"string","enum":HOSTS},
-            "operation":{"type":"string","enum":["device.status","service.status","service.list","process.top"]},
+            "operation":{"type":"string","enum":["device.status","service.status","service.list","process.top","user.service.list","user.service.status"]},
             "unit":{"type":"string","maxLength":100,"description":"Required only for service.status; e.g. nginx.service"}
         },"required":["host","operation"],"additionalProperties":false}})
 }
@@ -207,13 +207,17 @@ fn validate(args: &Value) -> Result<(&str, Value), String> {
         .and_then(Value::as_str)
         .ok_or("missing operation")?;
     match operation {
-        "device.status" | "service.list" | "process.top" if obj.len() == 2 => Ok((
-            host,
-            json!({
-                "version":PROTOCOL_VERSION, "operation":operation
-            }),
-        )),
-        "service.status" if obj.len() == 3 => {
+        "device.status" | "service.list" | "process.top" | "user.service.list"
+            if obj.len() == 2 =>
+        {
+            Ok((
+                host,
+                json!({
+                    "version":PROTOCOL_VERSION, "operation":operation
+                }),
+            ))
+        }
+        "service.status" | "user.service.status" if obj.len() == 3 => {
             let unit = obj
                 .get("unit")
                 .and_then(Value::as_str)
@@ -376,6 +380,9 @@ mod tests {
         }
         assert!(validate(&json!({"host":"ru0","operation":"device.status"})).is_ok());
         assert!(validate(&json!({"host":"ru1","operation":"process.top"})).is_ok());
+        assert!(validate(&json!({"host":"ru1","operation":"user.service.list"})).is_ok());
+        assert!(validate(&json!({"host":"ru0","operation":"user.service.status","unit":"assistant-hub-local.service"})).is_ok());
+        assert!(validate(&json!({"host":"ru0","operation":"user.service.restart","unit":"assistant-hub-local.service"})).is_err());
         assert!(validate(&json!({"host":"srv0","operation":"service.list"})).is_ok());
         assert!(validate(
             &json!({"host":"srv0","operation":"service.status","unit":"docker.service"})

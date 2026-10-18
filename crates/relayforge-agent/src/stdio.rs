@@ -83,6 +83,99 @@ fn service_inventory() -> io::Result<Value> {
     Ok(json!({"units":units, "limit":64}))
 }
 
+/// Inspect services and timers owned by the SSH Unix user. No unit file,
+/// environment, command line or journal contents are exposed. Enumerating a
+/// user manager does not grant power to start/stop/restart anything.
+fn user_unit_inventory() -> io::Result<Value> {
+    const MAX_UNITS: usize = 64;
+    let output = Command::new("systemctl")
+        .args([
+            "--user",
+            "list-units",
+            "--all",
+            "--type=service,timer",
+            "--plain",
+            "--no-legend",
+            "--no-pager",
+        ])
+        .stdin(Stdio::null())
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other("systemd user manager unavailable"));
+    }
+    let text = String::from_utf8_lossy(&output.stdout[..output.stdout.len().min(32 * 1024)]);
+    let units: Vec<Value> = text
+        .lines()
+        .filter_map(|line| {
+            let mut columns = line.trim().trim_start_matches('●').split_whitespace();
+            let name = columns.next()?;
+            if !valid_unit(name) {
+                return None;
+            }
+            let load = columns.next()?;
+            let active = columns.next()?;
+            let sub = columns.next()?;
+            // Exclude arbitrary descriptions: some user services can embed
+            // passwords or tokens in their descriptive metadata.
+            Some(json!({"unit":name,"load":load,"active":active,"sub":sub}))
+        })
+        .take(MAX_UNITS)
+        .collect();
+    Ok(json!({"units":units,"limit":MAX_UNITS,"scope":"user"}))
+}
+
+/// Query only hard-coded, non-sensitive systemd properties. The unit is
+/// syntactically restricted, never interpolated into a shell, and not-found
+/// units fail explicitly rather than being reported as inactive/healthy.
+fn user_unit_status(unit: &str) -> io::Result<Value> {
+    if !valid_unit(unit) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid unit"));
+    }
+    let output = Command::new("systemctl")
+        .args([
+            "--user",
+            "show",
+            "--no-pager",
+            "--property=Id,LoadState,ActiveState,SubState,UnitFileState,Result,NRestarts",
+            "--",
+            unit,
+        ])
+        .stdin(Stdio::null())
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other("systemd user status unavailable"));
+    }
+    let data = &output.stdout[..output.stdout.len().min(MAX_RESULT_BYTES)];
+    let mut result = serde_json::Map::new();
+    for (key, value) in String::from_utf8_lossy(data)
+        .lines()
+        .filter_map(|line| line.split_once('='))
+    {
+        if [
+            "Id",
+            "LoadState",
+            "ActiveState",
+            "SubState",
+            "UnitFileState",
+            "Result",
+            "NRestarts",
+        ]
+        .contains(&key)
+        {
+            result.insert(key.to_owned(), json!(value));
+        }
+    }
+    if result.get("Id").and_then(Value::as_str) != Some(unit)
+        || result
+            .get("LoadState")
+            .and_then(Value::as_str)
+            .is_none_or(|value| value == "not-found" || value == "error")
+    {
+        return Err(io::Error::new(io::ErrorKind::NotFound, "unit not found"));
+    }
+    Ok(json!({"scope":"user","properties":result}))
+}
+
 /// /proc exposes process statistics without command lines or environment.
 /// Return only names, PIDs and resident memory (never secrets from argv).
 fn top_processes() -> io::Result<Value> {
@@ -194,6 +287,13 @@ pub fn handle(request: &Value) -> Value {
     let result = match obj.get("operation").and_then(Value::as_str) {
         Some("device.status") if obj.len() == 2 => device_status(),
         Some("service.list") if obj.len() == 2 => service_inventory(),
+        Some("user.service.list") if obj.len() == 2 => user_unit_inventory(),
+        Some("user.service.status") if obj.len() == 3 => {
+            match obj.get("unit").and_then(Value::as_str) {
+                Some(unit) if valid_unit(unit) => user_unit_status(unit),
+                _ => return err("invalid service unit"),
+            }
+        }
         Some("probe.restart") if obj.len() == 2 => restart_probe(),
         Some("process.top") if obj.len() == 2 => top_processes(),
         Some("file.list") if obj.len() == 2 => files::list_files(),
@@ -282,6 +382,41 @@ mod tests {
             serde_json::from_slice::<Value>(&output).unwrap()["error"],
             "invalid JSON"
         );
+    }
+
+    #[test]
+    fn user_units_are_read_only_and_validate_parameters() {
+        for request in [
+            json!({"version":1,"operation":"user.service.restart","unit":"remote-desktop.service"}),
+            json!({"version":1,"operation":"user.service.status","unit":"ssh.service;id"}),
+            json!({"version":1,"operation":"user.service.status","unit":"--help.service"}),
+            json!({"version":1,"operation":"user.service.status","unit":"../../secret.service"}),
+            json!({"version":1,"operation":"user.service.list","actor":"admin"}),
+            json!({"version":1,"operation":"user.service.status","unit":"remote-desktop.service","actor":"admin"}),
+        ] {
+            assert_eq!(handle(&request)["ok"], false, "{request}");
+        }
+        let inventory = handle(&json!({"version":1,"operation":"user.service.list"}));
+        assert_eq!(inventory["ok"], true);
+        assert_eq!(inventory["data"]["scope"], "user");
+        let arr = inventory["data"]["units"].as_array().unwrap();
+        assert!(arr.len() <= 64);
+        for item in arr {
+            assert_eq!(item.as_object().unwrap().len(), 4);
+        }
+    }
+
+    #[test]
+    fn user_unit_status_returns_fixed_properties_only() {
+        let status = handle(&json!({"version":1,"operation":"user.service.status",
+            "unit":"default.target"}));
+        // Only services, sockets and timers are authorized; targets are denied.
+        assert_eq!(status["ok"], false);
+        assert!(
+            user_unit_status("remote-desktop.service").is_ok()
+                || user_unit_status("dbus.service").is_ok()
+        );
+        assert!(user_unit_status("relayforge-nonexistent-test.service").is_err());
     }
 
     #[test]
