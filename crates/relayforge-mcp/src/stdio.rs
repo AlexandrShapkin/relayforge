@@ -146,7 +146,57 @@ pub fn handle(input: &Value) -> Option<Value> {
     Some(json!({"jsonrpc":"2.0","id":id,"result":result}))
 }
 
-pub fn serve(mut reader: impl BufRead, mut writer: impl Write) -> io::Result<()> {
+// A private ChatGPT tunnel still introduces a remote caller trust boundary.
+// Do not let that boundary inherit local-only scratch writes or systemd
+// restart probes. Enforce the policy at invocation, not just tools/list.
+const TUNNEL_ALLOWED_TOOLS: &[&str] = &[
+    "relayforge_status",
+    "relayforge_diagnostic",
+    "relayforge_routeros_diagnostic",
+    "relayforge_android_devices",
+    "relayforge_android_diagnostic",
+    "relayforge_agent_query",
+];
+
+pub fn handle_tunnel(input: &Value) -> Option<Value> {
+    let method = input.get("method").and_then(Value::as_str);
+    if method == Some("tools/call") {
+        let name = input.pointer("/params/name").and_then(Value::as_str);
+        if !name.is_some_and(|value| TUNNEL_ALLOWED_TOOLS.contains(&value)) {
+            // No untrusted operation may reach the local-only handlers.
+            let id = input.get("id").cloned();
+            return id.map(|id| error(id, -32602, "Tool denied by tunnel policy"));
+        }
+    }
+    let mut response = handle(input)?;
+    if method == Some("tools/list") {
+        if let Some(tools) = response
+            .pointer_mut("/result/tools")
+            .and_then(Value::as_array_mut)
+        {
+            tools.retain(|tool| {
+                tool.get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| TUNNEL_ALLOWED_TOOLS.contains(&name))
+            });
+        }
+    }
+    Some(response)
+}
+
+pub fn serve_tunnel(reader: impl BufRead, writer: impl Write) -> io::Result<()> {
+    serve_with_handler(reader, writer, handle_tunnel)
+}
+
+pub fn serve(reader: impl BufRead, writer: impl Write) -> io::Result<()> {
+    serve_with_handler(reader, writer, handle)
+}
+
+fn serve_with_handler(
+    mut reader: impl BufRead,
+    mut writer: impl Write,
+    handler: fn(&Value) -> Option<Value>,
+) -> io::Result<()> {
     loop {
         // Bound memory use before allocating the full line. Drain oversize input
         // until newline so subsequent requests remain correctly framed.
@@ -182,7 +232,7 @@ pub fn serve(mut reader: impl BufRead, mut writer: impl Write) -> io::Result<()>
             continue;
         }
         let response = match serde_json::from_slice::<Value>(&line) {
-            Ok(input) => handle(&input),
+            Ok(input) => handler(&input),
             Err(_) => Some(error(Value::Null, -32700, "Parse error")),
         };
         if let Some(response) = response {
@@ -195,6 +245,50 @@ pub fn serve(mut reader: impl BufRead, mut writer: impl Write) -> io::Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn tunnel_lists_only_read_only_tools() {
+        let list = handle_tunnel(&json!({"jsonrpc":"2.0","id":1,"method":"tools/list"})).unwrap();
+        let names: Vec<_> = list["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        assert_eq!(names.len(), TUNNEL_ALLOWED_TOOLS.len());
+        assert!(!names.contains(&"relayforge_agent_file"));
+        assert!(!names.contains(&"relayforge_agent_probe_restart"));
+        for name in TUNNEL_ALLOWED_TOOLS {
+            assert!(names.contains(name));
+        }
+    }
+
+    #[test]
+    fn tunnel_blocks_mutations_even_if_tool_name_is_known() {
+        for name in [
+            "relayforge_agent_file",
+            "relayforge_agent_probe_restart",
+            "process_execute",
+            "relayforge_unknown",
+        ] {
+            let req = json!({"jsonrpc":"2.0","id":11,"method":"tools/call",
+                "params":{"name":name,"arguments":{"host":"ru0","operation":"file.create",
+                    "name":"should-not-be-created.txt","content":"no"}}});
+            let result = handle_tunnel(&req).unwrap();
+            assert_eq!(result["error"]["code"], -32602);
+        }
+        let mut output = Vec::new();
+        serve_tunnel(
+            b"{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/list\"}\n".as_slice(),
+            &mut output,
+        )
+        .unwrap();
+        let data: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            data["result"]["tools"].as_array().unwrap().len(),
+            TUNNEL_ALLOWED_TOOLS.len()
+        );
+    }
+
     #[test]
     fn initialization_and_listing() {
         let init = handle(&json!({"jsonrpc":"2.0","id":1,"method":"initialize",
