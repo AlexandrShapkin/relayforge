@@ -2,6 +2,14 @@
 //! This is NOT a complete MCP implementation or an authenticated wire format.
 pub const PROTOCOL_VERSION: u16 = 1;
 
+/// Device platform, independent of the client transport and actor identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DevicePlatform {
+    Linux,
+    RouterOs,
+    Android,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Capability {
     DeviceRead,
