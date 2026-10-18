@@ -4,6 +4,13 @@ RelayForge exposes a standard JSON-RPC MCP adapter. The initial implementation
 supports **local stdio** only and advertises read-only diagnostic tools,
 `relayforge_status`. The optional SSH pilot can query a small allowlist of remote devices using existing SSH credentials; no mutating operations are available. See `docs/ssh-pilot.md`.
 
+The stdio pilot negotiates handshake-era MCP revisions
+`2024-11-05`, `2025-03-26`, `2025-06-18`, and `2025-11-25`.
+If the client proposes an unsupported revision, the server counter-offers
+`2025-11-25` rather than echoing an unsupported version. The modern
+`2026-07-28` stateless MCP lifecycle is **not implemented** yet. This
+pilot does not yet enforce the full initialize-before-tools lifecycle.
+
 ## Codex and other local stdio clients
 
 Build with `cargo build --release -p relayforge-mcp` and configure the client

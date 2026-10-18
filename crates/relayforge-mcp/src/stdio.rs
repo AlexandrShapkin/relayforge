@@ -6,6 +6,19 @@ use std::io::{self, BufRead, Write};
 
 const MAX_LINE_BYTES: usize = 1024 * 1024;
 
+// Handshake-era revisions only. The 2026-07-28 revision uses per-request
+// metadata and server/discover, which this stdio adapter does NOT implement.
+const LEGACY_MCP_VERSIONS: &[&str] = &["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"];
+const DEFAULT_LEGACY_VERSION: &str = "2025-11-25";
+
+fn negotiate_version(requested: Option<&str>) -> &'static str {
+    LEGACY_MCP_VERSIONS
+        .iter()
+        .copied()
+        .find(|version| Some(*version) == requested)
+        .unwrap_or(DEFAULT_LEGACY_VERSION)
+}
+
 fn error(id: Value, code: i32, message: &str) -> Value {
     json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}})
 }
@@ -20,12 +33,18 @@ pub fn handle(input: &Value) -> Option<Value> {
     }
     // JSON-RPC notifications must not be answered.
     let id = id?;
+    if !(id.is_string() || id.as_i64().is_some() || id.as_u64().is_some()) {
+        return Some(error(Value::Null, -32600, "Invalid Request"));
+    }
     let result = match method {
         "initialize" => {
-            let version = input
+            let Some(requested) = input
                 .pointer("/params/protocolVersion")
                 .and_then(Value::as_str)
-                .unwrap_or("2025-03-26");
+            else {
+                return Some(error(id, -32602, "Invalid initialize params"));
+            };
+            let version = negotiate_version(Some(requested));
             json!({"protocolVersion":version,"capabilities":{"tools":{"listChanged":false}},
                 "serverInfo":{"name":"relayforge","version":env!("CARGO_PKG_VERSION")}})
         }
@@ -160,9 +179,36 @@ mod tests {
             "params":{"protocolVersion":"2025-03-26"}}))
         .unwrap();
         assert_eq!(init["result"]["serverInfo"]["name"], "relayforge");
+        assert_eq!(init["result"]["protocolVersion"], "2025-03-26");
         let list = handle(&json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).unwrap();
         assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 6);
     }
+    #[test]
+    fn protocol_version_negotiation_does_not_echo_unknown_versions() {
+        for version in LEGACY_MCP_VERSIONS {
+            let response = handle(&json!({"jsonrpc":"2.0","id":4,
+                "method":"initialize","params":{"protocolVersion":version}}))
+            .unwrap();
+            assert_eq!(response["result"]["protocolVersion"], *version);
+        }
+        for unsupported in ["2026-07-28", "2030-12-31", "attacker-controlled"] {
+            let response = handle(&json!({"jsonrpc":"2.0","id":5,
+                "method":"initialize","params":{"protocolVersion":unsupported}}))
+            .unwrap();
+            assert_eq!(response["result"]["protocolVersion"], "2025-11-25");
+        }
+        let missing = handle(&json!({"jsonrpc":"2.0","id":6,"method":"initialize"})).unwrap();
+        assert_eq!(missing["error"]["code"], -32602);
+    }
+
+    #[test]
+    fn rejects_non_scalar_request_ids() {
+        for id in [json!({}), json!([]), Value::Null, json!(1.2)] {
+            let response = handle(&json!({"jsonrpc":"2.0","id":id,"method":"ping"})).unwrap();
+            assert_eq!(response["error"]["code"], -32600);
+        }
+    }
+
     #[test]
     fn no_remote_execution_or_unknown_tool() {
         let result = handle(&json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
