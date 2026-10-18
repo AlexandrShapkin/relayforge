@@ -1,6 +1,7 @@
 //! Read-only agent protocol over a trusted local stdio channel.
 //! The SSH account authenticates the remote operator in the pilot; the JSON
 //! payload is NOT an authentication or an authorization token.
+use crate::files;
 use relayforge_protocol::PROTOCOL_VERSION;
 use serde_json::{json, Value};
 use std::fs;
@@ -178,6 +179,22 @@ pub fn handle(request: &Value) -> Value {
         Some("device.status") if obj.len() == 2 => device_status(),
         Some("service.list") if obj.len() == 2 => service_inventory(),
         Some("process.top") if obj.len() == 2 => top_processes(),
+        Some("file.list") if obj.len() == 2 => files::list_files(),
+        Some("file.read") if obj.len() == 3 => match obj.get("path").and_then(Value::as_str) {
+            Some(path) => files::read_file(path),
+            None => return err("missing path"),
+        },
+        Some("file.create") if obj.len() == 4 => {
+            match (
+                obj.get("name").and_then(Value::as_str),
+                obj.get("content").and_then(Value::as_str),
+            ) {
+                (Some(name), Some(content)) if files::valid_name(name) && content.len() <= 2048 => {
+                    files::create_file(name, content)
+                }
+                _ => return err("file operation denied"),
+            }
+        }
         Some("service.status") if obj.len() == 3 => match obj.get("unit").and_then(Value::as_str) {
             Some(unit) if valid_unit(unit) => service_status(unit),
             _ => return err("invalid service unit"),
@@ -223,6 +240,10 @@ mod tests {
             json!({"version":1,"operation":"service.status","unit":"ssh.service;id"}),
             json!({"version":1,"operation":"service.status","unit":"--help.service"}),
             json!({"version":1,"operation":"service.status","unit":"/etc/shadow"}),
+            json!({"version":1,"operation":"file.read","path":"/etc/shadow"}),
+            json!({"version":1,"operation":"file.create","name":"../../file.txt","content":"bad"}),
+            json!({"version":1,"operation":"file.create","name":"script.sh","content":"bad"}),
+            json!({"version":1,"operation":"file.create","name":"good.txt","content":"bad","actor":"root"}),
         ] {
             assert_eq!(handle(&req)["ok"], false);
         }

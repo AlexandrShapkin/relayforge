@@ -19,6 +19,95 @@ pub fn tool() -> Value {
         },"required":["host","operation"],"additionalProperties":false}})
 }
 
+pub fn file_tool() -> Value {
+    json!({"name":"relayforge_agent_file",
+        "description":"Access fixed public OS metadata or create/list/read tiny files within a dedicated private RelayForge scratch directory. No arbitrary paths, deletes, overwrites, or service files.",
+        "inputSchema":{"type":"object","properties":{
+            "host":{"type":"string","enum":HOSTS},
+            "operation":{"type":"string","enum":["file.list","file.read","file.create"]},
+            "path":{"type":"string","maxLength":64},
+            "name":{"type":"string","maxLength":64},
+            "content":{"type":"string","maxLength":2048}
+        },"required":["host","operation"],"additionalProperties":false}})
+}
+
+fn valid_file_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    (1..=64).contains(&bytes.len())
+        && bytes[0].is_ascii_alphanumeric()
+        && bytes
+            .iter()
+            .all(|c| c.is_ascii_alphanumeric() || b"_-.".contains(c))
+        && [".txt", ".md", ".json"]
+            .iter()
+            .any(|ext| name.ends_with(ext))
+}
+
+fn valid_read_path(path: &str) -> bool {
+    [
+        "/etc/hostname",
+        "/etc/os-release",
+        "/proc/loadavg",
+        "/proc/meminfo",
+        "/proc/uptime",
+    ]
+    .contains(&path)
+        || valid_file_name(path)
+}
+
+fn validate_file(args: &Value) -> Result<(&str, Value), String> {
+    let obj = args.as_object().ok_or("arguments must be an object")?;
+    let host = obj
+        .get("host")
+        .and_then(Value::as_str)
+        .ok_or("missing host")?;
+    if !HOSTS.contains(&host) {
+        return Err("host denied".into());
+    }
+    match obj.get("operation").and_then(Value::as_str) {
+        Some("file.list") if obj.len() == 2 => Ok((
+            host,
+            json!({"version":PROTOCOL_VERSION,"operation":"file.list"}),
+        )),
+        Some("file.read") if obj.len() == 3 => {
+            let path = obj
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or("missing path")?;
+            if !valid_read_path(path) {
+                return Err("file denied".into());
+            }
+            Ok((
+                host,
+                json!({"version":PROTOCOL_VERSION,"operation":"file.read","path":path}),
+            ))
+        }
+        Some("file.create") if obj.len() == 4 => {
+            let name = obj
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or("missing name")?;
+            let content = obj
+                .get("content")
+                .and_then(Value::as_str)
+                .ok_or("missing content")?;
+            if !valid_file_name(name) || content.len() > 2048 {
+                return Err("file denied".into());
+            }
+            Ok((
+                host,
+                json!({"version":PROTOCOL_VERSION,"operation":"file.create","name":name,"content":content}),
+            ))
+        }
+        _ => Err("file operation denied".into()),
+    }
+}
+
+pub fn file_query(args: &Value) -> Result<String, String> {
+    let (host, request) = validate_file(args)?;
+    invoke_agent(host, request)
+}
+
 fn validate(args: &Value) -> Result<(&str, Value), String> {
     let obj = args.as_object().ok_or("arguments must be an object")?;
     let host = obj
@@ -77,10 +166,15 @@ fn valid_unit(value: &str) -> bool {
 
 pub fn query(args: &Value) -> Result<String, String> {
     let (host, message) = validate(args)?;
+    invoke_agent(host, message)
+}
+
+fn invoke_agent(host: &str, message: Value) -> Result<String, String> {
+    let config = crate::ssh::config_path()?;
     let mut child = Command::new("timeout")
+        .args(["10s", "ssh", "-F"])
+        .arg(config)
         .args([
-            "10s",
-            "ssh",
             "-T",
             "-o",
             "BatchMode=yes",
@@ -119,6 +213,27 @@ pub fn query(args: &Value) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn files_require_sandboxed_paths() {
+        for args in [
+            json!({"host":"ru0","operation":"file.read","path":"/etc/shadow"}),
+            json!({"host":"ru0","operation":"file.create","name":"../../a.md","content":"text"}),
+            json!({"host":"example.com","operation":"file.list"}),
+            json!({"host":"ru0","operation":"file.create","name":"test.sh","content":"data"}),
+            json!({"host":"ru0","operation":"file.list","actor":"root"}),
+        ] {
+            assert!(validate_file(&args).is_err());
+        }
+        assert!(validate_file(&json!({"host":"ru0","operation":"file.list"})).is_ok());
+        assert!(validate_file(
+            &json!({"host":"srv0","operation":"file.read","path":"/etc/os-release"})
+        )
+        .is_ok());
+        assert!(validate_file(
+            &json!({"host":"ru1","operation":"file.create","name":"report.txt","content":"test"})
+        )
+        .is_ok());
+    }
     #[test]
     fn forbids_shell_and_cross_host_operations() {
         for req in [

@@ -47,10 +47,11 @@ pub fn diagnostic(args: &Value) -> Result<String, String> {
         .ok_or("check denied")?;
     // A hard timeout is enforced by the external timeout executable.
     // BatchMode forbids interactive password prompts.
+    let config = crate::ssh::config_path()?;
     let output = Command::new("timeout")
+        .args(["8s", "ssh", "-F"])
+        .arg(config)
         .args([
-            "8s",
-            "ssh",
             "-T",
             "-o",
             "BatchMode=yes",
