@@ -63,6 +63,13 @@ Health states:
 - capacity_exceeded: more than four authorized devices; no partial
   health snapshot is presented as complete.
 
+Storage parsing accepts `df` headers with `1K-blocks` or `1024-blocks`
+and an exact `/data` mount row, converting available KiB to whole MiB.
+Unknown units, malformed output or a failed storage probe leave
+`storage_free_mib` null and report `adb_read_incomplete` with `unverified`
+health. Zero free space is a valid low-storage reading; exactly 512 MiB
+does not trigger `storage_low`.
+
 The tool never performs ADB pairing, connects to remote TCP endpoints,
 sends input events or changes device settings. Android Debug Bridge
 authorization must be granted by the physical device user, using USB
