@@ -14,7 +14,7 @@ pub fn tool() -> Value {
         "description":"Query a real read-only Rust agent on an allowlisted server using authenticated SSH.",
         "inputSchema":{"type":"object","properties":{
             "host":{"type":"string","enum":HOSTS},
-            "operation":{"type":"string","enum":["device.status","service.status","service.list","process.top","user.service.list","user.service.status"]},
+            "operation":{"type":"string","enum":["device.status","service.status","service.list", "process.top","user.service.list","user.service.status","user.jobs.summary"]},
             "unit":{"type":"string","maxLength":100,"description":"Required only for service.status; e.g. nginx.service"}
         },"required":["host","operation"],"additionalProperties":false}})
 }
@@ -217,6 +217,7 @@ fn validate(args: &Value) -> Result<(&str, Value), String> {
         .ok_or("missing operation")?;
     match operation {
         "device.status" | "service.list" | "process.top" | "user.service.list"
+        | "user.jobs.summary"
             if obj.len() == 2 =>
         {
             Ok((

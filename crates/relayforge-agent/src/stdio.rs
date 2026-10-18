@@ -176,6 +176,185 @@ fn user_unit_status(unit: &str) -> io::Result<Value> {
     Ok(json!({"scope":"user","properties":result}))
 }
 
+/// Allowlisted scheduled jobs only. These are inspection targets, NOT
+/// writable targets. The returned status only reflects systemd execution,
+/// not the quality/completeness of the underlying backup or sync data.
+const RU0_SCHEDULED_JOBS: &[(&str, &str, u64)] = &[
+    (
+        "assistant-hub-backup.timer",
+        "assistant-hub-backup.service",
+        48 * 60,
+    ),
+    (
+        "assistant-hub-google-calendar.timer",
+        "assistant-hub-google-calendar.service",
+        120,
+    ),
+    (
+        "assistant-hub-university-calendar.timer",
+        "assistant-hub-university-calendar.service",
+        240,
+    ),
+];
+const RU1_SCHEDULED_JOBS: &[(&str, &str, u64)] = &[
+    (
+        "assistant-hub-backup.timer",
+        "assistant-hub-backup.service",
+        48 * 60,
+    ),
+    (
+        "assistant-hub-monitor.timer",
+        "assistant-hub-monitor.service",
+        120,
+    ),
+];
+
+fn user_job_properties(
+    unit: &str,
+    fields: &str,
+) -> io::Result<std::collections::HashMap<String, String>> {
+    // The caller supplies only fixed internal constants for fields and unit.
+    let output = Command::new("systemctl")
+        .args(["--user", "show", "--no-pager", fields, "--", unit])
+        .stdin(Stdio::null())
+        .output()?;
+    if !output.status.success() || output.stdout.len() > 4096 {
+        return Err(io::Error::other("systemd job properties unavailable"));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect())
+}
+
+fn job_field<'a>(
+    values: &'a std::collections::HashMap<String, String>,
+    key: &str,
+) -> Option<&'a str> {
+    values.get(key).map(String::as_str)
+}
+
+fn job_classification(
+    timer: &std::collections::HashMap<String, String>,
+    service: &std::collections::HashMap<String, String>,
+    uptime_micros: u64,
+    max_age_minutes: u64,
+) -> (&'static str, &'static str, Option<u64>) {
+    if job_field(timer, "ActiveState") != Some("active") {
+        return ("failed", "timer_not_active", None);
+    }
+    let result = job_field(service, "Result");
+    // Any explicit non-success result is a failure, including new systemd
+    // failure variants. Missing results are unverified, never marked green.
+    if result.is_some_and(|v| !["success", ""].contains(&v))
+        || (job_field(service, "ExecMainCode") == Some("1")
+            && job_field(service, "ExecMainStatus") != Some("0"))
+    {
+        return ("failed", "last_execution_failed", None);
+    }
+    if job_field(service, "ActiveState") == Some("active") {
+        return ("running", "job_currently_active", None);
+    }
+    let Some(exit_at) = job_field(service, "ExecMainExitTimestampMonotonic")
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0 && *value <= uptime_micros)
+    else {
+        return ("unverified", "no_completion_observed_this_boot", None);
+    };
+    let minutes_since = (uptime_micros - exit_at) / 60_000_000;
+    if job_field(service, "Result") != Some("success")
+        || job_field(service, "ExecMainCode") != Some("1")
+        || job_field(service, "ExecMainStatus") != Some("0")
+    {
+        return ("unverified", "no_confirmed_success", Some(minutes_since));
+    }
+    if minutes_since > max_age_minutes {
+        return ("stale", "last_success_too_old", Some(minutes_since));
+    }
+    ("success", "completed_successfully", Some(minutes_since))
+}
+
+fn scheduled_job_snapshot(
+    timer_name: &str,
+    service_name: &str,
+    max_age_minutes: u64,
+    uptime_micros: u64,
+) -> io::Result<Value> {
+    let timer = user_job_properties(
+        timer_name,
+        "--property=Id,LoadState,ActiveState,SubState,LastTriggerUSec,NextElapseUSecRealtime",
+    )?;
+    let service=user_job_properties(service_name,
+        "--property=Id,LoadState,ActiveState,Result,ExecMainCode,ExecMainStatus,ExecMainExitTimestampMonotonic")?;
+    if timer.get("Id").map(String::as_str) != Some(timer_name)
+        || service.get("Id").map(String::as_str) != Some(service_name)
+        || timer.get("LoadState").map(String::as_str) != Some("loaded")
+        || service.get("LoadState").map(String::as_str) != Some("loaded")
+    {
+        return Err(io::Error::other("required scheduled unit missing"));
+    }
+    let (status, reason, minutes) =
+        job_classification(&timer, &service, uptime_micros, max_age_minutes);
+    let last_trigger_at = timer
+        .get("LastTriggerUSec")
+        .map(String::as_str)
+        .unwrap_or("");
+    let next_scheduled_at = timer
+        .get("NextElapseUSecRealtime")
+        .map(String::as_str)
+        .unwrap_or("");
+    Ok(json!({
+        "timer":timer_name, "service":service_name,
+        "status":status, "reason":reason,
+        "timer_active":timer.get("ActiveState").map(String::as_str)==Some("active"),
+        "last_trigger_at":last_trigger_at,
+        "next_scheduled_at":next_scheduled_at,
+        "minutes_since_completion":minutes,
+        "max_age_minutes":max_age_minutes,
+    }))
+}
+
+/// One bounded SSH agent query returns both the established service
+/// inventory and an optional job-success assessment. No service starts.
+fn user_jobs_summary() -> io::Result<Value> {
+    let hostname = read_short("/etc/hostname", 128)?;
+    let jobs: &[(&str, &str, u64)] = match hostname.as_str() {
+        "ru0.alexandrshapkin.ru" => RU0_SCHEDULED_JOBS,
+        "ru1.alexandrshapkin.ru" => RU1_SCHEDULED_JOBS,
+        "srv0" => &[],
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "user jobs summary host not allowlisted",
+            ))
+        }
+    };
+    let uptime_micros = read_short("/proc/uptime", 128)?
+        .split_whitespace()
+        .next()
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value >= 0.0 && *value < 1e12)
+        .map(|value| (value * 1_000_000.0) as u64)
+        .ok_or_else(|| io::Error::other("invalid host monotonic uptime"))?;
+    let mut summary = user_unit_inventory()?;
+    let mut snapshots = Vec::with_capacity(jobs.len());
+    for &(timer, service, max_age) in jobs {
+        snapshots.push(scheduled_job_snapshot(
+            timer,
+            service,
+            max_age,
+            uptime_micros,
+        )?);
+    }
+    let obj = summary
+        .as_object_mut()
+        .ok_or_else(|| io::Error::other("invalid inventory"))?;
+    obj.insert("host".to_owned(), json!(hostname));
+    obj.insert("scheduled_jobs".to_owned(), json!(snapshots));
+    Ok(summary)
+}
+
 /// /proc exposes process statistics without command lines or environment.
 /// Return only names, PIDs and resident memory (never secrets from argv).
 fn top_processes() -> io::Result<Value> {
@@ -369,6 +548,7 @@ pub fn handle(request: &Value) -> Value {
         Some("device.status") if obj.len() == 2 => device_status(),
         Some("service.list") if obj.len() == 2 => service_inventory(),
         Some("user.service.list") if obj.len() == 2 => user_unit_inventory(),
+        Some("user.jobs.summary") if obj.len() == 2 => user_jobs_summary(),
         Some("user.service.status") if obj.len() == 3 => {
             match obj.get("unit").and_then(Value::as_str) {
                 Some(unit) if valid_unit(unit) => user_unit_status(unit),
@@ -467,6 +647,64 @@ mod tests {
             serde_json::from_slice::<Value>(&output).unwrap()["error"],
             "invalid JSON"
         );
+    }
+
+    #[test]
+    fn scheduled_jobs_reject_unknown_or_failed_runs() {
+        let mut timer =
+            std::collections::HashMap::from([("ActiveState".to_owned(), "active".to_owned())]);
+        let mut service = std::collections::HashMap::from([
+            ("ActiveState".to_owned(), "inactive".to_owned()),
+            ("Result".to_owned(), "success".to_owned()),
+            ("ExecMainCode".to_owned(), "1".to_owned()),
+            ("ExecMainStatus".to_owned(), "0".to_owned()),
+            (
+                "ExecMainExitTimestampMonotonic".to_owned(),
+                "500000000".to_owned(),
+            ),
+        ]);
+        assert_eq!(
+            job_classification(&timer, &service, 560_000_000, 5).0,
+            "success"
+        );
+        assert_eq!(
+            job_classification(&timer, &service, 900_000_000, 5).0,
+            "stale"
+        );
+        service.insert("ExecMainExitTimestampMonotonic".into(), "0".into());
+        assert_eq!(
+            job_classification(&timer, &service, 900_000_000, 5).0,
+            "unverified"
+        );
+        service.insert("ExecMainExitTimestampMonotonic".into(), "500000000".into());
+        service.insert("Result".into(), "exit-code".into());
+        assert_eq!(
+            job_classification(&timer, &service, 560_000_000, 5).0,
+            "failed"
+        );
+        service.insert("Result".into(), "start-limit-hit".into());
+        assert_eq!(
+            job_classification(&timer, &service, 560_000_000, 5).0,
+            "failed"
+        );
+        service.insert("Result".into(), "success".into());
+        timer.insert("ActiveState".into(), "inactive".into());
+        assert_eq!(
+            job_classification(&timer, &service, 560_000_000, 5).0,
+            "failed"
+        );
+    }
+
+    #[test]
+    fn job_summary_has_no_mutation_arguments() {
+        for request in [
+            json!({"version":1,"operation":"user.jobs.summary","unit":"ssh.service"}),
+            json!({"version":1,"operation":"user.jobs.summary","host":"ru0"}),
+            json!({"version":1,"operation":"user.jobs.summary","action":"restart"}),
+            json!({"version":1,"operation":"user.jobs.restart"}),
+        ] {
+            assert_eq!(handle(&request)["ok"], false, "{request}");
+        }
     }
 
     #[test]
