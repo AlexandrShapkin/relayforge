@@ -1,0 +1,5 @@
+[Unit]
+Description=RelayForge inert service restart test (does not affect production)
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/true
