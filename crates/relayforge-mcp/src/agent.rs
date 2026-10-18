@@ -19,6 +19,15 @@ pub fn tool() -> Value {
         },"required":["host","operation"],"additionalProperties":false}})
 }
 
+/// Restricted to the approved-change dispatcher; deliberately NOT
+/// advertised as a directly callable MCP tool.
+pub fn trigger_ru1_monitor() -> Result<String, String> {
+    invoke_agent(
+        "ru1",
+        json!({"version":PROTOCOL_VERSION,"operation":"monitor.run"}),
+    )
+}
+
 pub fn probe_tool() -> Value {
     json!({"name":"relayforge_agent_probe_restart",
         "description":"Restart only the inert RelayForge pilot probe systemd user service on ru0. This cannot restart production services.",
