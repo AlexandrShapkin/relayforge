@@ -22,3 +22,5 @@ mod tests {
         assert!(!authorize(&Policy::default(), &request));
     }
 }
+
+pub mod stdio;

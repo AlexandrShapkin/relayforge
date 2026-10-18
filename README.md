@@ -23,6 +23,6 @@ The MCP adapter is not a trusted policy authority. The coordinator and agent mus
 - `relayforge-server`: disabled placeholder, future coordinator.
 - `relayforge-mcp`: policy boundary, future standards-compliant MCP adapter.
 
-Run `cargo test --workspace`. See `docs/security.md` and `docs/roadmap.md`.
+Run `cargo test --workspace`. The local read-only adapter runs with `cargo run -p relayforge-mcp`. See `docs/mcp-clients.md`. See `docs/security.md` and `docs/roadmap.md`.
 
 No devices or existing services are modified by this prototype.
