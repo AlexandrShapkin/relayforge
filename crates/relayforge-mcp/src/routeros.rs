@@ -54,10 +54,11 @@ where
 }
 
 fn ssh_diagnostic(host: &str, command: &str) -> Result<String, String> {
+    let config = crate::ssh::config_path()?;
     let output = Command::new("timeout")
+        .args(["8s", "ssh", "-F"])
+        .arg(config)
         .args([
-            "8s",
-            "ssh",
             "-T",
             "-o",
             "BatchMode=yes",

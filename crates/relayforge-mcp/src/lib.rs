@@ -30,3 +30,4 @@ pub mod android;
 pub mod bridge;
 pub mod http;
 pub mod routeros;
+pub mod ssh;
