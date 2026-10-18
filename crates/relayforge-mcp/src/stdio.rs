@@ -1,6 +1,6 @@
 //! A local, read-only MCP JSON-RPC stdio transport.
 //! No device is reachable from this implementation.
-use crate::{agent, android, bridge, changes, routeros};
+use crate::{agent, android, bridge, changes, fleet, routeros};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 
@@ -51,12 +51,24 @@ pub fn handle(input: &Value) -> Option<Value> {
         "ping" => json!({}),
         "tools/list" => json!({"tools":[{"name":"relayforge_status",
             "description":"Read the status of this local RelayForge MCP adapter. Device actions are restricted by tool and host.",
-            "inputSchema":{"type":"object","properties":{},"additionalProperties":false}}, bridge::tool(), routeros::tool(), android::list_tool(), android::diagnostic_tool(), agent::tool(), agent::file_tool(), agent::probe_tool(), agent::file_inspect_tool(), changes::prepare_tool(), changes::commit_tool(), changes::status_tool(), changes::audit_tool()]}),
+            "inputSchema":{"type":"object","properties":{},"additionalProperties":false}}, bridge::tool(), routeros::tool(), android::list_tool(), android::diagnostic_tool(), agent::tool(), agent::file_tool(), agent::probe_tool(), agent::file_inspect_tool(), fleet::tool(), changes::prepare_tool(), changes::commit_tool(), changes::status_tool(), changes::audit_tool()]}),
         "tools/call" => {
             let name = input.pointer("/params/name").and_then(Value::as_str);
             match name {
                 Some("relayforge_status") => {
                     json!({"content":[{"type":"text","text":"RelayForge diagnostic bridge ready."}],"isError":false})
+                }
+                Some("relayforge_fleet_health") => {
+                    let empty = json!({});
+                    let args = input.pointer("/params/arguments").unwrap_or(&empty);
+                    match fleet::snapshot(args) {
+                        Ok(value) => {
+                            json!({"content":[{"type":"text","text":value}],"isError":false})
+                        }
+                        Err(message) => {
+                            json!({"content":[{"type":"text","text":message}],"isError":true})
+                        }
+                    }
                 }
                 Some("relayforge_file_inspect") => {
                     let args = input.pointer("/params/arguments").unwrap_or(&Value::Null);
@@ -213,6 +225,7 @@ const TUNNEL_ALLOWED_TOOLS: &[&str] = &[
     "relayforge_android_diagnostic",
     "relayforge_agent_query",
     "relayforge_file_inspect",
+    "relayforge_fleet_health",
     "relayforge_change_prepare",
     "relayforge_change_commit",
     "relayforge_change_status",
@@ -358,7 +371,7 @@ mod tests {
         assert_eq!(init["result"]["serverInfo"]["name"], "relayforge");
         assert_eq!(init["result"]["protocolVersion"], "2025-03-26");
         let list = handle(&json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 13);
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 14);
     }
     #[test]
     fn protocol_version_negotiation_does_not_echo_unknown_versions() {
