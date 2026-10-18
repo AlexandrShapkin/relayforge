@@ -49,16 +49,20 @@ fn sections(raw: &str) -> Result<Vec<String>, String> {
     }
     let mut outputs: Vec<String> = Vec::with_capacity(MARKERS.len());
     for line in raw.lines() {
+        if line.len() > 2048 || line.chars().any(|c| c.is_control() && c != '\t') {
+            return Err("RouterOS health line oversized or invalid".into());
+        }
         let value = line.trim();
-        if let Some(index) = MARKERS.iter().position(|marker| *marker == value) {
+        // Only exact standalone markers delimit sections. Reserve RF_ lines so
+        // malformed or unknown markers cannot silently become section data.
+        if let Some(index) = MARKERS.iter().position(|marker| *marker == line) {
             if index != outputs.len() {
                 return Err("RouterOS health marker missing or reordered".into());
             }
             outputs.push(String::new());
+        } else if value.starts_with("RF_") {
+            return Err("RouterOS health marker invalid".into());
         } else if let Some(last) = outputs.last_mut() {
-            if line.len() > 2048 {
-                return Err("RouterOS health line too large".into());
-            }
             last.push_str(line);
             last.push('\n');
         } else if !value.is_empty() {
@@ -286,6 +290,68 @@ mod tests {
         ] {
             assert!(parse(&data).is_err());
         }
+    }
+
+    #[test]
+    fn rejects_every_missing_or_duplicated_marker() {
+        for marker in MARKERS {
+            let line = format!("{marker}\n");
+            assert!(parse(&fixture().replace(&line, "")).is_err(), "{marker}");
+            assert!(
+                parse(&fixture().replace(&line, &format!("{line}{line}"))).is_err(),
+                "{marker}"
+            );
+            assert!(parse(&format!("{}{line}", fixture())).is_err(), "{marker}");
+        }
+    }
+
+    #[test]
+    fn rejects_reordered_markers() {
+        for pair in MARKERS.windows(2) {
+            let raw = fixture()
+                .lines()
+                .map(|line| {
+                    if line == pair[0] {
+                        pair[1]
+                    } else if line == pair[1] {
+                        pair[0]
+                    } else {
+                        line
+                    }
+                    .to_owned()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(parse(&raw).is_err(), "{pair:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_markers_and_control_characters() {
+        for payload in [
+            "RF_UNKNOWN",
+            " RF_SERVICES",
+            "RF_SERVICES\t",
+            "RF_SERVICES name=ssh address=",
+            "RF_SERVICES; /system/reboot",
+            "RF_SERVICES\u{200b}",
+            "\u{1b}[2KRF_SERVICES",
+            "RF_SERVICES\rhidden",
+        ] {
+            for marker in MARKERS {
+                let raw = fixture().replace(marker, &format!("{marker}\n{payload}"));
+                assert!(parse(&raw).is_err(), "{marker}: {payload:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn accepts_crlf_and_marker_names_inside_properties() {
+        let raw = fixture().replace("name=ether1", "name=RF_SERVICES");
+        assert_eq!(
+            parse(&raw).unwrap(),
+            parse(&raw.replace('\n', "\r\n")).unwrap()
+        );
     }
     #[test]
     fn management_only_alert_remains_advisory() {
