@@ -26,3 +26,4 @@ mod tests {
 pub mod stdio;
 
 pub mod bridge;
+pub mod routeros;
