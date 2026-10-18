@@ -13,3 +13,6 @@ mod tests {
 pub mod files;
 /// Narrow, read-only stdio agent operations over an authenticated SSH account.
 pub mod stdio;
+
+/// Metadata-only verification of fixed, private application artifacts.
+pub mod artifacts;

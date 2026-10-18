@@ -64,3 +64,39 @@ is running or not verifiable; `degraded` covers failed/stale/missing
 jobs, missing core services or unreachable nodes. The snapshot is
 non-mutating and does not guarantee the integrity of files in backup
 archives or the semantic correctness of imported calendar events.
+
+
+## Private artifact evidence (2026-10 pilot)
+
+The remote agent's existing `user.jobs.summary` operation now includes
+`artifact_results`. No new MCP tool or write privilege is required. It
+checks **fixed paths only**, never paths from a ChatGPT or SSH request:
+
+- ru0 most recent private backup folder: SQLite `PRAGMA quick_check(1)`
+  in immutable read-only mode and bytewise equality of the private copied
+  owner-verifier with the original (only the boolean is returned);
+- ru1 latest dated, compressed demo backup: bounded gzip decompression in
+  memory and SQLite `PRAGMA quick_check(1)`, without extraction to disk;
+- ru0 main calendar's shared SQLite store: structural integrity only.
+  Without a **source-specific successful sync receipt**, the Google Main
+  mirror remains `unverified` even if the database is readable;
+- ru0 university feed status: JSON schema, bounded nonnegative aggregate
+  event count and file age. The upstream subscription is explicitly **not
+  independently verified**, so the mirror stays `unverified`;
+- ru1 latest appended health snapshot: limited JSON record with sanitized
+  booleans for aggregator, VPN HTTP probe and RDC. An unsuccessful external
+  probe is marked `failed`, even when its systemd sampler exited zero.
+
+SQLite content is never returned, and no personal calendar events,
+credentials, owner verifier, individual monitor readings or archive paths
+are disclosed. The verifier invokes only a fixed Python 3 stdlib
+`sqlite3`/gzip script in isolated mode via an argument vector, bounded
+by `timeout 6s`. Read-only SQLite URIs are used; gzip is decompressed
+inside memory with a 16 MiB cap. Results never authorize restoration,
+deletion, restarting or rescheduling.
+
+The fleet summary aggregates `verified`, `unverified`, `stale` and
+`failed` artifact states: an unverified artifact means `attention`,
+a failed/stale/missing one means `degraded`. This checks structural
+integrity and freshness of *local* evidence, not successful recovery
+from backup or independent freshness of a Google/university source.

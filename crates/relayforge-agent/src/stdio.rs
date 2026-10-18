@@ -352,6 +352,15 @@ fn user_jobs_summary() -> io::Result<Value> {
         .ok_or_else(|| io::Error::other("invalid inventory"))?;
     obj.insert("host".to_owned(), json!(hostname));
     obj.insert("scheduled_jobs".to_owned(), json!(snapshots));
+    obj.insert(
+        "artifact_results".to_owned(),
+        json!(crate::artifacts::summary(
+            &hostname,
+            &std::path::PathBuf::from(
+                std::env::var_os("HOME").ok_or_else(|| io::Error::other("HOME unavailable"))?
+            )
+        )),
+    );
     Ok(summary)
 }
 
