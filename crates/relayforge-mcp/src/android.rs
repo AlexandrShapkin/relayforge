@@ -34,18 +34,22 @@ pub fn diagnostic_tool() -> Value {
 fn valid_serial(serial: &str) -> bool {
     !serial.is_empty()
         && serial.len() <= 128
+        && !serial.starts_with('-')
         && serial
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b))
 }
 
 fn parse_authorized_devices(output: &str) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
     output
         .lines()
+        .skip_while(|line| line.trim() != "List of devices attached")
+        .skip(1)
         .filter_map(|line| {
             let mut fields = line.split_whitespace();
             let serial = fields.next()?;
-            if fields.next() == Some("device") && valid_serial(serial) {
+            if fields.next() == Some("device") && valid_serial(serial) && seen.insert(serial) {
                 Some(serial.to_owned())
             } else {
                 None
@@ -122,6 +126,50 @@ mod tests {
             parse_authorized_devices(output),
             ["serial-01", "192.168.1.3:4343"]
         );
+    }
+
+    #[test]
+    fn discovery_requires_header_and_deduplicates_authorized_rows() {
+        assert!(parse_authorized_devices("fake device\n").is_empty());
+        let output = "preamble device\nList of devices attached\r\n\
+            usb-1\tdevice product:example\r\nusb-1 device\n\
+            offline-1 offline\nunauthorized-1 unauthorized\n\
+            missing-status\nunknown recovery\nwrong DEVICE\n--help device\n";
+        assert_eq!(parse_authorized_devices(output), ["usb-1"]);
+        assert!(parse_authorized_devices(
+            "List of devices attached\noffline-1 offline\nunauthorized-1 unauthorized\n"
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn serial_validation_is_bounded_and_shared_with_discovery() {
+        let boundary = "a".repeat(128);
+        assert!(valid_serial(&boundary));
+        assert_eq!(
+            parse_authorized_devices(&format!("List of devices attached\n{boundary} device\n")),
+            [boundary]
+        );
+        for serial in [
+            "".to_owned(),
+            "a".repeat(129),
+            "-serial".to_owned(),
+            "serial space".to_owned(),
+            "serial\n".to_owned(),
+            "serial;id".to_owned(),
+            "sérial".to_owned(),
+        ] {
+            assert!(!valid_serial(&serial));
+            assert_eq!(
+                diagnostic(&json!({"serial":serial,"check":"model"})),
+                Err("invalid serial".into())
+            );
+        }
+        assert!(parse_authorized_devices(&format!(
+            "List of devices attached\n{} device\nsérial device\n",
+            "a".repeat(129)
+        ))
+        .is_empty());
     }
 
     #[test]
