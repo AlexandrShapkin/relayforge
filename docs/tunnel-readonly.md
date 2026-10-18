@@ -60,6 +60,11 @@ and verify a real `relayforge_agent_query` call.
 
 ## Approved mutation pilot
 
+A distinct remote `relayforge_file_inspect` tool allows `list` and
+`read` against existing Rust-agent public OS metadata allowlists and the
+private scratch directory. It never accepts a write operation or arbitrary
+filesystem paths, and the agent checks the allowlist again.
+
 The only remotely available change actions are `sandbox.create` on
 `ru0`, `ru1`, or `srv0` (flat file with .txt, .md, .json extension,
 up to 2048 UTF-8 bytes in the agent's throwaway private scratch
