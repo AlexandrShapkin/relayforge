@@ -8,7 +8,7 @@ StartLimitBurst=4
 
 [Service]
 Type=simple
-ExecStart=%h/.local/libexec/relayforge/tunnel-client run --profile relayforge-local --health.listen-addr 127.0.0.1:0 --health.url-file %t/relayforge-tunnel/health.url
+ExecStart=%h/.local/libexec/relayforge/tunnel-client run --profile relayforge-local --health.listen-addr 127.0.0.1:0 --health.url-file %t/relayforge-tunnel/health.url --control-plane.poll-timeout 12s --control-plane.initial-poll-timeout 12s --control-plane.poll-deadline-guardrail 10s
 Restart=on-failure
 RestartSec=10
 TimeoutStopSec=15

@@ -113,3 +113,21 @@ firewall, real systemd services, router configuration, or arbitrary paths
 under this pilot. These require separately authenticated actors, a
 device-specific recovery/rollback mechanism, and reviewed least-privilege
 service allowlists.
+
+## Long-poll reliability on ThinkPad (Happ/Xray route)
+
+ThinkPad uses a local outbound Happ/Xray network route. During the October
+18 pilot the tunnel-client's default 30-second control-plane long polls
+repeatedly hit the HTTP/context timeout while short HTTPS requests to
+api.openai.com succeeded. The systemd service now uses a 12-second
+control-plane poll timeout, 12-second initial poll timeout and 10-second
+deadline guardrail. In a 50-second smoke test this yielded three completed
+control-plane poll cycles without new timeouts. This is preliminary, not a
+guarantee of long-term stability.
+
+The tunnel-client `health --require-control-plane-poll` check proves **at
+least one historical successful poll since process start**; it does not
+guarantee freshness. Compare the `control_plane_poll.value` timestamp to
+the current Unix time, and inspect `commands_poll_errors_total` before
+declaring the connection currently healthy. A running systemd process
+alone is also insufficient evidence of remote reachability.
