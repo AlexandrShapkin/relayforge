@@ -379,9 +379,16 @@ pub fn execute(args: &Value) -> Result<String, String> {
         .get("operation")
         .and_then(Value::as_str)
         .ok_or("missing operation")?;
-    let (home, repo) = home_and_repo()?;
-    match operation {
-        "capabilities" if obj.len() == 1 => Ok(json!({
+    // Tool discovery also runs on disposable CI without a ThinkPad checkout.
+    if operation == "capabilities" {
+        if obj.len() != 1 {
+            return Err("unexpected capability arguments".into());
+        }
+        let home = PathBuf::from(std::env::var_os("HOME").ok_or("home unavailable")?);
+        if !home.is_absolute() || home.as_os_str().len() > 256 {
+            return Err("home invalid".into());
+        }
+        return Ok(json!({
             "api_revision": 1,
             "transport": "private_secure_mcp_tunnel",
             "operations": [
@@ -398,7 +405,10 @@ pub fn execute(args: &Value) -> Result<String, String> {
             "arbitrary_host_files": false,
             "local_grants_required_for_mutations": true
         })
-        .to_string()),
+        .to_string());
+    }
+    let (home, repo) = home_and_repo()?;
+    match operation {
         "process.list" if obj.len() == 1 => {
             text_output(command("ps", &["-eo", "pid=,comm=,etime=,rss="], 8)?)
         }
