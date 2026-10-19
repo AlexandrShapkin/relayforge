@@ -21,10 +21,11 @@ pub fn tool() -> Value {
     json!({"name":"relayforge_workstation_develop",
         "description":"ThinkPad-only bounded development: tracked repository inventory/reads, fixed Git status, and operator-opted-in tracked source edits, Git sync, release build and tunnel restart. No arbitrary shell or filesystem access.",
         "inputSchema":{"type":"object","properties":{
-            "operation":{"type":"string","enum":["repo.status","repo.list","repo.read","repo.write","repo.sync","build.start","task.status","task.logs","tunnel.restart"]},
+            "operation":{"type":"string","enum":["repo.status","repo.list","repo.read","repo.write","repo.sync","build.start","task.status","task.logs","tunnel.restart","shell.sandbox"]},
             "path":{"type":"string","maxLength":192},
             "content":{"type":"string","maxLength":49152},
-            "task_id":{"type":"string","maxLength":32}
+            "task_id":{"type":"string","maxLength":32},
+            "script":{"type":"string","maxLength":2048}
         },"required":["operation"],"additionalProperties":false}})
 }
 
@@ -260,6 +261,44 @@ fn spawn_task(repo: &Path, kind: &str) -> Result<String, String> {
     Ok(json!({"task_id":unit,"started":true,"kind":kind}).to_string())
 }
 
+// The shell runs in a disposable mount/user/PID/network namespace: only
+// the RelayForge checkout is writable, and no other home directory, private
+// SSH configuration, host services, or network interface is exposed. This is
+// deliberately NOT an unrestricted workstation command executor.
+fn sandbox_shell(repo: &Path, script: &str) -> Result<String, String> {
+    if script.is_empty()
+        || script.len() > 2048
+        || script.bytes().any(|ch| ch == 0 || (ch < 32 && ch != b'\\n' && ch != b'\\t'))
+    {
+        return Err("invalid sandbox command".into());
+    }
+    let workdir = repo.to_str().ok_or("workspace path invalid")?;
+    let out = command(
+        "bwrap",
+        &[
+            "--unshare-all",
+            "--die-with-parent",
+            "--new-session",
+            "--ro-bind", "/usr", "/usr",
+            "--ro-bind", "/bin", "/bin",
+            "--ro-bind", "/lib", "/lib",
+            "--ro-bind", "/lib64", "/lib64",
+            "--proc", "/proc",
+            "--dev", "/dev",
+            "--tmpfs", "/tmp",
+            "--dir", "/workspace",
+            "--bind", workdir, "/workspace",
+            "--chdir", "/workspace",
+            "--clearenv",
+            "--setenv", "PATH", "/usr/bin:/bin",
+            "--setenv", "HOME", "/workspace",
+            "--", "/bin/bash", "--noprofile", "--norc", "-c", script,
+        ],
+        15,
+    )?;
+    text_output(out)
+}
+
 pub fn execute(args: &Value) -> Result<String, String> {
     let obj = args.as_object().ok_or("expected object")?;
     let operation = obj
@@ -389,6 +428,14 @@ pub fn execute(args: &Value) -> Result<String, String> {
                 )?)
             }
         }
+        "shell.sandbox" if obj.len() == 2 => {
+            if !dev_enabled(&home) {
+                return Err("local development opt-in missing".into());
+            }
+            let script = obj.get("script").and_then(Value::as_str).ok_or("script required")?;
+            audit(&home, operation)?;
+            sandbox_shell(&repo, script)
+        }
         "tunnel.restart" if obj.len() == 1 => {
             if !dev_enabled(&home) {
                 return Err("local development opt-in missing".into());
@@ -438,6 +485,14 @@ mod tests {
         }
         assert!(source_file("crates/relayforge-mcp/src/workstation.rs"));
         assert!(source_file(".github/workflows/tests.yml"));
+    }
+    #[test]
+    fn sandbox_denies_bad_commands_and_traversal() {
+        for script in ["", "x\\0y", "echo \\u{1b}[31m"] {
+            assert!(sandbox_shell(Path::new("/workspace"), script).is_err());
+        }
+        let response = sandbox_shell(Path::new("/nonexistent/relayforge"), "pwd");
+        assert!(response.is_err() || response.is_ok_and(|value| value.contains("exit_code")));
     }
     #[test]
     fn strict_task_identifiers_and_required_arguments() {
