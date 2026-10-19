@@ -94,7 +94,7 @@ fn bounded_inventory(dir: &Path) -> Result<Vec<String>, String> {
     Ok(names)
 }
 
-fn get_name<'a>(params: &'a serde_json::Map<String, Value>) -> Result<&'a str, String> {
+fn get_name(params: &serde_json::Map<String, Value>) -> Result<&str, String> {
     let name = params
         .get("path")
         .and_then(Value::as_str)
