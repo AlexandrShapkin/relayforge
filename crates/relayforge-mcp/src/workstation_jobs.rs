@@ -544,8 +544,16 @@ mod tests {
     #[test]
     fn unknown_operations_and_extra_arguments_denied() {
         let home = Path::new("/nonexistent");
-        assert!(execute(home,&json!({"operation":"job.exec","script":"id"})).is_err());
-        assert!(execute(home,&json!({"operation":"job.start","script":"id","host":"ru0"})).is_err());
-        assert!(execute(home,&json!({"operation":"job.stop","task_id":"systemd.service"})).is_err());
+        assert!(execute(home, &json!({"operation":"job.exec","script":"id"})).is_err());
+        assert!(execute(
+            home,
+            &json!({"operation":"job.start","script":"id","host":"ru0"})
+        )
+        .is_err());
+        assert!(execute(
+            home,
+            &json!({"operation":"job.stop","task_id":"systemd.service"})
+        )
+        .is_err());
     }
 }
