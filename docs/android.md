@@ -63,6 +63,11 @@ Health states:
 - capacity_exceeded: more than four authorized devices; no partial
   health snapshot is presented as complete.
 
+The battery parser requires both a percentage in 0–100 and a numeric
+Android status in 1–5. Missing, duplicated or invalid fields yield
+`unverified` even if an ADB battery dump reports external power. The
+report never infers a charging state from an incomplete battery record.
+
 Storage parsing accepts `df` headers with `1K-blocks` or `1024-blocks`
 and an exact `/data` mount row, converting available KiB to whole MiB.
 Unknown units, malformed output or a failed storage probe leave

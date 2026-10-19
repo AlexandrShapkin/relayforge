@@ -146,6 +146,16 @@ mod tests {
     fn serial_validation_is_bounded_and_shared_with_discovery() {
         let boundary = "a".repeat(128);
         assert!(valid_serial(&boundary));
+        // PR #37: ensure option guards do not exclude real serial formats.
+        assert!(valid_serial("device-123"));
+        assert!(valid_serial("192.168.1.3:4343"));
+        for option_like in ["-", "--help", "-s", "-device123"] {
+            assert!(!valid_serial(option_like));
+            assert_eq!(
+                diagnostic(&json!({"serial": option_like, "check": "model"})),
+                Err("invalid serial".into())
+            );
+        }
         assert_eq!(
             parse_authorized_devices(&format!("List of devices attached\n{boundary} device\n")),
             [boundary]

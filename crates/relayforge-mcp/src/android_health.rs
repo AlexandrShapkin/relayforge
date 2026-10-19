@@ -296,6 +296,23 @@ mod tests {
         }
     }
     #[test]
+    fn missing_battery_status_stays_unverified_even_while_usb_powered() {
+        // PR #36: battery state remains unverified even if USB power is on.
+        for record in ["", "status: nope", "status: 0", "status: 6"] {
+            let raw = format!("level: 83\nUSB powered: true\n{record}\n");
+            let v = aggregate(&["TEST123".to_owned()], &|s, check| {
+                if check == "battery" {
+                    Ok(raw.clone())
+                } else {
+                    mock(s, check)
+                }
+            });
+            assert_eq!(v["status"], "unverified");
+            assert!(v["devices"][0]["charging"].is_null());
+        }
+    }
+
+    #[test]
     fn storage_requires_known_units_and_exact_data_mount() {
         for units in ["1K-blocks", "1024-blocks"] {
             let raw = format!(
