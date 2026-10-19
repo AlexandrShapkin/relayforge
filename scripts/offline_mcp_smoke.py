@@ -18,6 +18,11 @@ def main():
         {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
          "params": {"name": "relayforge_agent_probe_restart",
                     "arguments": {"host": "ru0"}}},
+        {"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+         "params": {"name": "relayforge_workstation_status",
+                    "arguments": {"command": "id"}}},
+        {"jsonrpc": "2.0", "id": 6, "method": "tools/call",
+         "params": {"name": "relayforge_workstation_status", "arguments": {}}},
     ]
     serialized = "".join(json.dumps(item) + "\n" for item in requests)
     completed = subprocess.run(
@@ -28,7 +33,7 @@ def main():
     responses = [json.loads(line) for line in completed.stdout.splitlines()
                  if line.strip()]
     by_id = {r["id"]: r for r in responses}
-    assert set(by_id) == {1, 2, 3, 4}, "MCP responses missing or malformed"
+    assert set(by_id) == {1, 2, 3, 4, 5, 6}, "MCP responses missing or malformed"
     assert by_id[1]["result"]["protocolVersion"] == "2025-11-25"
     names = {tool["name"] for tool in by_id[2]["result"]["tools"]}
     expected = {"relayforge_status", "relayforge_routeros_health",
@@ -42,7 +47,16 @@ def main():
     assert ("error" in blocked or
             blocked.get("result", {}).get("isError") is True), (
             "unsafe tool invocation was not denied")
-    print("Offline MCP handshake/tool discovery/deny-by-default: PASS")
+    assert by_id[5]["result"]["isError"] is True, (
+        "workstation tool accepted arbitrary command arguments")
+    assert by_id[6]["result"]["isError"] is False, (
+        "workstation read-only inventory failed on offline runner")
+    inventory = json.loads(by_id[6]["result"]["content"][0]["text"])
+    assert inventory["scope"] == "local_workstation_only"
+    assert inventory["permissions"] == {
+        "shell": False, "arbitrary_files": False, "service_mutation": False}
+    assert "untracked_clean" in inventory["repository"]
+    print("Offline MCP handshake/tool discovery/workstation/deny-by-default: PASS")
     print("No physical device, tunnel, remote shell or credentials were used.")
 
 if __name__ == "__main__":
