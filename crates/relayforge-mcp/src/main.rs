@@ -14,7 +14,8 @@ fn main() -> io::Result<()> {
             .build()?
             .block_on(relayforge_mcp::http::run_from_env())
     } else if std::env::args().nth(1).as_deref() == Some("--sandbox-job-worker") {
-        let id = std::env::args().nth(2)
+        let id = std::env::args()
+            .nth(2)
             .ok_or_else(|| io::Error::other("sandbox job ID required"))?;
         if std::env::args().nth(3).is_some() {
             return Err(io::Error::other("unexpected arguments"));
