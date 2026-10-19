@@ -32,7 +32,8 @@ def main():
     assert by_id[1]["result"]["protocolVersion"] == "2025-11-25"
     names = {tool["name"] for tool in by_id[2]["result"]["tools"]}
     expected = {"relayforge_status", "relayforge_routeros_health",
-                "relayforge_android_health", "relayforge_fleet_health"}
+                "relayforge_android_health", "relayforge_fleet_health",
+                "relayforge_workstation_status"}
     assert expected <= names, f"missing read-only tools: {expected - names}"
     forbidden = {"relayforge_agent_file", "relayforge_agent_probe_restart"}
     assert not (forbidden & names), "unrestricted tools exposed via private stdio"
