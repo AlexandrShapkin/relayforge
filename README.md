@@ -10,7 +10,6 @@ A security-first MCP bridge for personally operated Linux, MikroTik RouterOS, an
 
 [![CI](https://github.com/AlexandrShapkin/relayforge/actions/workflows/tests.yml/badge.svg)](https://github.com/AlexandrShapkin/relayforge/actions)
 ![Rust](https://img.shields.io/badge/Rust-1.85%2B-4A7CAB)
-![License](https://img.shields.io/badge/License-Apache--2.0-5A9E7E)
 ![Status](https://img.shields.io/badge/Status-active%20development-C64B4B)
 
 [Capabilities](#capabilities) · [Architecture](#architecture) · [Security](docs/security.md) · [Development](#development) · [Roadmap](docs/roadmap.md)
@@ -112,4 +111,4 @@ The project is under active development; the README describes implemented functi
 
 ## License
 
-Apache-2.0. See the license information in the Rust workspace.
+The Rust workspace declares `Apache-2.0`. A standalone license text has not yet been added to the repository; verify licensing before publishing a release.
