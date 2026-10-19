@@ -117,7 +117,7 @@ fn persist_final(dir: &Path, index: usize, code: i32, kind: Option<&str>) -> Res
 /// Called by the same locally installed fixed worker as an ordinary job.
 pub(crate) fn run(home: &Path, id: &str) -> Result<i32, String> {
     let dir = job_dir(home, id)?;
-    let total = chain_chain_count(&dir)?;
+    let total = chain_count(&dir)?;
     let mut previous = None;
     for i in 1..=total {
         let script = artifact_name(i, "sh");
