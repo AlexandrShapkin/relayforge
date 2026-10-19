@@ -175,7 +175,8 @@ class HostRecovery:
             fd = os.open(self.lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
             with os.fdopen(fd, "r+b") as lock:
                 meta = os.fstat(lock.fileno())
-                if meta.st_uid != os.getuid() or stat.S_IMODE(meta.st_mode) != 0o600:
+                if (not stat.S_ISREG(meta.st_mode) or meta.st_uid != os.getuid()
+                        or stat.S_IMODE(meta.st_mode) != 0o600):
                     raise GuardError("lock_unavailable")
                 try:
                     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
