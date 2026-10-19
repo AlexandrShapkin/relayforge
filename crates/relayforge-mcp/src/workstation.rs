@@ -29,8 +29,14 @@ fn run_bounded(command: &str, args: &[&str]) -> Option<Output> {
 }
 
 fn git(repo: &str, args: &[&str]) -> Option<Output> {
-    let mut argv = vec!["-c", "core.fsmonitor=false", "-c",
-                        "core.hooksPath=/dev/null", "-C", repo];
+    let mut argv = vec![
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-C",
+        repo,
+    ];
     argv.extend_from_slice(args);
     run_bounded("git", &argv)
 }
@@ -67,7 +73,9 @@ fn uptime_seconds(input: &str) -> Option<u64> {
 }
 
 fn available_memory_mib(input: &str) -> Option<u64> {
-    let line = input.lines().find(|line| line.starts_with("MemAvailable:"))?;
+    let line = input
+        .lines()
+        .find(|line| line.starts_with("MemAvailable:"))?;
     let mut words = line.split_ascii_whitespace();
     if words.next() != Some("MemAvailable:") {
         return None;
@@ -111,9 +119,16 @@ fn repository_snapshot(home: &str) -> Value {
 }
 
 fn tunnel_snapshot(home: &str) -> Value {
-    let active = run_bounded("systemctl", &[
-        "--user", "is-active", "--quiet", "relayforge-tunnel.service"
-    ]).map(|output| output.status.success());
+    let active = run_bounded(
+        "systemctl",
+        &[
+            "--user",
+            "is-active",
+            "--quiet",
+            "relayforge-tunnel.service",
+        ],
+    )
+    .map(|output| output.status.success());
     let mut client = PathBuf::from(home);
     client.push(".local/libexec/relayforge/tunnel-client");
     let runtime = std::env::var("XDG_RUNTIME_DIR").ok();
@@ -125,8 +140,13 @@ fn tunnel_snapshot(home: &str) -> Value {
     let freshness = if active == Some(true) {
         health_file.as_ref().and_then(|file| {
             let binary = client.to_str()?;
-            let args = ["health", "--url-file", file.as_str(),
-                        "--require-control-plane-poll", "--json"];
+            let args = [
+                "health",
+                "--url-file",
+                file.as_str(),
+                "--require-control-plane-poll",
+                "--json",
+            ];
             let output = run_bounded(binary, &args)?;
             if !output.status.success() {
                 return None;
@@ -147,11 +167,9 @@ fn tunnel_snapshot(home: &str) -> Value {
 }
 
 fn classify(repo: &Value, tunnel: &Value) -> &'static str {
-    let repo_ok = repo["present"] == true
-        && repo["on_main"] == true
-        && repo["tracked_clean"] == true;
-    let tunnel_ok = tunnel["service_active"] == true
-        && tunnel["authenticated_poll_recent"] == true;
+    let repo_ok =
+        repo["present"] == true && repo["on_main"] == true && repo["tracked_clean"] == true;
+    let tunnel_ok = tunnel["service_active"] == true && tunnel["authenticated_poll_recent"] == true;
     if repo_ok && tunnel_ok {
         "healthy"
     } else if repo["present"] == false || tunnel["service_active"] == false {
@@ -174,9 +192,11 @@ pub fn snapshot(args: &Value) -> Result<String, String> {
     let repo = repository_snapshot(&home);
     let tunnel = tunnel_snapshot(&home);
     let uptime = std::fs::read_to_string("/proc/uptime")
-        .ok().and_then(|s| uptime_seconds(&s));
+        .ok()
+        .and_then(|s| uptime_seconds(&s));
     let memory = std::fs::read_to_string("/proc/meminfo")
-        .ok().and_then(|s| available_memory_mib(&s));
+        .ok()
+        .and_then(|s| available_memory_mib(&s));
     Ok(json!({
         "status":classify(&repo, &tunnel),
         "scope":"local_workstation_only",
@@ -184,7 +204,8 @@ pub fn snapshot(args: &Value) -> Result<String, String> {
         "tunnel":tunnel,
         "resources":{"uptime_seconds":uptime, "memory_available_mib":memory},
         "permissions":{"shell":false,"arbitrary_files":false,"service_mutation":false}
-    }).to_string())
+    })
+    .to_string())
 }
 
 #[cfg(test)]
@@ -198,46 +219,71 @@ mod tests {
             json!({"command":"id"}),
             json!({"path":"/home/user/.ssh/id_ed25519"}),
             json!({"host":"ru0"}),
-            json!(null)
+            json!(null),
         ] {
             assert!(snapshot(&args).is_err());
         }
-        assert_eq!(tool()["inputSchema"]["additionalProperties"],false);
+        assert_eq!(tool()["inputSchema"]["additionalProperties"], false);
     }
 
     #[test]
     fn parsing_never_claims_good_for_bad_input() {
-        assert_eq!(uptime_seconds("123.42 12.0"),Some(123));
-        assert_eq!(uptime_seconds("invalid"),None);
-        assert_eq!(uptime_seconds("-10.00"),None);
-        assert_eq!(available_memory_mib("MemAvailable: 2097152 kB\n"),Some(2048));
-        assert_eq!(available_memory_mib("MemAvailable: 123 MB\n"),None);
-        assert_eq!(available_memory_mib("MemFree: 1234 kB\n"),None);
-        let now=1792360000u64;
-        let input=format!(r#"{{"result":"ok","control_plane_poll":{{"value":{}}}}}"#,now-3);
-        assert_eq!(poll_age_seconds(&input,now),Some(3));
-        assert_eq!(poll_age_seconds(&input,now-86400),None);
-        assert_eq!(poll_age_seconds(r#"{"result":"degraded","control_plane_poll":{"value":1}}"#,now),None);
+        assert_eq!(uptime_seconds("123.42 12.0"), Some(123));
+        assert_eq!(uptime_seconds("invalid"), None);
+        assert_eq!(uptime_seconds("-10.00"), None);
+        assert_eq!(
+            available_memory_mib("MemAvailable: 2097152 kB\n"),
+            Some(2048)
+        );
+        assert_eq!(available_memory_mib("MemAvailable: 123 MB\n"), None);
+        assert_eq!(available_memory_mib("MemFree: 1234 kB\n"), None);
+        let now = 1792360000u64;
+        let input = format!(
+            r#"{{"result":"ok","control_plane_poll":{{"value":{}}}}}"#,
+            now - 3
+        );
+        assert_eq!(poll_age_seconds(&input, now), Some(3));
+        assert_eq!(poll_age_seconds(&input, now - 86400), None);
+        assert_eq!(
+            poll_age_seconds(
+                r#"{"result":"degraded","control_plane_poll":{"value":1}}"#,
+                now
+            ),
+            None
+        );
     }
 
     #[test]
     fn diff_exit_code_excludes_timeout_and_errors() {
-        for (exit,expected) in [(0,Some(true)),(1,Some(false)),(2,None),(124,None)] {
+        for (exit, expected) in [(0, Some(true)), (1, Some(false)), (2, None), (124, None)] {
             let status = std::process::ExitStatus::from_raw(exit << 8);
-            let output=Output {status,stdout:vec![],stderr:vec![]};
-            assert_eq!(git_clean_result(Some(output)),expected);
+            let output = Output {
+                status,
+                stdout: vec![],
+                stderr: vec![],
+            };
+            assert_eq!(git_clean_result(Some(output)), expected);
         }
-        assert_eq!(git_clean_result(None),None);
+        assert_eq!(git_clean_result(None), None);
     }
 
     #[test]
     fn status_fails_closed_for_missing_evidence() {
-        let valid_repo=json!({"present":true,"on_main":true,"tracked_clean":true});
-        let valid_tunnel=json!({"service_active":true,"authenticated_poll_recent":true});
-        assert_eq!(classify(&valid_repo,&valid_tunnel),"healthy");
-        assert_eq!(classify(&json!({"present":false}),&valid_tunnel),"degraded");
-        assert_eq!(classify(&valid_repo,&json!({"service_active":false})),"degraded");
-        assert_eq!(classify(&valid_repo,&json!({})),"unverified");
-        assert_eq!(classify(&json!({"present":true}),&valid_tunnel),"unverified");
+        let valid_repo = json!({"present":true,"on_main":true,"tracked_clean":true});
+        let valid_tunnel = json!({"service_active":true,"authenticated_poll_recent":true});
+        assert_eq!(classify(&valid_repo, &valid_tunnel), "healthy");
+        assert_eq!(
+            classify(&json!({"present":false}), &valid_tunnel),
+            "degraded"
+        );
+        assert_eq!(
+            classify(&valid_repo, &json!({"service_active":false})),
+            "degraded"
+        );
+        assert_eq!(classify(&valid_repo, &json!({})), "unverified");
+        assert_eq!(
+            classify(&json!({"present":true}), &valid_tunnel),
+            "unverified"
+        );
     }
 }
