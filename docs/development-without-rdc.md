@@ -180,10 +180,13 @@ The established no-RDC update sequence is:
 2. Invoke `repo.sync`, await completion through `task.status` and `task.logs`,
    and verify the new checkout is clean.
 3. Invoke `build.start`, await `Result=success` and `ExecMainStatus=0`.
-4. Invoke `tunnel.restart`, then verify `relayforge_workstation_status`
-   reports an authenticated recent tunnel poll.
-5. Verify `capabilities` and the intended new behavior via the reconnected
-   plugin. A failed restart requires an independent local recovery path.
+4. On a hot-stdio deployment, leave the tunnel running and invoke
+   `capabilities` or another MCP operation: the persistent parent loads the
+   new release binary for each request. Verify `relayforge_workstation_status`
+   continues to report a recent authenticated poll.
+5. After the one-time transition to hot-stdio, `tunnel.restart` is refused
+   by new workers. A manual restart is reserved for explicit transport
+   maintenance, with an independent recovery path.
 
 This path still depends on GitHub, ChatGPT and the Secure MCP Tunnel for
 connectivity and identity, but it consumes no Remote Desktop Commander quota.
@@ -205,3 +208,33 @@ timeout. Callers must still inspect `task.status` and `task.logs` for
 success; scheduling is not proof of successful execution.
 
 A restarted tunnel still needs live authenticated poll verification.
+
+## Stable tunnel stdio parent and worker hot swap
+
+The `--readonly-stdio` entrypoint is now a long-lived JSON-RPC relay rather
+than the tool executor. It preserves the Secure MCP Tunnel stdio connection
+while spawning the **fixed** released MCP binary with `--readonly-worker`
+for each incoming request. Each worker uses the identical remote allowlist
+and processes one request only. The caller cannot provide the executable,
+environment, shell or worker arguments. Notifications remain silent. Failed,
+timed-out, malformed or oversized worker replies fail closed.
+
+Consequently a new local Cargo release build replaces the **next** worker
+without disconnecting the tunnel or requiring a plugin reconnect. The
+`tools/list` response can reflect newly deployed operations without
+restarting the control-plane session; the ChatGPT client may still require
+a manual Refresh tools when the displayed parameter schema changes.
+
+**One-time transition:** an already running legacy `--readonly-stdio`
+process does not learn this behaviour merely by replacing its executable.
+After verifying CI and compiling the new binary, the tunnel must be
+restarted once (or the parent upgraded through a separate planned handoff)
+to activate hot-stdio. Future normal source builds must not restart it.
+Before the one-time transition, verify a rollback/recovery channel.
+
+This is a session-continuity improvement, not a guarantee of permanent
+tunnel connectivity: the OpenAI control plane, ThinkPad networking, and
+user service must still be running. It does not remove ChatGPT or GitHub
+provider dependencies. The optional `--readonly-worker` command is
+restricted to tunnel policy; never substitute the unrestricted default
+stdio mode.
