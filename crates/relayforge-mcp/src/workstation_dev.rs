@@ -186,21 +186,41 @@ fn tracked_paths(repo: &Path) -> Result<Vec<String>, String> {
     Ok(result)
 }
 
+fn verified_tracked_file(repo: &Path, path: &str) -> Result<PathBuf, String> {
+    if !source_file(path) {
+        return Err("tracked source path denied".into());
+    }
+    let root = fs::canonicalize(repo).map_err(|_| "repo unavailable")?;
+    let mut cursor = repo.to_path_buf();
+    // Reject a symlink in any path component, not just the final file.
+    // The leaf must be a real regular file inside the fixed checkout.
+    let mut leaf = None;
+    for component in Path::new(path).components() {
+        let Component::Normal(name) = component else {
+            return Err("path denied".into());
+        };
+        cursor.push(name);
+        let meta = fs::symlink_metadata(&cursor).map_err(|_| "source unavailable")?;
+        if meta.file_type().is_symlink() {
+            return Err("symlink source denied".into());
+        }
+        leaf = Some(meta);
+    }
+    if !leaf.is_some_and(|meta| meta.is_file()) {
+        return Err("non-regular source denied".into());
+    }
+    let resolved = fs::canonicalize(&cursor).map_err(|_| "source unavailable")?;
+    if !resolved.starts_with(&root) || resolved == root {
+        return Err("path escapes repository".into());
+    }
+    Ok(resolved)
+}
+
 fn safe_existing_file(repo: &Path, path: &str) -> Result<PathBuf, String> {
     if !source_file(path) || !tracked_paths(repo)?.iter().any(|name| name == path) {
         return Err("tracked source path denied".into());
     }
-    let root = fs::canonicalize(repo).map_err(|_| "repo unavailable")?;
-    let candidate = repo.join(path);
-    let resolved = fs::canonicalize(&candidate).map_err(|_| "source unavailable")?;
-    if !resolved.starts_with(&root) || resolved == root {
-        return Err("path escapes repository".into());
-    }
-    let metadata = fs::symlink_metadata(&candidate).map_err(|_| "source unavailable")?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return Err("non-regular source denied".into());
-    }
-    Ok(resolved)
+    verified_tracked_file(repo, path)
 }
 
 fn audit(home: &Path, operation: &str) -> Result<(), String> {
@@ -390,10 +410,44 @@ fn spawn_task(repo: &Path, kind: &str) -> Result<String, String> {
     Ok(json!({"task_id":unit,"started":true,"kind":kind}).to_string())
 }
 
-// The shell runs in a disposable mount/user/PID/network namespace: only
-// the RelayForge checkout is writable, and no other home directory, private
-// SSH configuration, host services, or network interface is exposed. This is
-// deliberately NOT an unrestricted workstation command executor.
+// Materialize a read-only view of allowlisted, currently tracked source
+// files inside the sandbox. Never bind the repository directory itself:
+// that would expose .git, private untracked files and hidden local state.
+fn sandbox_file_mounts(repo: &Path) -> Result<Vec<String>, String> {
+    let paths = tracked_paths(repo)?;
+    let mut dirs = BTreeSet::new();
+    let mut mounts = Vec::new();
+    for path in paths.into_iter().filter(|name| source_file(name)) {
+        if mounts.len() >= 512 {
+            return Err("sandbox source count exceeds limit".into());
+        }
+        let source = verified_tracked_file(repo, &path)?;
+        let source = source.to_str().ok_or("source path invalid")?.to_owned();
+        let mut parent = String::from("/workspace");
+        let parts: Vec<&str> = path.split('/').collect();
+        for part in &parts[..parts.len() - 1] {
+            parent.push('/');
+            parent.push_str(part);
+            dirs.insert(parent.clone());
+        }
+        mounts.push((source, format!("/workspace/{path}")));
+    }
+    let mut argv = Vec::new();
+    for dir in dirs {
+        argv.push("--dir".to_owned());
+        argv.push(dir);
+    }
+    for (source, dest) in mounts {
+        argv.push("--ro-bind".to_owned());
+        argv.push(source);
+        argv.push(dest);
+    }
+    Ok(argv)
+}
+
+// The shell runs in disposable mount/user/PID/network namespaces. Only
+// allowlisted tracked source files are visible; the parent repository,
+// private untracked files, .git and other user data are never mounted.
 fn sandbox_shell(repo: &Path, script: &str) -> Result<String, String> {
     if script.is_empty()
         || script.len() > 2048
@@ -403,36 +457,37 @@ fn sandbox_shell(repo: &Path, script: &str) -> Result<String, String> {
     {
         return Err("invalid sandbox command".into());
     }
-    let workdir = repo.to_str().ok_or("workspace path invalid")?;
-    let out = command(
-        "bwrap",
-        &[
-            "--unshare-all",
-            "--die-with-parent",
-            "--new-session",
-            "--ro-bind",
-            "/usr",
-            "/usr",
-            "--ro-bind",
-            "/bin",
-            "/bin",
-            "--ro-bind",
-            "/lib",
-            "/lib",
-            "--ro-bind",
-            "/lib64",
-            "/lib64",
-            "--proc",
-            "/proc",
-            "--dev",
-            "/dev",
-            "--tmpfs",
-            "/tmp",
-            "--dir",
-            "/workspace",
-            "--ro-bind",
-            workdir,
-            "/workspace",
+    let mut arguments = [
+        "--unshare-all",
+        "--die-with-parent",
+        "--new-session",
+        "--ro-bind",
+        "/usr",
+        "/usr",
+        "--ro-bind",
+        "/bin",
+        "/bin",
+        "--ro-bind",
+        "/lib",
+        "/lib",
+        "--ro-bind",
+        "/lib64",
+        "/lib64",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        "--tmpfs",
+        "/tmp",
+        "--dir",
+        "/workspace",
+    ]
+    .iter()
+    .map(|v| (*v).to_owned())
+    .collect::<Vec<_>>();
+    arguments.extend(sandbox_file_mounts(repo)?);
+    arguments.extend(
+        [
             "--chdir",
             "/workspace",
             "--clearenv",
@@ -448,10 +503,12 @@ fn sandbox_shell(repo: &Path, script: &str) -> Result<String, String> {
             "--norc",
             "-c",
             script,
-        ],
-        15,
-    )?;
-    text_output(out)
+        ]
+        .iter()
+        .map(|v| (*v).to_owned()),
+    );
+    let args: Vec<&str> = arguments.iter().map(String::as_str).collect();
+    text_output(command("bwrap", &args, 15)?)
 }
 
 fn clean_main_checkout(repo: &Path) -> Result<(), String> {
@@ -767,6 +824,48 @@ mod tests {
         assert!(source_file("crates/relayforge-mcp/src/workstation.rs"));
         assert!(source_file(".github/workflows/tests.yml"));
     }
+    #[test]
+    fn sandbox_exposes_tracked_sources_but_not_git_or_untracked_files() {
+        let unique = format!(
+            "relayforge-sandbox-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let repo = std::env::temp_dir().join(unique);
+        fs::create_dir_all(repo.join("src")).unwrap();
+        fs::write(repo.join("src/allowed.rs"), "fn allowed() {}").unwrap();
+        fs::write(repo.join("src/private.rs"), "secret").unwrap();
+        fs::write(repo.join(".env"), "SECRET=never").unwrap();
+        let initialized = Command::new("git")
+            .arg("init")
+            .arg("-q")
+            .arg(&repo)
+            .status()
+            .unwrap();
+        assert!(initialized.success());
+        let added = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["add", "src/allowed.rs"])
+            .status()
+            .unwrap();
+        assert!(added.success());
+        let mounts = sandbox_file_mounts(&repo).unwrap();
+        let rendered = mounts.join(" ");
+        assert!(rendered.contains("/workspace/src/allowed.rs"));
+        assert!(!rendered.contains("private.rs"));
+        assert!(!rendered.contains(".env"));
+        assert!(!rendered.contains(".git"));
+        assert!(!rendered.contains("SECRET"));
+        let bad = repo.join("src/symlink.rs");
+        std::os::unix::fs::symlink(repo.join("src/private.rs"), &bad).unwrap();
+        assert!(verified_tracked_file(&repo, "src/symlink.rs").is_err());
+        fs::remove_dir_all(repo).unwrap();
+    }
+
     #[test]
     fn sandbox_denies_bad_commands_and_traversal() {
         for script in ["", "x\0y", "echo \u{1b}[31m"] {

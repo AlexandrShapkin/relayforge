@@ -135,8 +135,11 @@ separate policy, audit, containment and verification.
 
 The optional `shell.sandbox` workstation operation executes a bounded
 15-second shell command **inside bubblewrap namespaces**, not as an
-unrestricted host terminal. The command can read (but **not write**) the
-fixed RelayForge checkout at `/workspace`; transient `/tmp` is writable. The sandbox has no network, other
+unrestricted host terminal. The command can read (but **not write**) only
+existing, non-symlinked, Git-tracked allowlisted source files mounted
+individually under `/workspace`; transient `/tmp` is writable. The
+checkout itself is **not mounted**: `.git`, ignored/untracked private files
+and any other hidden workspace data remain inaccessible. The sandbox has no network, other
 home directories, operator SSH secrets, user service bus, or persistent
 runtime directories. The tool passes a fixed bubblewrap argument vector;
 user text is executed only by the isolated shell. The local development
