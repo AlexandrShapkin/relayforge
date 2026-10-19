@@ -52,6 +52,13 @@ fn git_clean_result(output: Option<Output>) -> Option<bool> {
     }
 }
 
+// A successful -z git ls-files query emits zero bytes only when no
+// non-ignored untracked files exist. Never return file names to callers.
+fn git_no_untracked_files(output: Option<Output>) -> Option<bool> {
+    let result = output?;
+    result.status.success().then_some(result.stdout.is_empty())
+}
+
 fn git_head(output: Option<Output>) -> Option<String> {
     let result = output?;
     if !result.status.success() {
@@ -110,6 +117,10 @@ fn repository_snapshot(home: &str) -> Value {
     let path = repo.to_string_lossy();
     let head = git_head(git(&path, &["rev-parse", "--verify", "HEAD"]));
     let tracked_clean = git_clean_result(git(&path, &["diff", "--quiet", "HEAD", "--"]));
+    let untracked_clean = git_no_untracked_files(git(
+        &path,
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+    ));
     let branch = git(&path, &["symbolic-ref", "--quiet", "--short", "HEAD"])
         .and_then(|v| v.status.success().then_some(v.stdout))
         .and_then(|bytes| String::from_utf8(bytes).ok())
@@ -118,6 +129,7 @@ fn repository_snapshot(home: &str) -> Value {
         "present":head.is_some(),
         "on_main":branch,
         "tracked_clean":tracked_clean,
+        "untracked_clean":untracked_clean,
         "head_commit":head
     })
 }
@@ -172,7 +184,10 @@ fn tunnel_snapshot(home: &str) -> Value {
 
 fn classify(repo: &Value, tunnel: &Value) -> &'static str {
     let repo_ok =
-        repo["present"] == true && repo["on_main"] == true && repo["tracked_clean"] == true;
+        repo["present"] == true
+            && repo["on_main"] == true
+            && repo["tracked_clean"] == true
+            && repo["untracked_clean"] == true;
     let tunnel_ok = tunnel["service_active"] == true && tunnel["authenticated_poll_recent"] == true;
     if repo_ok && tunnel_ok {
         "healthy"
@@ -277,8 +292,26 @@ mod tests {
     }
 
     #[test]
+    fn untracked_detection_is_private_and_fail_closed() {
+        for (exit, bytes, expected) in [
+            (0, b"".as_slice(), Some(true)),
+            (0, b"private-file\0".as_slice(), Some(false)),
+            (1, b"".as_slice(), None),
+            (124, b"".as_slice(), None),
+        ] {
+            let output = Output {
+                status: std::process::ExitStatus::from_raw(exit << 8),
+                stdout: bytes.to_vec(),
+                stderr: vec![],
+            };
+            assert_eq!(git_no_untracked_files(Some(output)), expected);
+        }
+        assert_eq!(git_no_untracked_files(None), None);
+    }
+
+    #[test]
     fn status_fails_closed_for_missing_evidence() {
-        let valid_repo = json!({"present":true,"on_main":true,"tracked_clean":true});
+        let valid_repo = json!({"present":true,"on_main":true,"tracked_clean":true,"untracked_clean":true});
         let valid_tunnel = json!({"service_active":true,"authenticated_poll_recent":true});
         assert_eq!(classify(&valid_repo, &valid_tunnel), "healthy");
         assert_eq!(
@@ -290,6 +323,14 @@ mod tests {
             "degraded"
         );
         assert_eq!(classify(&valid_repo, &json!({})), "unverified");
+        assert_eq!(
+            classify(&json!({"present":true,"on_main":true,"tracked_clean":true}), &valid_tunnel),
+            "unverified"
+        );
+        assert_eq!(
+            classify(&json!({"present":true,"on_main":true,"tracked_clean":true,"untracked_clean":false}), &valid_tunnel),
+            "unverified"
+        );
         assert_eq!(
             classify(&json!({"present":true}), &valid_tunnel),
             "unverified"
