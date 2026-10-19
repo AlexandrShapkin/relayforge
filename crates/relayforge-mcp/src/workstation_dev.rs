@@ -199,7 +199,7 @@ fn audit(home: &Path, operation: &str) -> Result<(), String> {
         .as_secs();
     writeln!(file, "{}", json!({"at":at,"operation":operation}))
         .map_err(|_| "audit unavailable")?;
-    file.sync_all().map_err(|_| "audit unavailable")
+    file.sync_all().map_err(|_| "audit unavailable".to_string())
 }
 
 fn unit_id(input: &str) -> bool {
