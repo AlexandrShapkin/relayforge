@@ -94,7 +94,7 @@ def main():
         "workstation write succeeded without local operator opt-in")
     assert by_id[8]["result"]["isError"] is False
     capabilities = json.loads(by_id[8]["result"]["content"][0]["text"])
-    assert capabilities["api_revision"] == 7
+    assert capabilities["api_revision"] == 8
     assert "repo.sync" in capabilities["operations"]
     assert "task.list" in capabilities["operations"]
     assert "tunnel.inspect" in capabilities["operations"]
@@ -103,6 +103,9 @@ def main():
     assert "job.start" in capabilities["operations"]
     assert "job.status" in capabilities["operations"]
     assert "job.stop" in capabilities["operations"]
+    assert "job.chain.start" in capabilities["operations"]
+    assert "job.chain.status" in capabilities["operations"]
+    assert "job.chain.output" in capabilities["operations"]
     assert "dependency.audit" in capabilities["operations"]
     assert "ssh.retire.config" in capabilities["operations"]
     assert by_id[13]["result"]["isError"] is True, (
