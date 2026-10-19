@@ -240,19 +240,60 @@ fn audit(home: &Path, operation: &str) -> Result<(), String> {
 }
 
 fn unit_id(input: &str) -> bool {
-    let Some(ts) = input.strip_prefix("relayforge-dev-") else {
+    let Some(raw) = input.strip_prefix("relayforge-dev-") else {
         return false;
     };
-    ts.len() == 10 && ts.bytes().all(|ch| ch.is_ascii_digit())
+    let mut pieces = raw.split('-');
+    let epoch = pieces.next().unwrap_or("");
+    if epoch.len() != 10 || !epoch.bytes().all(|ch| ch.is_ascii_digit()) {
+        return false;
+    }
+    match (pieces.next(), pieces.next()) {
+        (None, None) => true, // Old receipts remain readable.
+        (Some(suffix), None) => {
+            suffix.len() == 6
+                && suffix
+                    .bytes()
+                    .all(|ch| ch.is_ascii_digit() || (b'a'..=b'f').contains(&ch))
+        }
+        _ => false,
+    }
 }
 
-fn spawn_task(repo: &Path, kind: &str) -> Result<String, String> {
-    let ts = SystemTime::now()
+fn new_unit_id() -> Result<String, String> {
+    let epoch = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| "clock unavailable")?
         .as_secs();
-    let unit = format!("relayforge-dev-{ts}");
+    let mut suffix = [0u8; 3];
+    fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut suffix))
+        .map_err(|_| "randomness unavailable")?;
+    let id = format!(
+        "relayforge-dev-{epoch}-{:02x}{:02x}{:02x}",
+        suffix[0], suffix[1], suffix[2]
+    );
+    if !unit_id(&id) {
+        return Err("invalid generated task ID".into());
+    }
+    Ok(id)
+}
+
+fn task_lock(repo: &Path) -> Result<String, String> {
+    let home = repo
+        .parent()
+        .and_then(Path::parent)
+        .ok_or("invalid repository root")?;
+    let lock = home.join(".local/state/relayforge/development.lock");
+    lock.to_str()
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| "invalid task lock path".into())
+}
+
+fn spawn_task(repo: &Path, kind: &str) -> Result<String, String> {
+    let unit = new_unit_id()?;
     let repo_string = repo.to_str().ok_or("invalid repo path")?;
+    let lock = task_lock(repo)?;
     let workdir = format!("--working-directory={repo_string}");
     let unit_opt = format!("--unit={unit}");
     let mut args = vec![
@@ -261,6 +302,11 @@ fn spawn_task(repo: &Path, kind: &str) -> Result<String, String> {
         "--collect",
         &workdir,
         "--property=Type=oneshot",
+        "--property=TimeoutStartSec=1800",
+        "flock",
+        "-w",
+        "600",
+        &lock,
     ];
     match kind {
         "repo.sync" => {
@@ -572,13 +618,22 @@ pub fn execute(args: &Value) -> Result<String, String> {
             clean_main_checkout(&repo)?;
             audit(&home, operation)?;
             // A transient unit restarts the tunnel independently of the MCP
-            // call that initiates it. Reconnection must be checked afterward.
+            // call that initiates it. It waits for ongoing builds/syncs first.
+            let unit = new_unit_id()?;
+            let unit_opt = format!("--unit={unit}");
+            let lock = task_lock(&repo)?;
             let result = command(
                 "systemd-run",
                 &[
                     "--user",
                     "--collect",
-                    "--unit=relayforge-dev-tunnel-restart",
+                    &unit_opt,
+                    "--property=Type=oneshot",
+                    "--property=TimeoutStartSec=1800",
+                    "flock",
+                    "-w",
+                    "600",
+                    &lock,
                     "systemctl",
                     "--user",
                     "restart",
@@ -589,7 +644,7 @@ pub fn execute(args: &Value) -> Result<String, String> {
             if !result.status.success() {
                 return Err("restart not scheduled".into());
             }
-            Ok(json!({"restart_scheduled":true,"may_disconnect":true}).to_string())
+            Ok(json!({"restart_scheduled":true,"may_disconnect":true,"task_id":unit}).to_string())
         }
         _ => Err("operation or parameters denied".into()),
     }
@@ -645,6 +700,10 @@ mod tests {
     #[test]
     fn strict_task_identifiers_and_required_arguments() {
         assert!(unit_id("relayforge-dev-1792370000"));
+        assert!(unit_id("relayforge-dev-1792370000-a0b1c2"));
+        assert_eq!(new_unit_id().unwrap().len(), 32);
+        assert!(!unit_id("relayforge-dev-1792370000-a0b1cx"));
+        assert!(!unit_id("relayforge-dev-1792370000-a0b1c2-extra"));
         assert!(!unit_id("relayforge-dev-1;id"));
         assert!(!unit_id("sshd"));
         assert!(execute(&json!({"operation":"unknown"})).is_err());
