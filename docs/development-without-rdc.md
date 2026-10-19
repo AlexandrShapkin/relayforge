@@ -244,3 +244,20 @@ user service must still be running. It does not remove ChatGPT or GitHub
 provider dependencies. The optional `--readonly-worker` command is
 restricted to tunnel policy; never substitute the unrestricted default
 stdio mode.
+
+### One-time activation with rollback
+
+`deploy/relayforge-hot-activate.sh EXPECTED_MAIN_SHA` is a **local-user-only**
+one-time bootstrap after the reviewed merge is present on ThinkPad. It refuses
+a different commit or dirty tracked checkout, saves the previous release MCP
+to private local state, runs a fresh locked release build and offline MCP smoke
+tests, restarts the tunnel once, and requires a **fresh** authenticated
+control-plane poll. If compilation, testing or tunnel recovery fails, it
+restores the previous MCP binary and attempts to restart the service.
+A verified new worker is also copied into local state as an initial
+last-known-good artifact. This is a recovery best effort, not a substitute
+for human physical recovery after a machine/network failure.
+
+Do not execute this bootstrap through an MCP approval-bypass mechanism or
+give it API credentials. The operator must review the exact merge and
+authorize the one-time service restart separately.
