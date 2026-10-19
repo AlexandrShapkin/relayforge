@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-const HOSTS: &[&str] = &["ru0", "ru1", "srv0"];
+const HOSTS: &[&str] = &["ru0", "srv0"];
 const AGENT_PATH: &str = "/home/shapkin_as/.local/libexec/relayforge-pilot/relayforge-agent";
 const MAX_OUTPUT: usize = 16 * 1024;
 
@@ -17,15 +17,6 @@ pub fn tool() -> Value {
             "operation":{"type":"string","enum":["device.status","service.status","service.list", "process.top","user.service.list","user.service.status","user.jobs.summary"]},
             "unit":{"type":"string","maxLength":100,"description":"Required only for service.status; e.g. nginx.service"}
         },"required":["host","operation"],"additionalProperties":false}})
-}
-
-/// Restricted to the approved-change dispatcher; deliberately NOT
-/// advertised as a directly callable MCP tool.
-pub fn trigger_ru1_monitor() -> Result<String, String> {
-    invoke_agent(
-        "ru1",
-        json!({"version":PROTOCOL_VERSION,"operation":"monitor.run"}),
-    )
 }
 
 pub fn probe_tool() -> Value {
@@ -371,7 +362,7 @@ mod tests {
         )
         .is_ok());
         assert!(validate_file(
-            &json!({"host":"ru1","operation":"file.create","name":"report.txt","content":"test"})
+            &json!({"host":"srv0","operation":"file.create","name":"report.txt","content":"test"})
         )
         .is_ok());
     }
@@ -389,8 +380,8 @@ mod tests {
             assert!(validate(&req).is_err());
         }
         assert!(validate(&json!({"host":"ru0","operation":"device.status"})).is_ok());
-        assert!(validate(&json!({"host":"ru1","operation":"process.top"})).is_ok());
-        assert!(validate(&json!({"host":"ru1","operation":"user.service.list"})).is_ok());
+        assert!(validate(&json!({"host":"ru1","operation":"process.top"})).is_err());
+        assert!(validate(&json!({"host":"ru1","operation":"user.service.list"})).is_err());
         assert!(validate(&json!({"host":"ru0","operation":"user.service.status","unit":"assistant-hub-local.service"})).is_ok());
         assert!(validate(&json!({"host":"ru0","operation":"user.service.restart","unit":"assistant-hub-local.service"})).is_err());
         assert!(validate(&json!({"host":"srv0","operation":"service.list"})).is_ok());
