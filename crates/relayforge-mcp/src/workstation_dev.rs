@@ -268,7 +268,9 @@ fn spawn_task(repo: &Path, kind: &str) -> Result<String, String> {
 fn sandbox_shell(repo: &Path, script: &str) -> Result<String, String> {
     if script.is_empty()
         || script.len() > 2048
-        || script.bytes().any(|ch| ch == 0 || (ch < 32 && ch != b'\n' && ch != b'\t'))
+        || script
+            .bytes()
+            .any(|ch| ch == 0 || (ch < 32 && ch != b'\n' && ch != b'\t'))
     {
         return Err("invalid sandbox command".into());
     }
@@ -279,20 +281,44 @@ fn sandbox_shell(repo: &Path, script: &str) -> Result<String, String> {
             "--unshare-all",
             "--die-with-parent",
             "--new-session",
-            "--ro-bind", "/usr", "/usr",
-            "--ro-bind", "/bin", "/bin",
-            "--ro-bind", "/lib", "/lib",
-            "--ro-bind", "/lib64", "/lib64",
-            "--proc", "/proc",
-            "--dev", "/dev",
-            "--tmpfs", "/tmp",
-            "--dir", "/workspace",
-            "--bind", workdir, "/workspace",
-            "--chdir", "/workspace",
+            "--ro-bind",
+            "/usr",
+            "/usr",
+            "--ro-bind",
+            "/bin",
+            "/bin",
+            "--ro-bind",
+            "/lib",
+            "/lib",
+            "--ro-bind",
+            "/lib64",
+            "/lib64",
+            "--proc",
+            "/proc",
+            "--dev",
+            "/dev",
+            "--tmpfs",
+            "/tmp",
+            "--dir",
+            "/workspace",
+            "--bind",
+            workdir,
+            "/workspace",
+            "--chdir",
+            "/workspace",
             "--clearenv",
-            "--setenv", "PATH", "/usr/bin:/bin",
-            "--setenv", "HOME", "/workspace",
-            "--", "/bin/bash", "--noprofile", "--norc", "-c", script,
+            "--setenv",
+            "PATH",
+            "/usr/bin:/bin",
+            "--setenv",
+            "HOME",
+            "/workspace",
+            "--",
+            "/bin/bash",
+            "--noprofile",
+            "--norc",
+            "-c",
+            script,
         ],
         15,
     )?;
@@ -310,10 +336,18 @@ pub fn execute(args: &Value) -> Result<String, String> {
         "process.list" if obj.len() == 1 => {
             text_output(command("ps", &["-eo", "pid=,comm=,etime=,rss="], 8)?)
         }
-        "user.services" if obj.len() == 1 => {
-            text_output(command("systemctl", &["--user", "list-units",
-                "--type=service", "--all", "--no-pager", "--no-legend"], 8)?)
-        }
+        "user.services" if obj.len() == 1 => text_output(command(
+            "systemctl",
+            &[
+                "--user",
+                "list-units",
+                "--type=service",
+                "--all",
+                "--no-pager",
+                "--no-legend",
+            ],
+            8,
+        )?),
         "repo.status" if obj.len() == 1 => text_output(git(
             &repo,
             &["status", "--short", "--branch", "--untracked-files=no"],
@@ -439,7 +473,10 @@ pub fn execute(args: &Value) -> Result<String, String> {
             if !dev_enabled(&home) {
                 return Err("local development opt-in missing".into());
             }
-            let script = obj.get("script").and_then(Value::as_str).ok_or("script required")?;
+            let script = obj
+                .get("script")
+                .and_then(Value::as_str)
+                .ok_or("script required")?;
             audit(&home, operation)?;
             sandbox_shell(&repo, script)
         }
