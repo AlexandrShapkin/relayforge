@@ -245,7 +245,8 @@ mod tests {
                 "next_scheduled_at":"tomorrow",
                 "minutes_since_completion":15,"max_age_minutes":120
             })).collect::<Vec<_>>()
-        }).to_string()
+        })
+        .to_string()
     }
 
     #[test]
@@ -274,14 +275,20 @@ mod tests {
     #[test]
     fn unreachable_and_malformed_agents_are_not_healthy() {
         let unavailable = snapshot_with(&|host| {
-            if host == "ru0" {Err("connection refused".into())}
-            else {Ok(mock_for(host))}
+            if host == "ru0" {
+                Err("connection refused".into())
+            } else {
+                Ok(mock_for(host))
+            }
         });
         assert_eq!(unavailable["overall"], "degraded");
         assert_eq!(unavailable["hosts"][0]["reason"], "agent_unavailable");
         let malformed = snapshot_with(&|host| {
-            if host == "srv0" {Ok("{}".into())}
-            else {Ok(mock_for(host))}
+            if host == "srv0" {
+                Ok("{}".into())
+            } else {
+                Ok(mock_for(host))
+            }
         });
         assert_eq!(malformed["overall"], "degraded");
         assert_eq!(malformed["hosts"][1]["reason"], "invalid_agent_response");
