@@ -73,7 +73,9 @@ fn unsafe_uid() -> u32 {
 fn plain_path(path: &str) -> bool {
     !path.is_empty()
         && !path.starts_with('/')
-        && path.split('/').all(|part| !part.is_empty() && part != "." && part != "..")
+        && path
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..")
         && path.len() <= 192
         && !path.bytes().any(|b| b == b'\\' || b == 0 || b < 32)
         && Path::new(path).components().all(|part| match part {
@@ -83,14 +85,18 @@ fn plain_path(path: &str) -> bool {
             }
             _ => false,
         })
-        && !path.split('/').any(|part| part == "target" || part == "node_modules")
+        && !path
+            .split('/')
+            .any(|part| part == "target" || part == "node_modules")
 }
 
 fn source_file(path: &str) -> bool {
     plain_path(path)
-        && [".rs", ".toml", ".md", ".py", ".sh", ".yml", ".yaml", ".json"]
-            .iter()
-            .any(|ext| path.ends_with(ext))
+        && [
+            ".rs", ".toml", ".md", ".py", ".sh", ".yml", ".yaml", ".json",
+        ]
+        .iter()
+        .any(|ext| path.ends_with(ext))
 }
 
 fn command(program: &str, args: &[&str], max_seconds: u32) -> Result<Output, String> {
@@ -110,13 +116,20 @@ fn text_output(output: Output) -> Result<String, String> {
     let stdout = String::from_utf8(output.stdout).map_err(|_| "non-utf8 output")?;
     let stderr = String::from_utf8(output.stderr).map_err(|_| "non-utf8 output")?;
     Ok(json!({"exit_code":output.status.code(),
-        "stdout":stdout,"stderr":stderr}).to_string())
+        "stdout":stdout,"stderr":stderr})
+    .to_string())
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<Output, String> {
     let path = repo.to_str().ok_or("repository path invalid")?;
-    let mut fixed = vec!["-c", "core.hooksPath=/dev/null",
-        "-c", "core.fsmonitor=false", "-C", path];
+    let mut fixed = vec![
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "core.fsmonitor=false",
+        "-C",
+        path,
+    ];
     fixed.extend_from_slice(args);
     command("git", &fixed, 12)
 }
@@ -157,49 +170,86 @@ fn audit(home: &Path, operation: &str) -> Result<(), String> {
     let path = home.join(".local/state/relayforge/workstation-dev-audit.jsonl");
     let parent = path.parent().ok_or("audit directory unavailable")?;
     let dir = fs::symlink_metadata(parent).map_err(|_| "audit directory unavailable")?;
-    if !dir.is_dir() || dir.file_type().is_symlink()
-        || dir.permissions().mode() & 0o077 != 0 || dir.uid() != unsafe_uid()
+    if !dir.is_dir()
+        || dir.file_type().is_symlink()
+        || dir.permissions().mode() & 0o077 != 0
+        || dir.uid() != unsafe_uid()
     {
         return Err("insecure audit directory".into());
     }
     if let Ok(meta) = fs::symlink_metadata(&path) {
-        if !meta.is_file() || meta.file_type().is_symlink()
-            || meta.permissions().mode() & 0o077 != 0 || meta.len() > 8 * 1024 * 1024
+        if !meta.is_file()
+            || meta.file_type().is_symlink()
+            || meta.permissions().mode() & 0o077 != 0
+            || meta.len() > 8 * 1024 * 1024
         {
             return Err("insecure audit file".into());
         }
     }
-    let mut file = OpenOptions::new().append(true).create(true).mode(0o600)
+    let mut file = OpenOptions::new()
+        .append(true)
+        .create(true)
+        .mode(0o600)
         .custom_flags(0x20000) // O_NOFOLLOW on Linux
-        .open(path).map_err(|_| "audit unavailable")?;
-    let at = SystemTime::now().duration_since(UNIX_EPOCH)
-        .map_err(|_| "clock unavailable")?.as_secs();
+        .open(path)
+        .map_err(|_| "audit unavailable")?;
+    let at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "clock unavailable")?
+        .as_secs();
     writeln!(file, "{}", json!({"at":at,"operation":operation}))
         .map_err(|_| "audit unavailable")?;
     file.sync_all().map_err(|_| "audit unavailable")
 }
 
 fn unit_id(input: &str) -> bool {
-    let Some(ts) = input.strip_prefix("relayforge-dev-") else { return false; };
+    let Some(ts) = input.strip_prefix("relayforge-dev-") else {
+        return false;
+    };
     ts.len() == 10 && ts.bytes().all(|ch| ch.is_ascii_digit())
 }
 
 fn spawn_task(repo: &Path, kind: &str) -> Result<String, String> {
-    let ts = SystemTime::now().duration_since(UNIX_EPOCH)
-        .map_err(|_| "clock unavailable")?.as_secs();
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "clock unavailable")?
+        .as_secs();
     let unit = format!("relayforge-dev-{ts}");
     let repo_string = repo.to_str().ok_or("invalid repo path")?;
     let workdir = format!("--working-directory={repo_string}");
     let unit_opt = format!("--unit={unit}");
-    let mut args = vec!["--user", &unit_opt, "--collect", &workdir, "--property=Type=oneshot"];
+    let mut args = vec![
+        "--user",
+        &unit_opt,
+        "--collect",
+        &workdir,
+        "--property=Type=oneshot",
+    ];
     match kind {
         "repo.sync" => {
-            args.extend(["git", "-c", "core.hooksPath=/dev/null", "-C", repo_string,
-                "pull", "--ff-only", "origin", "main"]);
+            args.extend([
+                "git",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-C",
+                repo_string,
+                "pull",
+                "--ff-only",
+                "origin",
+                "main",
+            ]);
         }
         "build.start" => {
-            args.extend(["cargo", "build", "--release", "--locked",
-                "-p", "relayforge-mcp", "-p", "relayforge-agent"]);
+            args.extend([
+                "cargo",
+                "build",
+                "--release",
+                "--locked",
+                "-p",
+                "relayforge-mcp",
+                "-p",
+                "relayforge-agent",
+            ]);
         }
         _ => return Err("task denied".into()),
     }
@@ -212,19 +262,28 @@ fn spawn_task(repo: &Path, kind: &str) -> Result<String, String> {
 
 pub fn execute(args: &Value) -> Result<String, String> {
     let obj = args.as_object().ok_or("expected object")?;
-    let operation = obj.get("operation").and_then(Value::as_str).ok_or("missing operation")?;
+    let operation = obj
+        .get("operation")
+        .and_then(Value::as_str)
+        .ok_or("missing operation")?;
     let (home, repo) = home_and_repo()?;
     match operation {
         "repo.status" if obj.len() == 1 => {
             text_output(git(&repo, &["status", "--short", "--branch"])?)
         }
-        "repo.list" if obj.len() <= 2 && obj.keys().all(|key| key == "operation" || key == "path") => {
+        "repo.list"
+            if obj.len() <= 2 && obj.keys().all(|key| key == "operation" || key == "path") =>
+        {
             let prefix = obj.get("path").and_then(Value::as_str).unwrap_or("");
             if !prefix.is_empty() && !plain_path(prefix) {
                 return Err("path denied".into());
             }
             let all = tracked_paths(&repo)?;
-            let filter = if prefix.is_empty() { String::new() } else { format!("{prefix}/") };
+            let filter = if prefix.is_empty() {
+                String::new()
+            } else {
+                format!("{prefix}/")
+            };
             let mut names = BTreeSet::new();
             for path in all {
                 if let Some(tail) = path.strip_prefix(&filter) {
@@ -233,11 +292,17 @@ pub fn execute(args: &Value) -> Result<String, String> {
                     }
                 }
             }
-            Ok(json!({"path":prefix,"entries":names.into_iter().take(200).collect::<Vec<_>>(),
-                "limited":true}).to_string())
+            Ok(
+                json!({"path":prefix,"entries":names.into_iter().take(200).collect::<Vec<_>>(),
+                "limited":true})
+                .to_string(),
+            )
         }
         "repo.read" if obj.len() == 2 => {
-            let path = obj.get("path").and_then(Value::as_str).ok_or("path required")?;
+            let path = obj
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or("path required")?;
             let safe = safe_existing_file(&repo, path)?;
             let data = fs::read(&safe).map_err(|_| "source unreadable")?;
             if data.len() > MAX_CONTENT {
@@ -247,45 +312,105 @@ pub fn execute(args: &Value) -> Result<String, String> {
             Ok(json!({"path":path,"utf8_text":value}).to_string())
         }
         "repo.write" if obj.len() == 3 => {
-            if !dev_enabled(&home) { return Err("local development opt-in missing".into()); }
-            let path = obj.get("path").and_then(Value::as_str).ok_or("path required")?;
-            let content = obj.get("content").and_then(Value::as_str).ok_or("content required")?;
-            if content.len() > MAX_CONTENT { return Err("content too large".into()); }
+            if !dev_enabled(&home) {
+                return Err("local development opt-in missing".into());
+            }
+            let path = obj
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or("path required")?;
+            let content = obj
+                .get("content")
+                .and_then(Value::as_str)
+                .ok_or("content required")?;
+            if content.len() > MAX_CONTENT {
+                return Err("content too large".into());
+            }
             let safe = safe_existing_file(&repo, path)?;
             audit(&home, operation)?;
             // Refuse links at open; never follow paths outside the fixed workspace.
-            let mut file = OpenOptions::new().write(true).truncate(true)
-                .custom_flags(0x20000).open(safe).map_err(|_| "source not writable")?;
-            file.write_all(content.as_bytes()).map_err(|_| "write failed")?;
+            let mut file = OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .custom_flags(0x20000)
+                .open(safe)
+                .map_err(|_| "source not writable")?;
+            file.write_all(content.as_bytes())
+                .map_err(|_| "write failed")?;
             file.sync_all().map_err(|_| "write failed")?;
             Ok(json!({"written":true,"byte_length":content.len()}).to_string())
         }
         "repo.sync" | "build.start" if obj.len() == 1 => {
-            if !dev_enabled(&home) { return Err("local development opt-in missing".into()); }
+            if !dev_enabled(&home) {
+                return Err("local development opt-in missing".into());
+            }
             audit(&home, operation)?;
             spawn_task(&repo, operation)
         }
         "task.status" | "task.logs" if obj.len() == 2 => {
-            let task = obj.get("task_id").and_then(Value::as_str).ok_or("task required")?;
-            if !unit_id(task) { return Err("task denied".into()); }
+            let task = obj
+                .get("task_id")
+                .and_then(Value::as_str)
+                .ok_or("task required")?;
+            if !unit_id(task) {
+                return Err("task denied".into());
+            }
             let unit = format!("{task}.service");
             if operation == "task.status" {
-                text_output(command("systemctl", &["--user","show",&unit,
-                    "-p","ActiveState","-p","Result","-p","ExecMainStatus"], 8)?)
+                text_output(command(
+                    "systemctl",
+                    &[
+                        "--user",
+                        "show",
+                        &unit,
+                        "-p",
+                        "ActiveState",
+                        "-p",
+                        "Result",
+                        "-p",
+                        "ExecMainStatus",
+                    ],
+                    8,
+                )?)
             } else {
-                text_output(command("journalctl", &["--user","-u",&unit,
-                    "--no-pager","-n","80","--output=cat"], 8)?)
+                text_output(command(
+                    "journalctl",
+                    &[
+                        "--user",
+                        "-u",
+                        &unit,
+                        "--no-pager",
+                        "-n",
+                        "80",
+                        "--output=cat",
+                    ],
+                    8,
+                )?)
             }
         }
         "tunnel.restart" if obj.len() == 1 => {
-            if !dev_enabled(&home) { return Err("local development opt-in missing".into()); }
+            if !dev_enabled(&home) {
+                return Err("local development opt-in missing".into());
+            }
             audit(&home, operation)?;
             // A transient unit restarts the tunnel independently of the MCP
             // call that initiates it. Reconnection must be checked afterward.
-            let result = command("systemd-run", &["--user", "--collect",
-                "--unit=relayforge-dev-tunnel-restart",
-                "systemctl","--user","restart","relayforge-tunnel.service"], 8)?;
-            if !result.status.success() { return Err("restart not scheduled".into()); }
+            let result = command(
+                "systemd-run",
+                &[
+                    "--user",
+                    "--collect",
+                    "--unit=relayforge-dev-tunnel-restart",
+                    "systemctl",
+                    "--user",
+                    "restart",
+                    "relayforge-tunnel.service",
+                ],
+                8,
+            )?;
+            if !result.status.success() {
+                return Err("restart not scheduled".into());
+            }
             Ok(json!({"restart_scheduled":true,"may_disconnect":true}).to_string())
         }
         _ => Err("operation or parameters denied".into()),
@@ -297,9 +422,17 @@ mod tests {
     use super::*;
     #[test]
     fn denies_traversal_and_private_files() {
-        for name in ["../.ssh/id_ed25519","/etc/passwd","src/../../etc/passwd",
-            ".git/config","target/release/relayforge-mcp","src/secret.env",
-            "src/./main.rs","foo\\bar.rs","src/.env"] {
+        for name in [
+            "../.ssh/id_ed25519",
+            "/etc/passwd",
+            "src/../../etc/passwd",
+            ".git/config",
+            "target/release/relayforge-mcp",
+            "src/secret.env",
+            "src/./main.rs",
+            "foo\\bar.rs",
+            "src/.env",
+        ] {
             assert!(!source_file(name), "{name}");
         }
         assert!(source_file("crates/relayforge-mcp/src/workstation.rs"));
