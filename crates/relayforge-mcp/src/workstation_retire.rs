@@ -1,6 +1,6 @@
 //! Exact, audit-gated retirement of the literal ru1 SSH entries only.
 //! Never accepts hostnames, paths, shell commands or file contents from MCP.
-use serde_json::{json, Value};
+use serde_json::json;
 use std::{
     fs::{self, OpenOptions},
     io::{Read, Write},
@@ -177,7 +177,7 @@ fn save_once(path: &Path, contents: &str) -> Result<(), String> {
         let _ = fs::remove_file(&temp);
         return Err("staged ssh file write failed".into());
     }
-    fs::rename(&temp, path).map_err(|_| "ssh file replacement failed")
+    fs::rename(&temp, path).map_err(|_| "ssh file replacement failed".to_owned())
 }
 
 pub fn apply(home: &Path, operation: &str) -> Result<String, String> {
