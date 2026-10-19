@@ -379,27 +379,34 @@ fn task_lock(repo: &Path) -> Result<String, String> {
         .ok_or_else(|| "invalid task lock path".into())
 }
 
+// Only the fixed Git fast-forward and locked Cargo build may be retried:
+// both are idempotent and share a single file lock. In particular, NEVER
+// apply this retry policy to tunnel.restart or any other service mutation.
 fn spawn_task(repo: &Path, kind: &str) -> Result<String, String> {
-    let unit = new_unit_id()?;
+    if !matches!(kind, "repo.sync" | "build.start") {
+        return Err("task denied".into());
+    }
     let repo_string = repo.to_str().ok_or("invalid repo path")?;
     let lock = task_lock(repo)?;
     let workdir = format!("--working-directory={repo_string}");
-    let unit_opt = format!("--unit={unit}");
-    let mut args = vec![
-        "--user",
-        &unit_opt,
-        "--collect",
-        &workdir,
-        "--property=Type=oneshot",
-        "--property=TimeoutStartSec=1800",
-        "flock",
-        "-w",
-        "600",
-        &lock,
-    ];
-    match kind {
-        "repo.sync" => {
-            args.extend([
+    let mut last_reason = "unavailable";
+    for attempt in 1..=3 {
+        let unit = new_unit_id()?;
+        let unit_opt = format!("--unit={unit}");
+        let mut args = vec![
+            "--user",
+            &unit_opt,
+            "--collect",
+            &workdir,
+            "--property=Type=oneshot",
+            "--property=TimeoutStartSec=1800",
+            "flock",
+            "-w",
+            "600",
+            &lock,
+        ];
+        match kind {
+            "repo.sync" => args.extend([
                 "git",
                 "-c",
                 "core.hooksPath=/dev/null",
@@ -409,10 +416,8 @@ fn spawn_task(repo: &Path, kind: &str) -> Result<String, String> {
                 "--ff-only",
                 "origin",
                 "main",
-            ]);
-        }
-        "build.start" => {
-            args.extend([
+            ]),
+            "build.start" => args.extend([
                 "cargo",
                 "build",
                 "--release",
@@ -421,15 +426,48 @@ fn spawn_task(repo: &Path, kind: &str) -> Result<String, String> {
                 "relayforge-mcp",
                 "-p",
                 "relayforge-agent",
-            ]);
+            ]),
+            _ => unreachable!(),
         }
-        _ => return Err("task denied".into()),
+        match command("systemd-run", &args, 10) {
+            Ok(output) if output.status.success() => {
+                return Ok(json!({
+                    "task_id":unit, "started":true, "kind":kind,
+                    "schedule_attempts":attempt
+                })
+                .to_string());
+            }
+            Ok(output) => last_reason = schedule_failure_class(&output),
+            Err(_) => last_reason = "client_unavailable",
+        }
+        if attempt < 3 {
+            // A previous transient unit may have been queued despite a
+            // client-side error. Distinct IDs + the shared lock ensure that
+            // at worst the fixed idempotent operation is repeated serially.
+            // Do not expose stderr: systemd diagnostics can contain paths.
+            thread::sleep(std::time::Duration::from_millis(350 * attempt));
+        }
     }
-    let result = command("systemd-run", &args, 10)?;
-    if !result.status.success() {
-        return Err("could not schedule development task".into());
+    Err(format!(
+        "development task scheduling failed after three attempts ({last_reason})"
+    ))
+}
+
+fn schedule_failure_class(output: &Output) -> &'static str {
+    let msg = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+    if msg.contains("connection") || msg.contains("connect to bus") {
+        "bus_unavailable"
+    } else if msg.contains("already exists") {
+        "unit_conflict"
+    } else if msg.contains("start request repeated") || msg.contains("rate limit") {
+        "rate_limited"
+    } else if msg.contains("timed out") || output.status.code() == Some(124) {
+        "timeout"
+    } else if msg.contains("permission") || msg.contains("access denied") {
+        "permission_denied"
+    } else {
+        "systemd_rejected"
     }
-    Ok(json!({"task_id":unit,"started":true,"kind":kind}).to_string())
 }
 
 // Materialize a read-only view of allowlisted, currently tracked source
@@ -911,6 +949,29 @@ mod tests {
         let response = sandbox_shell(Path::new("/nonexistent/relayforge"), "pwd");
         assert!(response.is_err() || response.is_ok_and(|value| value.contains("exit_code")));
     }
+    #[test]
+    fn scheduling_errors_are_classified_without_raw_output() {
+        use std::os::unix::process::ExitStatusExt;
+        let fail = |message: &str| Output {
+            status: std::process::ExitStatus::from_raw(1 << 8),
+            stdout: vec![],
+            stderr: message.as_bytes().to_vec(),
+        };
+        assert_eq!(
+            schedule_failure_class(&fail("Failed to connect to bus: Connection refused")),
+            "bus_unavailable"
+        );
+        assert_eq!(
+            schedule_failure_class(&fail("Unit name already exists")),
+            "unit_conflict"
+        );
+        assert_eq!(
+            schedule_failure_class(&fail("Sensitive path /home/private/secret-key")),
+            "systemd_rejected"
+        );
+        assert!(spawn_task(Path::new("/tmp"), "tunnel.restart").is_err());
+    }
+
     #[test]
     fn bounded_stdin_is_passed_without_argv_script() {
         let out = command_input("sh", &["-s"], Some("printf 'FROM_STDIN'"), 5).unwrap();
