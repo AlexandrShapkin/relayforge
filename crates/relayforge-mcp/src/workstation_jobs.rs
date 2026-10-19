@@ -570,7 +570,10 @@ mod tests {
         let unique = format!(
             "relayforge-job-failure-test-{}-{}",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         );
         let home = std::env::temp_dir().join(unique);
         let state = home.join(".local/state/relayforge");
@@ -588,7 +591,10 @@ mod tests {
         assert_eq!(status["exit_code"], 1);
         assert_eq!(status["failure_kind"], "worker_failed");
         assert!(!status.to_string().contains("private"));
-        assert_eq!(read_text(&job,"result.json",2048).unwrap().is_some(),true);
+        assert_eq!(
+            read_text(&job, "result.json", 2048).unwrap().is_some(),
+            true
+        );
         fs::remove_dir_all(home).unwrap();
     }
 
