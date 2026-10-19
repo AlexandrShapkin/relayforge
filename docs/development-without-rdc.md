@@ -153,3 +153,37 @@ disconnect ChatGPT.
 This does not replace RDC's interactive terminal sessions, process input,
 file transfer outside the fixed checkout or GUI support. Those require
 separate explicit authorizations, confinement and testing.
+
+## Stable MCP operation contract and bounded output
+
+The workstation development tool has a **stable request schema**: the `operation`
+field is a string and the local server validates the exact operation and its
+arguments. A new operation can be added on the server without changing this
+parameter's enumerated type in the ChatGPT plugin. All unknown operations,
+unknown arguments and unexpected nested `parameters` are denied, not passed
+to a shell. `capabilities` returns the deployed operation list, API revision
+and boolean local opt-in statuses so a client can verify the live server
+independently of cached plugin tool descriptions.
+
+Once the plugin is refreshed to the new schema, future additions that use
+existing fields (or the reserved `parameters` object) will not require a
+schema change. Initial plugin refresh after this upgrade is still necessary.
+
+Local diagnostic output and file reads are capped **during acquisition**, not
+only after a subprocess or large file has already exhausted memory. Retained
+limits: 64 KiB per command stream and 48 KiB per tracked source file.
+Excess output is denied; timeout and output caps are not permission grants.
+
+The established no-RDC update sequence is:
+
+1. Make and validate changes in GitHub, then merge to `main`.
+2. Invoke `repo.sync`, await completion through `task.status` and `task.logs`,
+   and verify the new checkout is clean.
+3. Invoke `build.start`, await `Result=success` and `ExecMainStatus=0`.
+4. Invoke `tunnel.restart`, then verify `relayforge_workstation_status`
+   reports an authenticated recent tunnel poll.
+5. Verify `capabilities` and the intended new behavior via the reconnected
+   plugin. A failed restart requires an independent local recovery path.
+
+This path still depends on GitHub, ChatGPT and the Secure MCP Tunnel for
+connectivity and identity, but it consumes no Remote Desktop Commander quota.
