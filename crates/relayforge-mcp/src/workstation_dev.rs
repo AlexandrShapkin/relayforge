@@ -268,7 +268,7 @@ fn spawn_task(repo: &Path, kind: &str) -> Result<String, String> {
 fn sandbox_shell(repo: &Path, script: &str) -> Result<String, String> {
     if script.is_empty()
         || script.len() > 2048
-        || script.bytes().any(|ch| ch == 0 || (ch < 32 && ch != b'\\n' && ch != b'\\t'))
+        || script.bytes().any(|ch| ch == 0 || (ch < 32 && ch != b'\n' && ch != b'\t'))
     {
         return Err("invalid sandbox command".into());
     }
