@@ -138,18 +138,16 @@ fn summarize(
     let service_at = utc_epoch(service.get("ExecMainExitTimestampMonotonic"));
     let result = service.get("Result").map(String::as_str);
     let code = service.get("ExecMainStatus").map(String::as_str);
-    let historically_successful = timer_triggered
-        && completed
-        && result == Some("success")
-        && code == Some("0");
-    let last_run_fresh = timer_at.is_some_and(|at| {
-        (0..=MAX_LAST_RUN_AGE_SECONDS).contains(&(now_epoch - at))
-    }) && service_at.is_some_and(|at| {
-        (0..=MAX_LAST_RUN_AGE_SECONDS).contains(&(now_epoch - at))
-            && timer_at.is_some_and(|trigger| {
-                (0..=MAX_SERVICE_DURATION_SECONDS).contains(&(at - trigger))
-            })
-    });
+    let historically_successful =
+        timer_triggered && completed && result == Some("success") && code == Some("0");
+    let last_run_fresh = timer_at
+        .is_some_and(|at| (0..=MAX_LAST_RUN_AGE_SECONDS).contains(&(now_epoch - at)))
+        && service_at.is_some_and(|at| {
+            (0..=MAX_LAST_RUN_AGE_SECONDS).contains(&(now_epoch - at))
+                && timer_at.is_some_and(|trigger| {
+                    (0..=MAX_SERVICE_DURATION_SECONDS).contains(&(at - trigger))
+                })
+        });
     let success = historically_successful && last_run_fresh;
     let state = if !opted_in {
         "not_opted_in"
@@ -159,7 +157,11 @@ fn summarize(
         "awaiting_first_run"
     } else if success {
         "verified_last_run"
-    } else if historically_successful && timer_at.is_some() && service_at.is_some() && !last_run_fresh {
+    } else if historically_successful
+        && timer_at.is_some()
+        && service_at.is_some()
+        && !last_run_fresh
+    {
         "last_run_stale"
     } else {
         "last_run_unverified"
@@ -270,7 +272,10 @@ mod tests {
     #[test]
     fn missing_opt_in_or_disabled_timer_is_not_green() {
         let (mut timer, service) = sample();
-        assert_eq!(summarize(&timer, &service, false, SAMPLE_NOW)["status"], "not_opted_in");
+        assert_eq!(
+            summarize(&timer, &service, false, SAMPLE_NOW)["status"],
+            "not_opted_in"
+        );
         timer.insert("ActiveState".into(), "inactive".into());
         assert_eq!(
             summarize(&timer, &service, true, SAMPLE_NOW)["status"],
