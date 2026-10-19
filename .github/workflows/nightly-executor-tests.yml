@@ -1,0 +1,26 @@
+name: Nightly Codex executor offline policy tests
+
+on:
+  pull_request:
+    paths:
+      - scripts/nightly_codex.py
+      - scripts/test_nightly_codex.py
+      - .github/workflows/nightly-codex.yml
+      - .github/workflows/nightly-executor-tests.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  policy-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile Python executor
+        run: python3 -m py_compile scripts/nightly_codex.py scripts/test_nightly_codex.py
+      - name: Run offline safety tests
+        run: python3 scripts/test_nightly_codex.py
+      - name: Verify tasks can be listed without credentials
+        run: python3 scripts/nightly_codex.py --plan
