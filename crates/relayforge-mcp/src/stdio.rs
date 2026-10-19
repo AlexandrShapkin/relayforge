@@ -385,7 +385,7 @@ fn worker_reply(input: &Value) -> Result<Value, ()> {
     }
     let response: Value = serde_json::from_slice(&bytes).map_err(|_| ())?;
     if response.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
-        || response.get("id").is_none()
+        || response.get("id") != input.get("id")
         || (response.get("result").is_none() && response.get("error").is_none())
     {
         return Err(());
