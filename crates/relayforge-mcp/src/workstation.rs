@@ -95,8 +95,12 @@ fn poll_age_seconds(text: &str, now: u64) -> Option<u64> {
     if parsed["result"] != "ok" {
         return None;
     }
-    let polled_at = parsed.pointer("/control_plane_poll/value")?.as_u64()?;
-    let age = now.checked_sub(polled_at)?;
+    // tunnel-client may expose an integer or fractional Unix timestamp.
+    let observed = parsed.pointer("/control_plane_poll/value")?.as_f64()?;
+    if !observed.is_finite() || !(0.0..=(now as f64)).contains(&observed) {
+        return None;
+    }
+    let age = now.checked_sub(observed.floor() as u64)?;
     (age <= 86400).then_some(age)
 }
 
@@ -243,6 +247,8 @@ mod tests {
             now - 3
         );
         assert_eq!(poll_age_seconds(&input, now), Some(3));
+        let fractional = format!(r#"{{"result":"ok","control_plane_poll":{{"value":{}.25}}}}"#, now - 3);
+        assert_eq!(poll_age_seconds(&fractional, now), Some(3));
         assert_eq!(poll_age_seconds(&input, now - 86400), None);
         assert_eq!(
             poll_age_seconds(
