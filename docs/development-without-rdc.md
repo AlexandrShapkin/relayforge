@@ -311,3 +311,19 @@ and does not inherit the user's home directory or credentials.
 If the user systemd manager is unavailable, this operation fails closed
 without running the script on the tunnel host. The remaining fixed Git,
 build and diagnostic operations continue to work independently.
+
+## Bounded retries for transient systemd scheduling errors
+
+`repo.sync` and `build.start` are fixed idempotent operations behind
+the same per-workstation development lock. A transient failure to queue
+one of these tasks may be retried at most twice, with a new random unit
+ID and short bounded delay. The successful receipt reports
+`schedule_attempts` (1–3). Multiple accepted jobs, if any, run in series
+through `flock`; callers must still confirm their final `task.status`
+and `task.logs`.
+
+No retry applies to `tunnel.restart` or other service mutations, where
+duplicate execution could disconnect ChatGPT. If all three attempts
+fail, the tool returns only a fixed error category (for example
+`bus_unavailable` or `systemd_rejected`) and never raw systemd stderr,
+which might contain locally sensitive paths.
