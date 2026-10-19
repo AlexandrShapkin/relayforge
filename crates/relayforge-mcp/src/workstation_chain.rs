@@ -92,6 +92,16 @@ fn submit(home: &Path, steps: Vec<&str>) -> Result<String, String> {
     }).to_string())
 }
 
+fn stage_accepted(result: &jobs::StageResult, handoff_needed: bool) -> bool {
+    result.exit_code == 0
+        && !result.stdout_truncated
+        && !result.stderr_truncated
+        && (!handoff_needed || (
+            result.stdout.len() <= MAX_HANDOFF
+            && std::str::from_utf8(&result.stdout).is_ok()
+        ))
+}
+
 fn persist_final(dir: &Path, index: usize, code: i32, kind: Option<&str>) -> Result<(), String> {
     let mut value = json!({
         "state":"finished", "exit_code":code, "chain":true,
@@ -119,13 +129,7 @@ pub(crate) fn run(home: &Path, id: &str) -> Result<i32, String> {
         let stderr_name = artifact_name(i, "stderr");
         write_private(&dir, &stdout_name, &result.stdout)?;
         write_private(&dir, &stderr_name, &result.stderr)?;
-        let stage_code = if result.exit_code == 0
-            && !result.stdout_truncated
-            && !result.stderr_truncated
-            && (i == total || (
-                result.stdout.len() <= MAX_HANDOFF
-                && std::str::from_utf8(&result.stdout).is_ok()
-            )) {
+        let stage_code = if stage_accepted(&result, i < total) {
             0
         } else if result.exit_code != 0 {
             result.exit_code
@@ -251,6 +255,55 @@ mod tests {
             "step-1.sh","script.sh","step-02.sh.backup"] {
             assert!(!artifact_allowed(name, 6), "{name}");
         }
+    }
+    #[test]
+    fn handoff_rejects_overflow_non_utf8_and_failed_stages() {
+        let mut stage = jobs::StageResult {
+            exit_code: 0, stdout: b"alpha\n".to_vec(), stderr: vec![],
+            stdout_truncated: false, stderr_truncated: false,
+        };
+        assert!(stage_accepted(&stage, true));
+        stage.stdout = vec![b'a'; MAX_HANDOFF + 1];
+        assert!(!stage_accepted(&stage, true));
+        assert!(stage_accepted(&stage, false));
+        stage.stdout = vec![0xff];
+        assert!(!stage_accepted(&stage, true));
+        stage.stdout = b"safe".to_vec();
+        stage.stderr_truncated = true;
+        assert!(!stage_accepted(&stage, false));
+        stage.stderr_truncated = false;
+        stage.exit_code = 17;
+        assert!(!stage_accepted(&stage, false));
+    }
+    #[test]
+    fn chain_progress_and_step_output_are_durable_without_execution() {
+        use std::os::unix::fs::PermissionsExt;
+        let unique = format!("rf-chain-test-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(
+                std::time::UNIX_EPOCH).unwrap().as_nanos());
+        let home = std::env::temp_dir().join(unique);
+        let state = home.join(".local/state/relayforge");
+        fs::create_dir_all(&state).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+        let root = jobs::root(&home, true).unwrap().unwrap();
+        let id = "relayforge-job-1792390000-a1b2c3";
+        let dir = root.join(id);
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        write_private(&dir, "chain.count", b"2").unwrap();
+        write_private(&dir, "step-01.stdout", b"alpha").unwrap();
+        write_private(&dir, "step-01.stderr", b"").unwrap();
+        write_private(&dir, "step-01.json", b"{\"step\":1,\"exit_code\":0}").unwrap();
+        write_private(&dir, "result.json", b"{\"state\":\"finished\",\"exit_code\":1}").unwrap();
+        let reported: Value = serde_json::from_str(&status(&home, id).unwrap()).unwrap();
+        assert_eq!(reported["completed_steps"], 1);
+        assert_eq!(reported["steps"], 2);
+        let out: Value = serde_json::from_str(&output(&home, id, 1).unwrap()).unwrap();
+        assert_eq!(out["stdout"], "alpha");
+        assert_eq!(out["result"]["exit_code"], 0);
+        assert!(output(&home, id, 0).is_err());
+        assert!(output(&home, id, 3).is_err());
+        fs::remove_dir_all(home).unwrap();
     }
     #[test]
     fn schema_rejects_extra_fields_and_steps() {
