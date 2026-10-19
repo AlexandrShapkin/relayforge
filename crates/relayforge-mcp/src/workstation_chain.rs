@@ -12,7 +12,7 @@ const MAX_HANDOFF: usize = 8 * 1024;
 const MAX_CHAIN_TIME: u32 = 3600;
 const MAX_CHAIN_BYTES: usize = 16 * 1024;
 
-fn count(dir: &Path) -> Result<usize, String> {
+pub(crate) fn chain_count(dir: &Path) -> Result<usize, String> {
     let s = read_text(dir, "chain.count", 16)?.ok_or("not a chain")?;
     let n = s.parse::<usize>().map_err(|_| "invalid chain receipt")?;
     if !(2..=MAX_STEPS).contains(&n) {
@@ -107,7 +107,7 @@ fn persist_final(dir: &Path, index: usize, code: i32, kind: Option<&str>) -> Res
 /// Called by the same locally installed fixed worker as an ordinary job.
 pub(crate) fn run(home: &Path, id: &str) -> Result<i32, String> {
     let dir = job_dir(home, id)?;
-    let total = count(&dir)?;
+    let total = chain_count(&dir)?;
     let mut previous = None;
     for i in 1..=total {
         let script = artifact_name(i, "sh");
