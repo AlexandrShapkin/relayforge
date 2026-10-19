@@ -591,10 +591,7 @@ mod tests {
         assert_eq!(status["exit_code"], 1);
         assert_eq!(status["failure_kind"], "worker_failed");
         assert!(!status.to_string().contains("private"));
-        assert_eq!(
-            read_text(&job, "result.json", 2048).unwrap().is_some(),
-            true
-        );
+        assert!(read_text(&job, "result.json", 2048).unwrap().is_some());
         fs::remove_dir_all(home).unwrap();
     }
 
