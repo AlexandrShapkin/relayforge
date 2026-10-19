@@ -955,7 +955,9 @@ mod tests {
         assert!(source_file(".github/workflows/tests.yml"));
         // Offline guard tests read exactly these two publicly tracked unit
         // fixtures. This does not expose live /etc or ~/.config/systemd.
-        assert!(source_file("deploy/systemd/relayforge-local-recover.service"));
+        assert!(source_file(
+            "deploy/systemd/relayforge-local-recover.service"
+        ));
         assert!(source_file("deploy/systemd/relayforge-local-recover.timer"));
         assert!(!source_file("deploy/systemd/arbitrary.service"));
         assert!(!source_file("deploy/systemd/../../etc/private.service"));
