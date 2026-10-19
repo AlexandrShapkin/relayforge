@@ -29,18 +29,27 @@ units="$HOME/.config/systemd/user"
    -f "$source_dir/systemd/relayforge-host-recovery.timer" ]] || {
   echo "Reviewed deployment sources missing" >&2; exit 6;
 }
+# Refuse group/other-writable ancestors and destination directories.
+# Never repair unsafe permissions implicitly: require operator inspection.
+secure_dir() {
+  local path="$1" mode
+  [[ -d "$path" && ! -L "$path" &&
+     "$(stat -c '%u' "$path")" == "$(id -u)" ]] || return 1
+  mode="$(stat -c '%a' "$path")" || return 1
+  [[ "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
+  (( (8#$mode & 022) == 0 ))
+}
 for path in "$HOME/.config" "$HOME/.config/relayforge" \
             "$HOME/.local" "$HOME/.local/state" \
             "$HOME/.local/libexec" "$HOME/.config/systemd"; do
-  [[ -d "$path" && ! -L "$path" ]] || {
+  secure_dir "$path" || {
     echo "Unsafe or missing parent directory" >&2; exit 7;
   }
 done
 
 mkdir -p -m 700 "$target" "$state" "$units"
 for path in "$target" "$state" "$units"; do
-  [[ -d "$path" && ! -L "$path" &&
-     "$(stat -c '%u' "$path")" == "$(id -u)" ]] || {
+  secure_dir "$path" || {
     echo "Unsafe destination" >&2; exit 8;
   }
 done
