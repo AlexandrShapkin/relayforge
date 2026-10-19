@@ -109,11 +109,16 @@ fn plain_path(path: &str) -> bool {
 
 fn source_file(path: &str) -> bool {
     plain_path(path)
-        && [
+        && ([
             ".rs", ".toml", ".md", ".py", ".sh", ".yml", ".yaml", ".json",
         ]
         .iter()
         .any(|ext| path.ends_with(ext))
+            || matches!(
+                path,
+                "deploy/systemd/relayforge-local-recover.service"
+                    | "deploy/systemd/relayforge-local-recover.timer"
+            ))
 }
 
 fn read_capped<R: Read>(reader: R) -> Result<Vec<u8>, String> {
@@ -948,6 +953,14 @@ mod tests {
         }
         assert!(source_file("crates/relayforge-mcp/src/workstation.rs"));
         assert!(source_file(".github/workflows/tests.yml"));
+        // Offline guard tests read exactly these two publicly tracked unit
+        // fixtures. This does not expose live /etc or ~/.config/systemd.
+        assert!(source_file(
+            "deploy/systemd/relayforge-local-recover.service"
+        ));
+        assert!(source_file("deploy/systemd/relayforge-local-recover.timer"));
+        assert!(!source_file("deploy/systemd/arbitrary.service"));
+        assert!(!source_file("deploy/systemd/../../etc/private.service"));
     }
     #[test]
     fn sandbox_exposes_tracked_sources_but_not_git_or_untracked_files() {
