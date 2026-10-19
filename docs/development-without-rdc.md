@@ -187,3 +187,21 @@ The established no-RDC update sequence is:
 
 This path still depends on GitHub, ChatGPT and the Secure MCP Tunnel for
 connectivity and identity, but it consumes no Remote Desktop Commander quota.
+
+## Collision-safe workstation background operations
+
+Fixed Git sync, Cargo release build, and tunnel restart now use private,
+time-stamped random transient systemd unit IDs. The former second-resolution
+unit names could collide when multiple operations were requested quickly,
+causing `systemd-run` to refuse scheduling. Existing ten-digit task receipts
+remain readable; the new receipt format is
+`relayforge-dev-<unix-seconds>-<six-lowercase-hex-digits>` (32 characters).
+
+All three operations acquire the same lock in the private RelayForge local
+state directory. This serializes source syncing, compilation, and tunnel
+restart rather than permitting a restart during an active build. They wait at
+most 600 seconds to acquire the lock and have an 1800-second systemd task
+timeout. Callers must still inspect `task.status` and `task.logs` for
+success; scheduling is not proof of successful execution.
+
+A restarted tunnel still needs live authenticated poll verification.
