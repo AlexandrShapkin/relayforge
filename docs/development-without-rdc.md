@@ -445,3 +445,13 @@ A previous denied attempt may have created a private rollback copy while
 being unable to write `~/.ssh`. Such a backup is reused only if it is
 byte-identical to the original currently on disk; it can never silently
 replace a different earlier copy.
+
+## Independently installed local self-recovery guard
+
+For a locally opt-in watchdog that can repair a broken MCP binary or start
+an inactive tunnel without remote ChatGPT/RDC/GitHub access, see
+[Independent local recovery](independent-local-recovery.md). The opt-in
+systemd user timer is **not installed or activated by CI**. It requires
+the local operator to review and install on ThinkPad, then execute real
+fault-injection tests. It does not recover a powered-off or offline
+laptop and is not full remote break-glass access.
