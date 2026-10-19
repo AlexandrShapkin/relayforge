@@ -44,6 +44,10 @@ def main():
         {"jsonrpc": "2.0", "id": 11, "method": "tools/call",
          "params": {"name": "relayforge_workstation_develop",
                     "arguments": {"operation": "tunnel.inspect"}}},
+        {"jsonrpc": "2.0", "id": 12, "method": "tools/call",
+         "params": {"name": "relayforge_workstation_develop",
+                    "arguments": {"operation": "workspace.put",
+                                  "path": "test.md", "content": "denied"}}},
     ]
     serialized = "".join(json.dumps(item) + "\n" for item in requests)
     completed = subprocess.run(
@@ -54,7 +58,7 @@ def main():
     responses = [json.loads(line) for line in completed.stdout.splitlines()
                  if line.strip()]
     by_id = {r["id"]: r for r in responses}
-    assert set(by_id) == {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}, "MCP responses missing or malformed"
+    assert set(by_id) == {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, "MCP responses missing or malformed"
     assert by_id[1]["result"]["protocolVersion"] == "2025-11-25"
     names = {tool["name"] for tool in by_id[2]["result"]["tools"]}
     expected = {"relayforge_status", "relayforge_routeros_health",
@@ -82,10 +86,13 @@ def main():
         "workstation write succeeded without local operator opt-in")
     assert by_id[8]["result"]["isError"] is False
     capabilities = json.loads(by_id[8]["result"]["content"][0]["text"])
-    assert capabilities["api_revision"] == 2
+    assert capabilities["api_revision"] == 3
     assert "repo.sync" in capabilities["operations"]
     assert "task.list" in capabilities["operations"]
     assert "tunnel.inspect" in capabilities["operations"]
+    assert "workspace.put" in capabilities["operations"]
+    assert by_id[12]["result"]["isError"] is True, (
+        "private workstation write succeeded without development grant")
     assert capabilities["arbitrary_host_shell"] is False
     assert by_id[9]["result"]["isError"] is True, (
         "capabilities operation accepted unrecognized nested parameters")
