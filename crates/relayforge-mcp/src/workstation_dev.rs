@@ -33,7 +33,7 @@ pub fn tool() -> Value {
             "content":{"type":"string","maxLength":49152},
             "task_id":{"type":"string","maxLength":32},
             "script":{"type":"string","maxLength":2048},
-            "parameters":{"type":"object","description":"Reserved for future, strictly server-validated operation arguments. Unrecognized payloads denied."}
+            "parameters":{"type":"object","description":"Only job.chain.start (scripts array) and job.chain.output (step number); all other nested payloads denied."}
         },"required":["operation"],"additionalProperties":false}})
 }
 
@@ -618,7 +618,7 @@ pub fn execute(args: &Value) -> Result<String, String> {
             return Err("home invalid".into());
         }
         return Ok(json!({
-            "api_revision": 7,
+            "api_revision": 8,
             "transport": "private_secure_mcp_tunnel",
             "operations": [
                 "capabilities", "repo.status", "repo.list", "repo.read",
@@ -629,6 +629,7 @@ pub fn execute(args: &Value) -> Result<String, String> {
                 "workspace.remove",
                 "job.start", "job.list", "job.status", "job.output",
                 "job.stop", "job.remove",
+                "job.chain.start", "job.chain.status", "job.chain.output",
                 "dependency.audit",
                 "ssh.retire.plan", "ssh.retire.config", "ssh.retire.known_hosts",
                 "shell.sandbox", "process.list", "user.services"
@@ -662,8 +663,9 @@ pub fn execute(args: &Value) -> Result<String, String> {
             workstation_recovery::snapshot(opted_in)
         }
         "dependency.audit" if obj.len() == 1 => workstation_dependency::snapshot(&home),
-        "job.start" | "job.list" | "job.status" | "job.output" | "job.stop" | "job.remove" => {
-            if matches!(operation, "job.start" | "job.stop" | "job.remove") {
+        "job.start" | "job.list" | "job.status" | "job.output" | "job.stop" | "job.remove"
+        | "job.chain.start" | "job.chain.status" | "job.chain.output" => {
+            if matches!(operation, "job.start" | "job.stop" | "job.remove" | "job.chain.start") {
                 if !dev_enabled(&home) {
                     return Err("local development opt-in missing".into());
                 }
