@@ -65,8 +65,12 @@ pub fn handle(input: &Value) -> Option<Value> {
                     let empty = json!({});
                     let args = input.pointer("/params/arguments").unwrap_or(&empty);
                     match workstation_dev::execute(args) {
-                        Ok(value) => json!({"content":[{"type":"text","text":value}],"isError":false}),
-                        Err(message) => json!({"content":[{"type":"text","text":message}],"isError":true}),
+                        Ok(value) => {
+                            json!({"content":[{"type":"text","text":value}],"isError":false})
+                        }
+                        Err(message) => {
+                            json!({"content":[{"type":"text","text":message}],"isError":true})
+                        }
                     }
                 }
                 Some("relayforge_workstation_status") => {
