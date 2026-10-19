@@ -51,10 +51,11 @@ freshness should not be treated as proof of a RelayForge development failure.
 The new `relayforge_workstation_status` tool is a **no-argument,
 read-only** local workstation summary through the preexisting private
 Secure MCP Tunnel. It reports whether the fixed RelayForge Git tree is
-present/on `main`/free of tracked modifications, uptime, memory available,
+present/on `main`/free of tracked modifications and non-ignored untracked
+files, uptime, memory available,
 whether the user tunnel service is active and whether a recent
 authenticated control-plane poll was recorded. It never discloses
-filesystem listings, secrets, environment variables, Git remote URLs
+filesystem listings or untracked filenames, secrets, environment variables, Git remote URLs
 or process command lines. Its internal fixed git/systemctl/health checks
 have timeouts and return `unverified` rather than claiming a healthy
 host if any required evidence is missing.
