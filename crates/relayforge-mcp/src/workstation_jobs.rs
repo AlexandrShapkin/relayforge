@@ -283,10 +283,7 @@ pub fn run_worker(id: &str) -> i32 {
     if !home.is_absolute() || home.as_os_str().len() > 256 {
         return 2;
     }
-    match run_job(&home, id) {
-        Ok(code) => code,
-        Err(_) => 1,
-    }
+    run_job(&home, id).unwrap_or(1)
 }
 
 fn unit_state(id: &str) -> Result<Option<String>, String> {
