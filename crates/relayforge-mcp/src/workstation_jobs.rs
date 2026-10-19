@@ -283,7 +283,33 @@ pub fn run_worker(id: &str) -> i32 {
     if !home.is_absolute() || home.as_os_str().len() > 256 {
         return 2;
     }
-    run_job(&home, id).unwrap_or(1)
+    run_worker_at(&home, id)
+}
+
+fn run_worker_at(home: &Path, id: &str) -> i32 {
+    if !valid_id(id) {
+        return 2;
+    }
+    match run_job(home, id) {
+        Ok(code) => code,
+        Err(_) => {
+            // Never expose a raw local error string or file path to the
+            // client. A durable failure receipt also lets the operator
+            // reclaim storage rather than waiting 900 seconds for an
+            // ambiguously terminated systemd job.
+            if let Ok(dir) = job_dir(home, id) {
+                let record = json!({
+                    "state":"finished",
+                    "exit_code":1,
+                    "failure_kind":"worker_failed",
+                    "stdout_truncated":false,
+                    "stderr_truncated":false
+                });
+                let _ = write_private(&dir, "result.json", record.to_string().as_bytes());
+            }
+            1
+        }
+    }
 }
 
 fn unit_state(id: &str) -> Result<Option<String>, String> {
@@ -325,7 +351,8 @@ fn job_status(home: &Path, id: &str) -> Result<Value, String> {
         return Ok(json!({"job_id":id, "state":"finished",
             "exit_code":parsed["exit_code"],
             "stdout_truncated":parsed["stdout_truncated"],
-            "stderr_truncated":parsed["stderr_truncated"]}));
+            "stderr_truncated":parsed["stderr_truncated"],
+            "failure_kind":parsed.get("failure_kind").cloned().unwrap_or(Value::Null)}));
     }
     if read_text(&dir, "stopped", 16)?.is_some() {
         return Ok(json!({"job_id":id,"state":"stopped"}));
@@ -538,6 +565,33 @@ mod tests {
         assert!(!script_valid("\u{1b}[31m"));
         assert!(!script_valid(""));
     }
+    #[test]
+    fn worker_failure_receipt_is_durable_and_secret_free() {
+        let unique = format!(
+            "relayforge-job-failure-test-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        );
+        let home = std::env::temp_dir().join(unique);
+        let state = home.join(".local/state/relayforge");
+        fs::create_dir_all(&state).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+        let jobs = root(&home, true).unwrap().unwrap();
+        let id = "relayforge-job-1792390000-a1b2c3";
+        let job = jobs.join(id);
+        DirBuilder::new().mode(0o700).create(&job).unwrap();
+        write_private(&job, "script.sh", b"echo never-ran").unwrap();
+        // No repo exists; the worker fails before it may run a shell.
+        assert_eq!(run_worker_at(&home, id), 1);
+        let status = job_status(&home, id).unwrap();
+        assert_eq!(status["state"], "finished");
+        assert_eq!(status["exit_code"], 1);
+        assert_eq!(status["failure_kind"], "worker_failed");
+        assert!(!status.to_string().contains("private"));
+        assert_eq!(read_text(&job,"result.json",2048).unwrap().is_some(),true);
+        fs::remove_dir_all(home).unwrap();
+    }
+
     #[test]
     fn unknown_operations_and_extra_arguments_denied() {
         let home = Path::new("/nonexistent");
