@@ -19,26 +19,74 @@ fn battery(raw: &str) -> Option<(u8, bool)> {
     let mut level = None;
     let mut status = None;
     let mut powered = false;
+    let mut power_sources = [false; 3];
     for line in raw.lines() {
         let Some((k, v)) = line.split_once(':') else {
             continue;
         };
         match k.trim() {
-            "level" => level = v.trim().parse::<u8>().ok().filter(|x| *x <= 100),
-            "status" => status = v.trim().parse::<u8>().ok(),
-            "USB powered" | "AC powered" | "Wireless powered" => powered |= v.trim() == "true",
+            "level" => {
+                if level.is_some() {
+                    return None;
+                }
+                level = Some(v.trim().parse::<u8>().ok().filter(|x| *x <= 100)?);
+            }
+            "status" => {
+                if status.is_some() {
+                    return None;
+                }
+                status = Some(
+                    v.trim()
+                        .parse::<u8>()
+                        .ok()
+                        .filter(|x| (1..=5).contains(x))?,
+                );
+            }
+            key @ ("USB powered" | "AC powered" | "Wireless powered") => {
+                let index = match key {
+                    "USB powered" => 0,
+                    "AC powered" => 1,
+                    _ => 2,
+                };
+                if power_sources[index] {
+                    return None;
+                }
+                power_sources[index] = true;
+                powered |= match v.trim() {
+                    "true" => true,
+                    "false" => false,
+                    _ => return None,
+                };
+            }
             _ => {}
         }
     }
-    Some((level?, status.is_some_and(|s| s == 2 || s == 5) || powered))
+    Some((level?, matches!(status?, 2 | 5) || powered))
 }
 fn storage_mib(raw: &str) -> Option<u64> {
     if raw.len() > 16 * 1024 {
         return None;
     }
-    raw.lines().rev().find_map(|line| {
+    let mut lines = raw.lines().filter(|line| !line.trim().is_empty());
+    let header: Vec<_> = lines.next()?.split_ascii_whitespace().collect();
+    // Only these df layouts establish that Available is measured in KiB.
+    if !matches!(
+        header.as_slice(),
+        [
+            "Filesystem",
+            "1K-blocks" | "1024-blocks",
+            "Used",
+            "Available" | "Avail",
+            "Use%",
+            "Mounted",
+            "on"
+        ]
+    ) {
+        return None;
+    }
+    lines.find_map(|line| {
         let columns: Vec<_> = line.split_ascii_whitespace().collect();
-        if columns.len() < 6 || columns.last() != Some(&"/data") {
+        if columns.len() != 6 || columns.last() != Some(&"/data") {
             return None;
         }
         columns[3].parse::<u64>().ok().map(|n| n / 1024)
@@ -186,6 +234,147 @@ mod tests {
             }
         });
         assert_eq!(v["status"], "unverified");
+    }
+    #[test]
+    fn battery_accepts_valid_boundaries_and_charging_sources() {
+        for (raw, expected) in [
+            ("level: 0\nstatus: 3", (0, false)),
+            ("level: 100\nstatus: 5", (100, true)),
+            ("level: 83\nstatus: 2", (83, true)),
+            ("level: 83\nstatus: 1", (83, false)),
+            ("level: 83\nstatus: 4", (83, false)),
+            ("level: 83\nstatus: 3\nUSB powered: true", (83, true)),
+            ("level: 83\nstatus: 3\nAC powered: true", (83, true)),
+            ("level: 83\nstatus: 3\nWireless powered: true", (83, true)),
+            (
+                " level: 83 \nstatus: 3\nUSB powered: false\nAC powered: false\nWireless powered: false\nvoltage: 4200",
+                (83, false),
+            ),
+        ] {
+            assert_eq!(battery(raw), Some(expected), "{raw:?}");
+        }
+    }
+    #[test]
+    fn missing_invalid_and_multiple_battery_values_never_report_green() {
+        for raw in [
+            "",
+            "status: 2",
+            "level: 83",
+            "level: \nstatus: 2",
+            "level: invalid\nlevel: 83\nstatus: 2",
+            "level: 83\nlevel: invalid\nstatus: 2",
+            "level: 101\nstatus: 2",
+            "level: -1\nstatus: 2",
+            "level: 256\nstatus: 2",
+            "level: 83\nlevel: 83\nstatus: 2",
+            "level: 5\nlevel: 83\nstatus: 2",
+            "level: 83\nstatus: invalid",
+            "level: 83\nstatus: 0",
+            "level: 83\nstatus: 6",
+            "level: 83\nstatus: invalid\nstatus: 2",
+            "level: 83\nstatus: 2\nstatus: 2",
+            "level: 83\nstatus: 3\nUSB powered: invalid",
+            "level: 83\nstatus: 2\nAC powered: ",
+            "level: 83\nstatus: 2\nWireless powered: TRUE",
+            "level: 83\nstatus: 2\nUSB powered: false\nUSB powered: true",
+            "level: 83\nstatus: 2\nAC powered: false\nAC powered: false",
+            "level: 83\nstatus: 2\nWireless powered: true\nWireless powered: true",
+        ] {
+            assert_eq!(battery(raw), None, "{raw:?}");
+            let v = aggregate(&["TEST123".to_owned()], &|s, c| {
+                if c == "battery" {
+                    Ok(raw.to_owned())
+                } else {
+                    mock(s, c)
+                }
+            });
+            assert_eq!(v["status"], "unverified", "{raw:?}");
+            assert_eq!(v["devices"][0]["status"], "unverified", "{raw:?}");
+            assert!(v["devices"][0]["battery_percent"].is_null());
+            assert!(v["devices"][0]["charging"].is_null());
+            assert_eq!(v["devices"][0]["findings"], json!(["adb_read_incomplete"]));
+        }
+    }
+    #[test]
+    fn missing_battery_status_stays_unverified_even_while_usb_powered() {
+        // PR #36: battery state remains unverified even if USB power is on.
+        for record in ["", "status: nope", "status: 0", "status: 6"] {
+            let raw = format!("level: 83\nUSB powered: true\n{record}\n");
+            let v = aggregate(&["TEST123".to_owned()], &|s, check| {
+                if check == "battery" {
+                    Ok(raw.clone())
+                } else {
+                    mock(s, check)
+                }
+            });
+            assert_eq!(v["status"], "unverified");
+            assert!(v["devices"][0]["charging"].is_null());
+        }
+    }
+
+    #[test]
+    fn storage_requires_known_units_and_exact_data_mount() {
+        for units in ["1K-blocks", "1024-blocks"] {
+            let raw = format!(
+                "\nFilesystem {units} Used Available Use% Mounted on\r\n\
+                 /dev/other 9000000 1 8000000 1% /data/local\r\n\
+                 /dev/data\t9000000\t1\t1048577\t1%\t/data\r\n"
+            );
+            assert_eq!(storage_mib(&raw), Some(1024));
+        }
+        for raw in [
+            "",
+            "/dev/data 9000000 1 1048576 1% /data",
+            "Filesystem 512-blocks Used Available Use% Mounted on\n/dev/data 9000000 1 1048576 1% /data",
+            "Filesystem Size Used Avail Use% Mounted on\n/dev/data 9G 1G 8G 1% /data",
+            "Filesystem 1K-blocks Used Available Use% Mounted on\n/dev/data 9 1 -1 1% /data",
+            "Filesystem 1K-blocks Used Available Use% Mounted on\n/dev/data 9 1 18446744073709551616 1% /data",
+            "Filesystem 1K-blocks Used Available Use% Mounted on\n/dev/data 9 1 8 1% /data/local",
+        ] {
+            assert_eq!(storage_mib(raw), None, "{raw:?}");
+        }
+        assert_eq!(storage_mib(&"x".repeat(16 * 1024 + 1)), None);
+    }
+    #[test]
+    fn storage_threshold_controls_device_and_aggregate_health() {
+        for (available, mib, status, findings) in [
+            (0, 0, "attention", json!(["storage_low"])),
+            (512 * 1024 - 1, 511, "attention", json!(["storage_low"])),
+            (512 * 1024, 512, "healthy", json!([])),
+            (512 * 1024 + 1024, 513, "healthy", json!([])),
+        ] {
+            let v = aggregate(&["TEST123".into()], &|s, c| {
+                if c == "storage" {
+                    Ok(format!("Filesystem 1K-blocks Used Available Use% Mounted on\n/dev/data 9000000 1 {available} 1% /data"))
+                } else {
+                    mock(s, c)
+                }
+            });
+            assert_eq!(v["status"], status);
+            assert_eq!(v["devices"][0]["status"], status);
+            assert_eq!(v["devices"][0]["storage_free_mib"], mib);
+            assert_eq!(v["devices"][0]["findings"], findings);
+        }
+    }
+    #[test]
+    fn missing_or_invalid_storage_is_unverified_not_low() {
+        for result in [
+            Err("offline".into()),
+            Ok(String::new()),
+            Ok("/data not mounted".into()),
+        ] {
+            let v = aggregate(&["TEST123".into()], &|s, c| {
+                if c == "storage" {
+                    result.clone()
+                } else {
+                    mock(s, c)
+                }
+            });
+            assert_eq!(v["status"], "unverified");
+            assert_eq!(v["devices"][0]["status"], "unverified");
+            assert_eq!(v["devices"][0]["storage_free_mib"], Value::Null);
+            assert_eq!(v["devices"][0]["findings"], json!(["adb_read_incomplete"]));
+        }
     }
     #[test]
     fn rejects_malformed_data_and_untrusted_arguments() {

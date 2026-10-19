@@ -91,10 +91,17 @@ fn ssh_diagnostic(host: &str, command: &str) -> Result<String, String> {
     if !output.status.success() {
         return Err("router diagnostic unavailable".into());
     }
-    if output.stdout.len() > 16 * 1024 {
+    decode_response(output.stdout)
+}
+
+fn decode_response(stdout: Vec<u8>) -> Result<String, String> {
+    if stdout.len() > 16 * 1024 {
         return Err("RouterOS diagnostic response exceeds limit".into());
     }
-    String::from_utf8(output.stdout).map_err(|_| "RouterOS response invalid UTF-8".into())
+    if stdout.contains(&0) {
+        return Err("RouterOS response contains NUL".into());
+    }
+    String::from_utf8(stdout).map_err(|_| "RouterOS response invalid UTF-8".into())
 }
 
 /// A constant read-only RouterOS script run through the same validated
@@ -106,6 +113,26 @@ pub(crate) fn health_snapshot_transport(script: &str) -> Result<String, String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn diagnostic_response_limits_and_invalid_bytes() {
+        assert_eq!(
+            decode_response(vec![b'a'; 16 * 1024]).unwrap().len(),
+            16 * 1024
+        );
+        assert_eq!(
+            decode_response(vec![b'a'; 16 * 1024 + 1]).unwrap_err(),
+            "RouterOS diagnostic response exceeds limit"
+        );
+        assert_eq!(
+            decode_response(b"resource\0data".to_vec()).unwrap_err(),
+            "RouterOS response contains NUL"
+        );
+        assert_eq!(
+            decode_response(vec![0xff]).unwrap_err(),
+            "RouterOS response invalid UTF-8"
+        );
+    }
+
     #[test]
     fn fails_over_only_when_needed() {
         let mut attempts = Vec::new();

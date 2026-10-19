@@ -49,16 +49,20 @@ fn sections(raw: &str) -> Result<Vec<String>, String> {
     }
     let mut outputs: Vec<String> = Vec::with_capacity(MARKERS.len());
     for line in raw.lines() {
+        if line.len() > 2048 || line.chars().any(|c| c.is_control() && c != '\t') {
+            return Err("RouterOS health line oversized or invalid".into());
+        }
         let value = line.trim();
-        if let Some(index) = MARKERS.iter().position(|marker| *marker == value) {
+        // Only exact standalone markers delimit sections. Reserve RF_ lines so
+        // malformed or unknown markers cannot silently become section data.
+        if let Some(index) = MARKERS.iter().position(|marker| *marker == line) {
             if index != outputs.len() {
                 return Err("RouterOS health marker missing or reordered".into());
             }
             outputs.push(String::new());
+        } else if value.starts_with("RF_") {
+            return Err("RouterOS health marker invalid".into());
         } else if let Some(last) = outputs.last_mut() {
-            if line.len() > 2048 {
-                return Err("RouterOS health line too large".into());
-            }
             last.push_str(line);
             last.push('\n');
         } else if !value.is_empty() {
@@ -124,6 +128,37 @@ fn metadata(section: &str, key: &str) -> Option<String> {
     })
 }
 
+fn service_source_unrestricted(address: &str) -> Result<bool, String> {
+    let invalid = || "RouterOS management service scope unknown".to_owned();
+    let address = if let Some(quoted) = address.strip_prefix('"') {
+        quoted.strip_suffix('"').ok_or_else(invalid)?
+    } else {
+        address
+    };
+    if address.is_empty() {
+        return Ok(true);
+    }
+    let mut unrestricted = false;
+    for entry in address.split(',') {
+        let (ip, prefix) = match entry.split_once('/') {
+            Some((ip, prefix)) => (ip, Some(prefix)),
+            None => (entry, None),
+        };
+        let ip = ip.parse::<std::net::IpAddr>().map_err(|_| invalid())?;
+        if let Some(prefix) = prefix {
+            if prefix.is_empty() || !prefix.bytes().all(|c| c.is_ascii_digit()) {
+                return Err(invalid());
+            }
+            let prefix = prefix.parse::<u8>().map_err(|_| invalid())?;
+            if prefix > if ip.is_ipv4() { 32 } else { 128 } {
+                return Err(invalid());
+            }
+            unrestricted |= prefix == 0;
+        }
+    }
+    Ok(unrestricted)
+}
+
 fn parse(raw: &str) -> Result<Value, String> {
     let output = sections(raw)?;
     let board = metadata(&output[0], "board-name").ok_or("RouterOS board unknown")?;
@@ -184,15 +219,22 @@ fn parse(raw: &str) -> Result<Value, String> {
         {
             continue;
         }
-        // Dynamic RouterOS service connection rows carry D c flags,
-        // local=/remote= instead of the configured address= restriction.
-        if disabled(line, "name=") || flags(line, "name=").iter().any(|flag| flag.contains('D')) {
+        // Connection rows describe sessions, not configured source restrictions.
+        if disabled(line, "name=")
+            || flags(line, "name=")
+                .iter()
+                .any(|flag| flag.contains('D') || flag.contains('c'))
+            || property(line, "local").is_some()
+            || property(line, "remote").is_some()
+        {
             continue;
         }
-        match property(line, "address") {
-            Some("") => unscoped.push(name),
-            Some(_) => scoped.push(name),
-            None => return Err("RouterOS management service scope unknown".into()),
+        let address =
+            property(line, "address").ok_or("RouterOS management service scope unknown")?;
+        if service_source_unrestricted(address)? {
+            unscoped.push(name);
+        } else {
+            scoped.push(name);
         }
     }
     if unscoped.len() + scoped.len() > 8 {
@@ -287,6 +329,68 @@ mod tests {
             assert!(parse(&data).is_err());
         }
     }
+
+    #[test]
+    fn rejects_every_missing_or_duplicated_marker() {
+        for marker in MARKERS {
+            let line = format!("{marker}\n");
+            assert!(parse(&fixture().replace(&line, "")).is_err(), "{marker}");
+            assert!(
+                parse(&fixture().replace(&line, &format!("{line}{line}"))).is_err(),
+                "{marker}"
+            );
+            assert!(parse(&format!("{}{line}", fixture())).is_err(), "{marker}");
+        }
+    }
+
+    #[test]
+    fn rejects_reordered_markers() {
+        for pair in MARKERS.windows(2) {
+            let raw = fixture()
+                .lines()
+                .map(|line| {
+                    if line == pair[0] {
+                        pair[1]
+                    } else if line == pair[1] {
+                        pair[0]
+                    } else {
+                        line
+                    }
+                    .to_owned()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(parse(&raw).is_err(), "{pair:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_markers_and_control_characters() {
+        for payload in [
+            "RF_UNKNOWN",
+            " RF_SERVICES",
+            "RF_SERVICES\t",
+            "RF_SERVICES name=ssh address=",
+            "RF_SERVICES; /system/reboot",
+            "RF_SERVICES\u{200b}",
+            "\u{1b}[2KRF_SERVICES",
+            "RF_SERVICES\rhidden",
+        ] {
+            for marker in MARKERS {
+                let raw = fixture().replace(marker, &format!("{marker}\n{payload}"));
+                assert!(parse(&raw).is_err(), "{marker}: {payload:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn accepts_crlf_and_marker_names_inside_properties() {
+        let raw = fixture().replace("name=ether1", "name=RF_SERVICES");
+        assert_eq!(
+            parse(&raw).unwrap(),
+            parse(&raw.replace('\n', "\r\n")).unwrap()
+        );
+    }
     #[test]
     fn management_only_alert_remains_advisory() {
         let raw = fixture()
@@ -304,6 +408,92 @@ mod tests {
             parsed["management_services"]["source_unrestricted"],
             json!([])
         );
+    }
+
+    #[test]
+    fn service_allowlists_distinguish_hosts_subnets_and_unrestricted_ranges() {
+        for (address, unrestricted) in [
+            ("", true),
+            ("\"\"", true),
+            ("0.0.0.0/0", true),
+            ("::/0", true),
+            ("192.0.2.0/24,::/0", true),
+            ("0.0.0.0/0,2001:db8::/32", true),
+            ("\"192.0.2.0/24,::/0\"", true),
+            ("192.0.2.15", false),
+            ("2001:db8::1", false),
+            ("192.0.2.15/32,2001:db8::1/128", false),
+            ("\"192.0.2.0/24,2001:db8::/32\"", false),
+            ("0.0.0.0/32,::/128", false),
+        ] {
+            let raw = fixture().replace(
+                "2 name=ssh port=2224 address=192.0.2.15/32",
+                &format!("2 name=ssh port=2224 address={address}"),
+            );
+            let value = parse(&raw).unwrap();
+            let services = &value["management_services"];
+            assert_eq!(
+                services["source_unrestricted"],
+                if unrestricted {
+                    json!(["ftp", "ssh", "winbox"])
+                } else {
+                    json!(["ftp", "winbox"])
+                },
+                "{address}"
+            );
+            assert_eq!(
+                services["source_restricted"],
+                if unrestricted {
+                    json!([])
+                } else {
+                    json!(["ssh"])
+                },
+                "{address}"
+            );
+            assert_eq!(
+                services["scope_note"],
+                "Service-level address restrictions only; firewall/WAN reachability not evaluated"
+            );
+            assert_eq!(value["status"], "attention");
+        }
+    }
+
+    #[test]
+    fn malformed_or_missing_service_allowlists_fail_closed() {
+        for address in [
+            "bad",
+            "192.0.2.1/33",
+            "::/129",
+            "192.0.2.1/",
+            "192.0.2.1/-1",
+            "192.0.2.1,",
+            "0.0.0.0/0,bad",
+            "\"192.0.2.1",
+            "192.0.2.1\"",
+        ] {
+            assert!(
+                parse(&fixture().replace("address=192.0.2.15/32", &format!("address={address}")))
+                    .is_err(),
+                "{address}"
+            );
+        }
+        assert!(parse(&fixture().replace(" address=192.0.2.15/32", "")).is_err());
+    }
+
+    #[test]
+    fn connections_and_disabled_services_do_not_affect_configured_scope() {
+        let baseline = parse(&fixture()).unwrap();
+        for row in [
+            "5 D c name=ssh local=192.0.2.1 remote=192.0.2.15:50000",
+            "5 Dc name=ssh address=0.0.0.0/0",
+            "5 c name=ssh address=",
+            "5 name=ssh local=192.0.2.1 remote=192.0.2.15:50000",
+            "5 X name=ssh address=0.0.0.0/0",
+            "5 X name=ssh",
+        ] {
+            let raw = format!("{}{row}\n", fixture());
+            assert_eq!(parse(&raw).unwrap(), baseline, "{row}");
+        }
     }
 
     #[test]

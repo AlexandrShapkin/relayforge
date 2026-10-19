@@ -1,28 +1,68 @@
 # RelayForge
 
-A lightweight, self-hosted remote-device control plane written in Rust.
+RelayForge is a Rust-based, permission-limited MCP bridge for
+personally operated Linux, MikroTik RouterOS and Android devices.
 
-**Status: offline architecture prototype.** There is no active remote command executor, agent listener, authentication service, or working MCP endpoint yet.
+**Current status:** deployed read-only diagnostics and narrowly scoped,
+human-approved Linux pilot. This is **not** a general remote device
+administration system.
 
-## Universal MCP integration
+The tested deployment runs a private **outbound-only Secure MCP Tunnel**
+on an authorized ThinkPad. The tunnel invokes a restricted MCP process.
+Linux agents on `ru0`, `ru1` and `srv0` check host and user-service
+status under independent allowlists. MikroTik uses existing authenticated
+SSH for fixed read-only RouterOS commands. Android requires an already
+physically authorized local ADB connection.
 
-RelayForge will implement **standard Model Context Protocol (MCP)** rather than a ChatGPT-specific API. The same coordinator will serve MCP clients including ChatGPT, Codex and Assistant Hub, subject to client capabilities and deployment configuration. Clients never gain privileges merely by identifying as a particular product.
+## Available capabilities
 
-- **ChatGPT:** remote HTTPS MCP transport, with compatible authentication.
-- **Codex:** standard MCP transport supported by the installed Codex version.
-- **Assistant Hub:** MCP client or direct versioned coordinator adapter; no dependency cycle.
-- **Agents:** separate authenticated outbound connections; no public inbound device ports.
+| Platform | Implemented | Not implemented |
+|---|---|---|
+| Linux | Fleet health, user services/timers, scheduled-job evidence, bounded file and backup integrity checks | Arbitrary shell, root service control, unattended device recovery |
+| RouterOS | PPPoE, route, DHCP, Wi-Fi, firewall/NAT counts and management service posture | Configuration changes or automatic rollback |
+| Android | Authorized ADB discovery, bounded read-only health probes | Pairing, app operations, screenshots, settings or file changes |
+| Change control | Allowlisted, exact, single-use approved actions with audit and expiries | General autonomous system administration |
 
-The MCP adapter is not a trusted policy authority. The coordinator and agent must independently enforce permissions. A client must be authenticated before any grant is evaluated.
+A human operator approves permitted changes at a **local interactive
+ThinkPad terminal**, after reviewing the exact operation. An AI must
+not approve changes by SSH, remote desktop, scripts or MCP tools.
+
+See [security](docs/security.md),
+[tunnel and change approval](docs/tunnel-readonly.md),
+[RouterOS](docs/routeros.md),
+[Android](docs/android.md), and
+[fleet monitoring](docs/fleet-health.md).
+
+## Development
+
+The canonical development branch is `main`. Use short-lived branches
+from `main` and pull requests. Run all checks before merging:
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+cargo build --release --locked -p relayforge-agent -p relayforge-mcp
+```
+
+Use `target/release/relayforge-mcp --readonly-stdio` for local read-only
+MCP testing. Standard output is JSON-RPC protocol only; launch wrappers
+must not print status banners there. Keep the Secure MCP Tunnel launcher
+restricted to `--readonly-stdio`; do not use the unrestricted local pilot
+as a remote gateway.
 
 ## Rust workspace
 
-- `relayforge-protocol`: versioned, transport-independent request contract.
-- `relayforge-policy`: exact device/capability grants, deny by default.
-- `relayforge-agent`: disabled placeholder, future outbound device agent.
-- `relayforge-server`: disabled placeholder, future coordinator.
-- `relayforge-mcp`: policy boundary, future standards-compliant MCP adapter.
+- `relayforge-protocol`: versioned request contracts.
+- `relayforge-policy`: deny-by-default capability policy.
+- `relayforge-agent`: independently bounded Rust diagnostics.
+- `relayforge-server`: limited coordinator/session primitives.
+- `relayforge-mcp`: MCP gateway and RouterOS/Android integrations.
 
-Run `cargo test --workspace`. The local read-only adapter runs with `cargo run -p relayforge-mcp`. See `docs/mcp-clients.md`. See `docs/security.md` and `docs/roadmap.md`.
+GitHub Actions tests pull requests and pushes. Passing mock tests does
+not replace real-device testing or an independent deployment review.
+Do not commit credentials, SSH keys, ADB authorizations, private data,
+archives or production runtime settings.
 
-No devices or existing services are modified by this prototype.
+See [MCP clients](docs/mcp-clients.md) and the
+[remaining roadmap](docs/roadmap.md).
