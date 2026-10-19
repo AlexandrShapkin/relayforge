@@ -673,11 +673,14 @@ mod tests {
     fn retired_host_and_monitor_actions_are_always_denied() {
         assert!(parse_action(&json!({"host":"ru1","action":"monitor.run"})).is_err());
         assert!(parse_action(&json!({"host":"ru1","action":"sandbox.create",
-            "name":"x.txt","content":"x"})).is_err());
+            "name":"x.txt","content":"x"}))
+        .is_err());
         assert!(parse_action(&json!({"host":"ru0","action":"monitor.run"})).is_err());
         assert!(parse_action(&json!({"host":"srv0","action":"monitor.run"})).is_err());
         let s = store();
-        assert!(s.prepare(&json!({"host":"ru1","action":"monitor.run"})).is_err());
+        assert!(s
+            .prepare(&json!({"host":"ru1","action":"monitor.run"}))
+            .is_err());
     }
 
     #[test]
