@@ -2,7 +2,7 @@
 //! No caller-supplied executable, working directory, shell, service name,
 //! host, credentials or arbitrary filesystem root. Mutations require a
 //! separate local operator-created, permission-checked opt-in file.
-use crate::{workstation_dependency, workstation_jobs, workstation_retire, workstation_transfer};
+use crate::{workstation_dependency, workstation_jobs, workstation_recovery, workstation_retire, workstation_transfer};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeSet,
@@ -615,13 +615,13 @@ pub fn execute(args: &Value) -> Result<String, String> {
             return Err("home invalid".into());
         }
         return Ok(json!({
-            "api_revision": 6,
+            "api_revision": 7,
             "transport": "private_secure_mcp_tunnel",
             "operations": [
                 "capabilities", "repo.status", "repo.list", "repo.read",
                 "repo.write", "repo.sync", "build.start",
                 "task.status", "task.logs", "task.list",
-                "tunnel.inspect", "tunnel.restart",
+                "tunnel.inspect", "tunnel.restart", "recovery.inspect",
                 "workspace.list", "workspace.read", "workspace.put",
                 "workspace.remove",
                 "job.start", "job.list", "job.status", "job.output",
@@ -649,6 +649,12 @@ pub fn execute(args: &Value) -> Result<String, String> {
             }
             audit(&home, operation)?;
             workstation_retire::dispatch(&home, operation)
+        }
+        "recovery.inspect" if obj.len() == 1 => {
+            let opted_in = local_opt_in(&home,
+                ".config/relayforge/allow-self-recovery",
+                b"ALLOW_RELAYFORGE_SELF_RECOVERY\n");
+            workstation_recovery::snapshot(opted_in)
         }
         "dependency.audit" if obj.len() == 1 => workstation_dependency::snapshot(&home),
         "job.start" | "job.list" | "job.status" | "job.output" | "job.stop" | "job.remove" => {
