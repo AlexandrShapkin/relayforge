@@ -249,8 +249,10 @@ stdio mode.
 
 `deploy/relayforge-hot-activate.sh EXPECTED_MAIN_SHA` is a **local-user-only**
 one-time bootstrap after the reviewed merge is present on ThinkPad. It refuses
-a different commit or dirty tracked checkout, saves the previous release MCP
-to private local state, runs a fresh locked release build and offline MCP smoke
+a different commit or dirty tracked checkout, locates the currently running
+restricted legacy MCP and saves its **mapped executable** from
+`/proc/<pid>/exe` into private local state (not the possibly already-rebuilt
+on-disk release), runs a fresh locked release build and offline MCP smoke
 tests, restarts the tunnel once, and requires a **fresh** authenticated
 control-plane poll. If compilation, testing or tunnel recovery fails, it
 restores the previous MCP binary and attempts to restart the service.
