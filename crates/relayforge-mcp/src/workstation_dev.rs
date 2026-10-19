@@ -407,12 +407,25 @@ fn spawn_task(repo: &Path, kind: &str) -> Result<String, String> {
         ];
         match kind {
             "repo.sync" => args.extend([
-                "git", "-c", "core.hooksPath=/dev/null", "-C", repo_string,
-                "pull", "--ff-only", "origin", "main",
+                "git",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-C",
+                repo_string,
+                "pull",
+                "--ff-only",
+                "origin",
+                "main",
             ]),
             "build.start" => args.extend([
-                "cargo", "build", "--release", "--locked",
-                "-p", "relayforge-mcp", "-p", "relayforge-agent",
+                "cargo",
+                "build",
+                "--release",
+                "--locked",
+                "-p",
+                "relayforge-mcp",
+                "-p",
+                "relayforge-agent",
             ]),
             _ => unreachable!(),
         }
@@ -421,7 +434,8 @@ fn spawn_task(repo: &Path, kind: &str) -> Result<String, String> {
                 return Ok(json!({
                     "task_id":unit, "started":true, "kind":kind,
                     "schedule_attempts":attempt
-                }).to_string());
+                })
+                .to_string());
             }
             Ok(output) => last_reason = schedule_failure_class(&output),
             Err(_) => last_reason = "client_unavailable",
