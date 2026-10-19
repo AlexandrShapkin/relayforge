@@ -327,3 +327,26 @@ duplicate execution could disconnect ChatGPT. If all three attempts
 fail, the tool returns only a fixed error category (for example
 `bus_unavailable` or `systemd_rejected`) and never raw systemd stderr,
 which might contain locally sensitive paths.
+
+## Private text transfer for development
+
+API revision 3 adds four `workspace.*` operations scoped to
+`~/.local/state/relayforge/chat-transfer`. They allow ChatGPT to exchange
+small UTF-8 notes, scripts, configuration samples or build reports with
+ThinkPad **without RDC**. The dedicated directory must be owned by the
+local user and private (0700). It is created on the first allowed write.
+Only flat, non-hidden ASCII filenames ending in `.txt`, `.md`, `.json`,
+`.log`, `.rs`, `.py`, `.toml`, or `.sh` are accepted.
+
+`workspace.list` returns at most 64 filenames; `workspace.read` reads a
+single file up to 48 KiB; `workspace.put` creates a new, 0600 UTF-8 file
+**without overwriting** existing files; `workspace.remove` removes one
+selected file. Mutating calls require the existing local development opt-in
+and private audit. Unexpected entries, symlinks, excessive counts, loose
+permissions, traversal names or non-UTF-8 data fail closed.
+
+These files are deliberately **not mounted** into `shell.sandbox`, added
+to the repository, executed by RelayForge, or accessible to arbitrary
+host file operations. Exchange of text does not grant access to private
+user documents, credentials or arbitrary directories. Binary files,
+streaming and interactive terminal sessions are not yet supported.

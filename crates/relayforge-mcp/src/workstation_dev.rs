@@ -2,6 +2,7 @@
 //! No caller-supplied executable, working directory, shell, service name,
 //! host, credentials or arbitrary filesystem root. Mutations require a
 //! separate local operator-created, permission-checked opt-in file.
+use crate::workstation_transfer;
 use serde_json::{json, Value};
 use std::{
     collections::BTreeSet,
@@ -614,13 +615,15 @@ pub fn execute(args: &Value) -> Result<String, String> {
             return Err("home invalid".into());
         }
         return Ok(json!({
-            "api_revision": 2,
+            "api_revision": 3,
             "transport": "private_secure_mcp_tunnel",
             "operations": [
                 "capabilities", "repo.status", "repo.list", "repo.read",
                 "repo.write", "repo.sync", "build.start",
                 "task.status", "task.logs", "task.list",
                 "tunnel.inspect", "tunnel.restart",
+                "workspace.list", "workspace.read", "workspace.put",
+                "workspace.remove",
                 "shell.sandbox", "process.list", "user.services"
             ],
             "write_grants": {
@@ -635,6 +638,15 @@ pub fn execute(args: &Value) -> Result<String, String> {
     }
     let (home, repo) = home_and_repo()?;
     match operation {
+        "workspace.list" | "workspace.read" | "workspace.put" | "workspace.remove" => {
+            if matches!(operation, "workspace.put" | "workspace.remove") {
+                if !dev_enabled(&home) {
+                    return Err("local development opt-in missing".into());
+                }
+                audit(&home, operation)?;
+            }
+            workstation_transfer::execute(&home, args)
+        }
         "task.list" if obj.len() == 1 => {
             let output = command(
                 "systemctl",

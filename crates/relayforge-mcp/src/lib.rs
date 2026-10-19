@@ -38,3 +38,5 @@ pub mod ssh;
 pub mod workstation;
 
 pub mod workstation_dev;
+
+pub mod workstation_transfer;
