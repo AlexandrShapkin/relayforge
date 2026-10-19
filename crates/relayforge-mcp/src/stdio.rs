@@ -5,7 +5,12 @@ use crate::{
     workstation_dev,
 };
 use serde_json::{json, Value};
-use std::io::{self, BufRead, Write};
+use std::{
+    io::{self, BufRead, Read, Write},
+    path::PathBuf,
+    process::{Command, Stdio},
+    thread,
+};
 
 const MAX_LINE_BYTES: usize = 1024 * 1024;
 
@@ -314,7 +319,94 @@ pub fn handle_tunnel(input: &Value) -> Option<Value> {
 }
 
 pub fn serve_tunnel(reader: impl BufRead, writer: impl Write) -> io::Result<()> {
+    // The tunnel connects to a long-lived, fixed parent process. Each request
+    // is handled by the most recently built restricted worker on disk, so an
+    // update cannot kill the control-plane session by replacing the binary.
+    serve_with_handler(reader, writer, handle_hot_worker)
+}
+
+// The restricted one-request worker is never exposed as an unfiltered remote
+// server. The parent passes opaque JSON-RPC requests without a shell or
+// caller-selected program path.
+pub fn serve_tunnel_worker(reader: impl BufRead, writer: impl Write) -> io::Result<()> {
     serve_with_handler(reader, writer, handle_tunnel)
+}
+
+fn worker_binary() -> Result<PathBuf, ()> {
+    let home = PathBuf::from(std::env::var_os("HOME").ok_or(())?);
+    if !home.is_absolute() || home.as_os_str().len() > 256 {
+        return Err(());
+    }
+    let installed = home.join("Projects/relayforge/target/release/relayforge-mcp");
+    if installed.is_file() {
+        return Ok(installed);
+    }
+    // CI smoke tests run from a disposable checkout without the fixed
+    // ThinkPad home layout. This fallback cannot select arbitrary binaries:
+    // only the already running RelayForge executable is permitted.
+    let current = std::env::current_exe().map_err(|_| ())?;
+    if current
+        .file_name()
+        .is_some_and(|name| name == "relayforge-mcp")
+    {
+        Ok(current)
+    } else {
+        Err(())
+    }
+}
+
+fn call_worker(worker: &std::path::Path, input: &Value) -> Result<Value, ()> {
+    let mut process = Command::new("timeout")
+        .args(["-k", "2s", "40s"])
+        .arg(worker)
+        .arg("--readonly-worker")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .env("RELAYFORGE_HOT_STDIO_WORKER", "1")
+        .spawn()
+        .map_err(|_| ())?;
+    let mut stdin = process.stdin.take().ok_or(())?;
+    let stdout = process.stdout.take().ok_or(())?;
+    let reader = thread::spawn(move || {
+        let mut data = Vec::new();
+        stdout
+            .take((MAX_LINE_BYTES + 1) as u64)
+            .read_to_end(&mut data)
+            .map(|_| data)
+    });
+    let sent = writeln!(stdin, "{input}").is_ok();
+    drop(stdin);
+    let finished = process.wait().map_err(|_| ())?;
+    let bytes = reader.join().map_err(|_| ())?.map_err(|_| ())?;
+    if !sent || !finished.success() || bytes.len() > MAX_LINE_BYTES {
+        return Err(());
+    }
+    let response: Value = serde_json::from_slice(&bytes).map_err(|_| ())?;
+    if response.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
+        || response.get("id") != input.get("id")
+        || (response.get("result").is_none() && response.get("error").is_none())
+    {
+        return Err(());
+    }
+    Ok(response)
+}
+
+fn worker_reply(input: &Value) -> Result<Value, ()> {
+    let binary = worker_binary()?;
+    // The long-lived parent executable remains mapped even after Cargo
+    // atomically replaces the on-disk release. A failed new worker can fall
+    // back to the running parent's known-good restricted worker code without
+    // interrupting the tunnel. This fallback lasts only for this parent
+    // process lifetime, not across a machine or service restart.
+    let parent_exe = PathBuf::from(format!("/proc/{}/exe", std::process::id()));
+    call_worker(&binary, input).or_else(|_| call_worker(&parent_exe, input))
+}
+
+fn handle_hot_worker(input: &Value) -> Option<Value> {
+    // No response to notifications, and no need to allocate a child process.
+    let id = input.get("id")?.clone();
+    Some(worker_reply(input).unwrap_or_else(|_| error(id, -32603, "Restricted worker unavailable")))
 }
 
 pub fn serve(reader: impl BufRead, writer: impl Write) -> io::Result<()> {
@@ -406,7 +498,7 @@ mod tests {
             assert_eq!(result["error"]["code"], -32602);
         }
         let mut output = Vec::new();
-        serve_tunnel(
+        serve_tunnel_worker(
             b"{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/list\"}\n".as_slice(),
             &mut output,
         )

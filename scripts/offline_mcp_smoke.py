@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Offline MCP smoke test for GitHub-hosted runners; no device or network access."""
 import json
+import os
+import pathlib
 import subprocess
 import sys
+import tempfile
 
 def main():
     if len(sys.argv) != 2:
@@ -78,6 +81,27 @@ def main():
     assert capabilities["arbitrary_host_shell"] is False
     assert by_id[9]["result"]["isError"] is True, (
         "capabilities operation accepted unrecognized nested parameters")
+    # An invalid on-disk release must not kill the stable parent or cause
+    # arbitrary command execution. The fallback invokes the already-running
+    # parent executable via /proc/<parent-pid>/exe, never /proc/self/exe of
+    # the child timeout process.
+    with tempfile.TemporaryDirectory(prefix="relayforge-hot-smoke-") as home:
+        fake_dir = pathlib.Path(home) / "Projects/relayforge/target/release"
+        fake_dir.mkdir(parents=True)
+        broken = fake_dir / "relayforge-mcp"
+        broken.write_text("#!/bin/sh\nexit 7\n")
+        broken.chmod(0o700)
+        env = dict(os.environ, HOME=home)
+        ping = {"jsonrpc": "2.0", "id": 51, "method": "ping"}
+        fallback = subprocess.run(
+            [sys.argv[1], "--readonly-stdio"],
+            input=json.dumps(ping) + "\n", text=True,
+            capture_output=True, timeout=20, check=True, env=env)
+        response = json.loads(fallback.stdout.strip())
+        assert response["id"] == 51
+        assert response.get("result") == {}, (
+            "hot stdio fallback failed when the on-disk worker crashed")
+    print("Hot stdio: broken worker fallback to mapped parent: PASS")
     print("Offline MCP handshake/tool discovery/workstation/deny-by-default: PASS")
     print("No physical device, tunnel, remote shell or credentials were used.")
 
