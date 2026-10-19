@@ -1,6 +1,6 @@
 //! Exact, audit-gated retirement of the literal ru1 SSH entries only.
 //! Never accepts hostnames, paths, shell commands or file contents from MCP.
-use serde_json::json;
+use serde_json::{json, Value};
 use std::{
     fs::{self, OpenOptions},
     io::{Read, Write},
