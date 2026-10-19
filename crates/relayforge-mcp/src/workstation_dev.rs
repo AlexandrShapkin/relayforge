@@ -72,6 +72,8 @@ fn unsafe_uid() -> u32 {
 
 fn plain_path(path: &str) -> bool {
     !path.is_empty()
+        && !path.starts_with('/')
+        && path.split('/').all(|part| !part.is_empty() && part != "." && part != "..")
         && path.len() <= 192
         && !path.bytes().any(|b| b == b'\\' || b == 0 || b < 32)
         && Path::new(path).components().all(|part| match part {
