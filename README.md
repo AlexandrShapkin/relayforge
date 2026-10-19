@@ -1,12 +1,14 @@
 <div align="center">
 
+<img src="assets/relayforge-banner.svg" alt="RelayForge — Controlled infrastructure access" width="100%">
+
 # RelayForge
 
 **Controlled infrastructure access. Built in Rust.**
 
 A security-first MCP bridge for personally operated Linux, MikroTik RouterOS, and Android devices.
 
-[![CI](https://github.com/AlexandrShapkin/relayforge/actions/workflows/ci.yml/badge.svg)](https://github.com/AlexandrShapkin/relayforge/actions)
+[![CI](https://github.com/AlexandrShapkin/relayforge/actions/workflows/tests.yml/badge.svg)](https://github.com/AlexandrShapkin/relayforge/actions)
 ![Rust](https://img.shields.io/badge/Rust-1.85%2B-4A7CAB)
 ![License](https://img.shields.io/badge/License-Apache--2.0-5A9E7E)
 ![Status](https://img.shields.io/badge/Status-active%20development-C64B4B)
