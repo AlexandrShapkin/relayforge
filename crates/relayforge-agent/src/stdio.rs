@@ -658,7 +658,10 @@ mod tests {
 
     #[test]
     fn retired_monitor_action_is_denied() {
-        assert_eq!(handle(&json!({"version":1,"operation":"monitor.run"}))["ok"],false);
+        assert_eq!(
+            handle(&json!({"version":1,"operation":"monitor.run"}))["ok"],
+            false
+        );
     }
 
     #[test]
