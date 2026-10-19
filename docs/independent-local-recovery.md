@@ -94,3 +94,16 @@ not remove, stop, or modify the existing Secure MCP Tunnel.
 The above are **not** considered completed by green CI alone. CI tests
 a disposable local fixture, grant denials, atomic recovery, symlink refusal,
 lock contention and unit definitions without touching a real device.
+
+## Read-only verification from ChatGPT
+
+After deploying API revision 7, call `relayforge_workstation_develop`
+with `{"operation":"recovery.inspect"}`. It inspects only fixed
+`relayforge-local-recover.service` and `.timer` systemd metadata. It
+reports whether opt-in and the timer are active, whether a timer trigger
+and service completion have been observed, and whether the last exit
+succeeded. No journals, unit contents, environment, paths or secrets
+are returned. A green result is `verified_last_run`.
+
+This is evidence of a clean **recent systemd run**, not a successful
+simulated failure-recovery test or a true external break-glass channel.
