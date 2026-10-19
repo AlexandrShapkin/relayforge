@@ -488,7 +488,7 @@ mod tests {
             assert_eq!(result["error"]["code"], -32602);
         }
         let mut output = Vec::new();
-        serve_tunnel(
+        serve_tunnel_worker(
             b"{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/list\"}\n".as_slice(),
             &mut output,
         )
