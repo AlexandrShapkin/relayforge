@@ -409,3 +409,25 @@ depth/file size/count are capped. This is an **inventory**, not automatic
 modification of live SSH, DNS or systemd state. A clean result does not prove
 that provider DNS, remote servers, private app databases or cloud connectors
 are free of `ru1` dependencies.
+
+## Exact retirement of the old ru1 SSH profiles
+
+API revision 6 supports a read-only `ssh.retire.plan` and two
+operator-authorized mutations: `ssh.retire.config` and
+`ssh.retire.known_hosts`. They accept no caller-provided filenames,
+content, host, executable or arbitrary arguments.
+
+The code reads only the local user's regular, owner-controlled
+`~/.ssh/config` or `~/.ssh/known_hosts` (128 KiB maximum). It removes
+only standalone `Host ru1`/retired FQDN stanzas or known-host entries
+whose hostname field references *only* the retired node. Shared host
+stanzas, unmatched references, symlinks, group-writable files or invalid
+encodings fail closed without modifying SSH. Each changed original is
+copied once, mode 0600, to private RelayForge state; a 0600 temporary file
+is synced and atomically renamed over the original. The operation
+requires the pre-existing local development grant and writes a private
+audit record first. Replays do not overwrite the backup.
+
+These changes do not modify SSH settings for `ru0` or `srv0`, remote
+servers, DNS or cloud infrastructure. Other active hosts must remain
+reachable after applying each step.
