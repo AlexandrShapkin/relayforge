@@ -2,7 +2,10 @@
 //! No caller-supplied executable, working directory, shell, service name,
 //! host, credentials or arbitrary filesystem root. Mutations require a
 //! separate local operator-created, permission-checked opt-in file.
-use crate::{workstation_dependency, workstation_jobs, workstation_recovery, workstation_retire, workstation_transfer};
+use crate::{
+    workstation_dependency, workstation_jobs, workstation_recovery, workstation_retire,
+    workstation_transfer,
+};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeSet,
@@ -651,9 +654,11 @@ pub fn execute(args: &Value) -> Result<String, String> {
             workstation_retire::dispatch(&home, operation)
         }
         "recovery.inspect" if obj.len() == 1 => {
-            let opted_in = local_opt_in(&home,
+            let opted_in = local_opt_in(
+                &home,
                 ".config/relayforge/allow-self-recovery",
-                b"ALLOW_RELAYFORGE_SELF_RECOVERY\n");
+                b"ALLOW_RELAYFORGE_SELF_RECOVERY\n",
+            );
             workstation_recovery::snapshot(opted_in)
         }
         "dependency.audit" if obj.len() == 1 => workstation_dependency::snapshot(&home),
