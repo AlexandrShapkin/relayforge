@@ -1,6 +1,8 @@
 //! A local, read-only MCP JSON-RPC stdio transport.
 //! No device is reachable from this implementation.
-use crate::{agent, android, android_health, bridge, changes, fleet, routeros, routeros_health, workstation};
+use crate::{
+    agent, android, android_health, bridge, changes, fleet, routeros, routeros_health, workstation,
+};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 
