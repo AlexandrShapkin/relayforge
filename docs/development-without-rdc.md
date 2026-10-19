@@ -217,7 +217,13 @@ while spawning the **fixed** released MCP binary with `--readonly-worker`
 for each incoming request. Each worker uses the identical remote allowlist
 and processes one request only. The caller cannot provide the executable,
 environment, shell or worker arguments. Notifications remain silent. Failed,
-timed-out, malformed or oversized worker replies fail closed.
+timed-out, malformed or oversized new worker replies fall back to the
+parent's already-running restricted executable (`/proc/self/exe`) for the
+same request; if that also fails, the parent returns a generic MCP error.
+The fallback does not use a user-supplied executable and does not weaken
+the tunnel's operation allowlist. This protects the current live connection
+from a bad on-disk upgrade, but **does not survive a parent restart**.
+A durable on-disk last-known-good release and boot recovery remain future work.
 
 Consequently a new local Cargo release build replaces the **next** worker
 without disconnecting the tunnel or requiring a plugin reconnect. The
