@@ -6,7 +6,7 @@ use std::{
     fs::{self, File},
     io::Read,
     os::unix::fs::MetadataExt,
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 const MAX_FILES: usize = 256;
@@ -36,7 +36,7 @@ fn allowed_name(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
         return false;
     };
-    name.len() <= 96 && name.bytes().all(|b|
+    !name.starts_with('.') && name.len() <= 96 && name.bytes().all(|b|
         b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
 }
 
@@ -87,6 +87,12 @@ fn scan_tree(
     checked: &mut usize, incomplete: &mut bool, out: &mut Vec<Value>,
 ) {
     if !root.is_dir() { return; }
+    let Ok(root_meta) = fs::symlink_metadata(root) else { return; };
+    if !root_meta.is_dir() || root_meta.file_type().is_symlink()
+        || root_meta.uid() != uid {
+        *incomplete = true;
+        return;
+    }
     let mut queue = VecDeque::from([(root.to_path_buf(), 0usize)]);
     while let Some((dir, depth)) = queue.pop_front() {
         let Ok(entries) = fs::read_dir(&dir) else {
@@ -130,11 +136,7 @@ pub fn snapshot(home: &Path) -> Result<String, String> {
     for (category, path) in [
         ("ssh", home.join(".ssh/config")),
         ("ssh", home.join(".ssh/known_hosts")),
-        ("system", PathBuf::from("/etc/hosts")),
     ] {
-        // /etc/hosts is root-owned; it is intentionally never scanned through
-        // the user-owned file reader. OS-level DNS should be audited separately.
-        if category == "system" { continue; }
         examine(&path, category, path.file_name().and_then(|s| s.to_str())
             .unwrap_or("unknown"), uid, &mut checked, &mut incomplete, &mut matches);
     }
