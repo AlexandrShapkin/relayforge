@@ -165,7 +165,7 @@ fn write_private(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), String> {
         .map_err(|_| "job artifact unavailable")?;
     out.write_all(bytes)
         .and_then(|_| out.sync_all())
-        .map_err(|_| "job artifact write failed")
+        .map_err(|_| "job artifact write failed".to_string())
 }
 
 fn script_valid(script: &str) -> bool {
