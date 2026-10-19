@@ -36,7 +36,10 @@ See [security](docs/security.md),
 ## Development
 
 The canonical development branch is `main`. Use short-lived branches
-from `main` and pull requests. Run all checks before merging:
+from `main` and pull requests. The [RDC-independent development playbook](docs/development-without-rdc.md)
+describes how to edit, test, build and review RelayForge entirely through
+the connected GitHub integration, without ThinkPad or Remote Desktop Commander.
+Run all checks before merging:
 
 ```sh
 cargo fmt --all -- --check
