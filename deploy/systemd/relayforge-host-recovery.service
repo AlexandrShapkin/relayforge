@@ -1,0 +1,17 @@
+[Unit]
+Description=RelayForge ru0 independent opt-in user-service recovery
+ConditionPathExists=%h/.config/relayforge/allow-host-recovery
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/.local/libexec/relayforge/relayforge-host-recovery.py repair
+TimeoutStartSec=40
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/state/relayforge-host-recovery
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelTunables=true
+ProtectControlGroups=true
+UMask=0077
