@@ -13,6 +13,8 @@ fn main() -> io::Result<()> {
             .enable_all()
             .build()?
             .block_on(relayforge_mcp::http::run_from_env())
+    } else if std::env::args().nth(1).as_deref() == Some("--readonly-worker") {
+        relayforge_mcp::stdio::serve_tunnel_worker(io::stdin().lock(), io::stdout().lock())
     } else if std::env::args().nth(1).as_deref() == Some("--readonly-stdio") {
         relayforge_mcp::stdio::serve_tunnel(io::stdin().lock(), io::stdout().lock())
     } else {
