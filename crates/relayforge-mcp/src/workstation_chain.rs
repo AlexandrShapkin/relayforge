@@ -76,7 +76,8 @@ fn submit(home: &Path, steps: Vec<&str>) -> Result<String, String> {
     let dir = root.join(&id);
     let mut builder = fs::DirBuilder::new();
     use std::os::unix::fs::DirBuilderExt;
-    builder.mode(0o700)
+    builder
+        .mode(0o700)
         .create(&dir)
         .map_err(|_| "job directory unavailable")?;
     // Scripts are immutable create_new 0600 files. Publish the count only
@@ -89,17 +90,16 @@ fn submit(home: &Path, steps: Vec<&str>) -> Result<String, String> {
     Ok(json!({
         "job_id":id, "chain":true, "steps":steps.len(),
         "started":true, "limit_seconds":MAX_CHAIN_TIME
-    }).to_string())
+    })
+    .to_string())
 }
 
 fn stage_accepted(result: &jobs::StageResult, handoff_needed: bool) -> bool {
     result.exit_code == 0
         && !result.stdout_truncated
         && !result.stderr_truncated
-        && (!handoff_needed || (
-            result.stdout.len() <= MAX_HANDOFF
-            && std::str::from_utf8(&result.stdout).is_ok()
-        ))
+        && (!handoff_needed
+            || (result.stdout.len() <= MAX_HANDOFF && std::str::from_utf8(&result.stdout).is_ok()))
 }
 
 fn persist_final(dir: &Path, index: usize, code: i32, kind: Option<&str>) -> Result<(), String> {
@@ -181,7 +181,8 @@ fn status(home: &Path, id: &str) -> Result<String, String> {
         "completed_steps":completed,
         "state":base["state"], "exit_code":base.get("exit_code"),
         "failure_kind":base.get("failure_kind")
-    }).to_string())
+    })
+    .to_string())
 }
 
 fn output(home: &Path, id: &str, step: usize) -> Result<String, String> {
@@ -191,15 +192,18 @@ fn output(home: &Path, id: &str, step: usize) -> Result<String, String> {
         return Err("step out of range".into());
     }
     let receipt = read_text(&dir, &artifact_name(step, "json"), 512)?;
-    let detail = receipt.map(|s| serde_json::from_str::<Value>(&s))
-        .transpose().map_err(|_| "invalid stage receipt")?;
+    let detail = receipt
+        .map(|s| serde_json::from_str::<Value>(&s))
+        .transpose()
+        .map_err(|_| "invalid stage receipt")?;
     Ok(json!({
         "job_id":id, "step":step, "steps":total, "result":detail,
         "stdout":read_text(&dir, &artifact_name(step, "stdout"), jobs::MAX_LOG)?
             .unwrap_or_default(),
         "stderr":read_text(&dir, &artifact_name(step, "stderr"), jobs::MAX_LOG)?
             .unwrap_or_default()
-    }).to_string())
+    })
+    .to_string())
 }
 
 pub(crate) fn execute(home: &Path, args: &Value) -> Result<String, String> {
@@ -207,19 +211,27 @@ pub(crate) fn execute(home: &Path, args: &Value) -> Result<String, String> {
     match obj.get("operation").and_then(Value::as_str) {
         Some("job.chain.start") if obj.len() == 2 => submit(home, scripts(args)?),
         Some("job.chain.status") if obj.len() == 2 => {
-            let id = obj.get("task_id").and_then(Value::as_str)
+            let id = obj
+                .get("task_id")
+                .and_then(Value::as_str)
                 .ok_or("job ID required")?;
             status(home, id)
         }
         Some("job.chain.output") if obj.len() == 3 => {
-            let id = obj.get("task_id").and_then(Value::as_str)
+            let id = obj
+                .get("task_id")
+                .and_then(Value::as_str)
                 .ok_or("job ID required")?;
-            let params = obj.get("parameters").and_then(Value::as_object)
+            let params = obj
+                .get("parameters")
+                .and_then(Value::as_object)
                 .ok_or("step parameter required")?;
             if params.len() != 1 {
                 return Err("unexpected output parameters".into());
             }
-            let step = params.get("step").and_then(Value::as_u64)
+            let step = params
+                .get("step")
+                .and_then(Value::as_u64)
                 .and_then(|n| usize::try_from(n).ok())
                 .ok_or("step number required")?;
             output(home, id, step)
@@ -248,19 +260,34 @@ mod tests {
     }
     #[test]
     fn artifacts_are_exact_and_bounded() {
-        for name in ["chain.count","step-01.sh","step-06.stdout","step-03.json"] {
+        for name in [
+            "chain.count",
+            "step-01.sh",
+            "step-06.stdout",
+            "step-03.json",
+        ] {
             assert!(artifact_allowed(name, 6));
         }
-        for name in ["step-00.sh","step-07.sh","step-01.log","../step-01.sh",
-            "step-1.sh","script.sh","step-02.sh.backup"] {
+        for name in [
+            "step-00.sh",
+            "step-07.sh",
+            "step-01.log",
+            "../step-01.sh",
+            "step-1.sh",
+            "script.sh",
+            "step-02.sh.backup",
+        ] {
             assert!(!artifact_allowed(name, 6), "{name}");
         }
     }
     #[test]
     fn handoff_rejects_overflow_non_utf8_and_failed_stages() {
         let mut stage = jobs::StageResult {
-            exit_code: 0, stdout: b"alpha\n".to_vec(), stderr: vec![],
-            stdout_truncated: false, stderr_truncated: false,
+            exit_code: 0,
+            stdout: b"alpha\n".to_vec(),
+            stderr: vec![],
+            stdout_truncated: false,
+            stderr_truncated: false,
         };
         assert!(stage_accepted(&stage, true));
         stage.stdout = vec![b'a'; MAX_HANDOFF + 1];
@@ -278,9 +305,14 @@ mod tests {
     #[test]
     fn chain_progress_and_step_output_are_durable_without_execution() {
         use std::os::unix::fs::PermissionsExt;
-        let unique = format!("rf-chain-test-{}-{}", std::process::id(),
-            std::time::SystemTime::now().duration_since(
-                std::time::UNIX_EPOCH).unwrap().as_nanos());
+        let unique = format!(
+            "rf-chain-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
         let home = std::env::temp_dir().join(unique);
         let state = home.join(".local/state/relayforge");
         fs::create_dir_all(&state).unwrap();
@@ -294,7 +326,12 @@ mod tests {
         write_private(&dir, "step-01.stdout", b"alpha").unwrap();
         write_private(&dir, "step-01.stderr", b"").unwrap();
         write_private(&dir, "step-01.json", b"{\"step\":1,\"exit_code\":0}").unwrap();
-        write_private(&dir, "result.json", b"{\"state\":\"finished\",\"exit_code\":1}").unwrap();
+        write_private(
+            &dir,
+            "result.json",
+            b"{\"state\":\"finished\",\"exit_code\":1}",
+        )
+        .unwrap();
         let reported: Value = serde_json::from_str(&status(&home, id).unwrap()).unwrap();
         assert_eq!(reported["completed_steps"], 1);
         assert_eq!(reported["steps"], 2);
