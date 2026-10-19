@@ -1,0 +1,47 @@
+name: RDC-independent development verification
+
+# All commands execute on a disposable GitHub-hosted runner.
+# No ThinkPad, VPS, RouterOS or Android connection is required.
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rdc-independent-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify-offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Check Rust
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test workspace
+        run: cargo test --workspace --locked
+      - name: Build Linux release binaries
+        run: cargo build --release --locked -p relayforge-agent -p relayforge-mcp
+      - name: Confirm restricted MCP operation without devices
+        run: python3 scripts/offline_mcp_smoke.py target/release/relayforge-mcp
+      - name: Package CI-only binaries
+        run: |
+          tar -C target/release -czf /tmp/relayforge-ci-linux-x86_64.tar.gz relayforge-agent relayforge-mcp
+          sha256sum /tmp/relayforge-ci-linux-x86_64.tar.gz > /tmp/relayforge-ci-linux-x86_64.tar.gz.sha256
+      - name: Retain disposable build for manual inspection only
+        uses: actions/upload-artifact@v4
+        with:
+          name: relayforge-ci-linux-x86_64
+          path: |
+            /tmp/relayforge-ci-linux-x86_64.tar.gz
+            /tmp/relayforge-ci-linux-x86_64.tar.gz.sha256
+          retention-days: 7
+          if-no-files-found: error
