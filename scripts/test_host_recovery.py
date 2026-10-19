@@ -88,6 +88,9 @@ class HostRecoveryTests(unittest.TestCase):
         with self.assertRaisesRegex(mod.GuardError, "local_opt_in_missing"):
             self.guard.repair()
         self.assertEqual(self.commands, [])
+        self.guard.grant.write_bytes(mod.GRANT + b"\n")
+        with self.assertRaisesRegex(mod.GuardError, "local_opt_in_missing"):
+            self.guard.repair()
 
     def test_wrong_host_cannot_run(self):
         self.guard.hostname = lambda: "srv0"
