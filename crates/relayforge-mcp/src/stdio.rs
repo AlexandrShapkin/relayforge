@@ -345,7 +345,10 @@ fn worker_binary() -> Result<PathBuf, ()> {
     // ThinkPad home layout. This fallback cannot select arbitrary binaries:
     // only the already running RelayForge executable is permitted.
     let current = std::env::current_exe().map_err(|_| ())?;
-    if current.file_name().is_some_and(|name| name == "relayforge-mcp") {
+    if current
+        .file_name()
+        .is_some_and(|name| name == "relayforge-mcp")
+    {
         Ok(current)
     } else {
         Err(())
