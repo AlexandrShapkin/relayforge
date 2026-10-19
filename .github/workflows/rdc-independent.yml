@@ -29,6 +29,11 @@ jobs:
           bash -n deploy/install-local-recovery.sh
           python3 -m py_compile deploy/relayforge-local-recover.py scripts/test_local_recovery.py
           python3 scripts/test_local_recovery.py
+      - name: Verify host-local production recovery without devices
+        run: |
+          bash -n deploy/install-host-recovery.sh
+          python3 -m py_compile deploy/relayforge-host-recovery.py scripts/test_host_recovery.py
+          python3 scripts/test_host_recovery.py
       - name: Format
         run: cargo fmt --all -- --check
       - name: Check Rust
