@@ -17,7 +17,7 @@ const MAX_SERVICE_DURATION_SECONDS: i64 = 10 * 60;
 fn unit_properties(unit: &str) -> Result<HashMap<String, String>, String> {
     let property = match unit {
         TIMER => "Id,LoadState,ActiveState,UnitFileState,LastTriggerUSec,NextElapseUSecRealtime,NextElapseUSecMonotonic",
-        SERVICE => "Id,LoadState,ActiveState,Result,ExecMainStatus,ExecMainCode,ExecMainExitTimestampMonotonic",
+        SERVICE => "Id,LoadState,ActiveState,Result,ExecMainStatus,ExecMainCode,ExecMainExitTimestamp",
         _ => return Err("unit denied".into()),
     };
     let output = Command::new("timeout")
@@ -133,9 +133,9 @@ fn summarize(
     let active = timer.get("ActiveState").map(String::as_str) == Some("active");
     let enabled = timer.get("UnitFileState").map(String::as_str) == Some("enabled");
     let timer_triggered = meaningful_time(timer.get("LastTriggerUSec"));
-    let completed = meaningful_time(service.get("ExecMainExitTimestampMonotonic"));
+    let completed = meaningful_time(service.get("ExecMainExitTimestamp"));
     let timer_at = utc_epoch(timer.get("LastTriggerUSec"));
-    let service_at = utc_epoch(service.get("ExecMainExitTimestampMonotonic"));
+    let service_at = utc_epoch(service.get("ExecMainExitTimestamp"));
     let result = service.get("Result").map(String::as_str);
     let code = service.get("ExecMainStatus").map(String::as_str);
     let historically_successful =
@@ -213,7 +213,7 @@ mod tests {
             ("Result".into(), "success".into()),
             ("ExecMainStatus".into(), "0".into()),
             (
-                "ExecMainExitTimestampMonotonic".into(),
+                "ExecMainExitTimestamp".into(),
                 "Mon 2026-10-19 14:50:04 UTC".into(),
             ),
         ]);
@@ -262,7 +262,7 @@ mod tests {
             "last_run_unverified"
         );
         service.insert("ExecMainStatus".into(), "0".into());
-        service.insert("ExecMainExitTimestampMonotonic".into(), "0".into());
+        service.insert("ExecMainExitTimestamp".into(), "0".into());
         assert_eq!(
             summarize(&timer, &service, true, SAMPLE_NOW)["status"],
             "last_run_unverified"
@@ -306,13 +306,24 @@ mod tests {
             "Mon 2026-10-19 14:50:00 UTC".into(),
         );
         service.insert(
-            "ExecMainExitTimestampMonotonic".into(),
+            "ExecMainExitTimestamp".into(),
             "Mon 2026-10-19 14:49:00 UTC".into(),
         );
         assert_eq!(
             summarize(&timer, &service, true, SAMPLE_NOW)["status"],
             "last_run_stale"
         );
+    }
+
+    #[test]
+    fn monotonic_counter_is_not_a_wall_clock_timestamp() {
+        let (timer, mut service) = sample();
+        // systemd may expose an integer here; never reinterpret uptime as UTC.
+        service.remove("ExecMainExitTimestamp");
+        service.insert("ExecMainExitTimestampMonotonic".into(), "7933587912".into());
+        let result = summarize(&timer, &service, true, SAMPLE_NOW);
+        assert_eq!(result["last_run_success"], false);
+        assert_eq!(result["status"], "last_run_unverified");
     }
 
     #[test]
