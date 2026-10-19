@@ -281,7 +281,22 @@ fn job_stop(home: &Path, id: &str) -> Result<String, String> {
 
 fn job_remove(home: &Path, id: &str) -> Result<String, String> {
     let state = job_status(home, id)?;
-    if state["state"] == "running" { return Err("cannot remove running job".into()); }
+    if state["state"] == "running" {
+        return Err("cannot remove running job".into());
+    }
+    // An absent transient unit is not proof the worker never started.
+    // Give a missing/ambiguous receipt the full 10-minute runtime plus
+    // cleanup margin before allowing removal of its script.
+    if state["state"] == "unknown" || state["state"] == "failed" {
+        let epoch = id.strip_prefix(PREFIX).unwrap_or("")
+            .split('-').next().unwrap_or("")
+            .parse::<u64>().map_err(|_| "invalid job ID")?;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)
+            .map_err(|_| "clock unavailable")?.as_secs();
+        if now.saturating_sub(epoch) < 900 {
+            return Err("ambiguous job may still be starting; retry cleanup later".into());
+        }
+    }
     let dir = job_dir(home, id)?;
     let allowed = ["script.sh","stdout.log","stderr.log","result.json","stopped"];
     for entry in fs::read_dir(&dir).map_err(|_| "job unavailable")? {
@@ -339,7 +354,7 @@ pub fn execute(home: &Path, args: &Value) -> Result<String, String> {
 mod tests {
     use super::*;
     #[test]
-    fn IDs_and_scripts_reject_injection() {
+    fn ids_and_scripts_reject_injection() {
         assert!(valid_id("relayforge-job-1792390000-abcdef"));
         for s in ["relayforge-dev-1792390000-abcdef",
             "relayforge-job-1792390000-zzzzzz",
