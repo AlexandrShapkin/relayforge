@@ -9,7 +9,7 @@ administration system.
 
 The tested deployment runs a private **outbound-only Secure MCP Tunnel**
 on an authorized ThinkPad. The tunnel invokes a restricted MCP process.
-Linux agents on `ru0`, `ru1` and `srv0` check host and user-service
+Linux agents on `ru0` and `srv0` check host and user-service
 status under independent allowlists. MikroTik uses existing authenticated
 SSH for fixed read-only RouterOS commands. Android requires an already
 physically authorized local ADB connection.
