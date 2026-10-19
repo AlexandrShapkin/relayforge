@@ -791,6 +791,37 @@ mod tests {
         assert!(source_file(".github/workflows/tests.yml"));
     }
     #[test]
+    fn sandbox_exposes_tracked_sources_but_not_git_or_untracked_files() {
+        let unique = format!(
+            "relayforge-sandbox-test-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        );
+        let repo = std::env::temp_dir().join(unique);
+        fs::create_dir_all(repo.join("src")).unwrap();
+        fs::write(repo.join("src/allowed.rs"), "fn allowed() {}").unwrap();
+        fs::write(repo.join("src/private.rs"), "secret").unwrap();
+        fs::write(repo.join(".env"), "SECRET=never").unwrap();
+        let initialized = Command::new("git")
+            .arg("init").arg("-q").arg(&repo).status().unwrap();
+        assert!(initialized.success());
+        let added = Command::new("git").arg("-C").arg(&repo)
+            .args(["add", "src/allowed.rs"]).status().unwrap();
+        assert!(added.success());
+        let mounts = sandbox_file_mounts(&repo).unwrap();
+        let rendered = mounts.join(" ");
+        assert!(rendered.contains("/workspace/src/allowed.rs"));
+        assert!(!rendered.contains("private.rs"));
+        assert!(!rendered.contains(".env"));
+        assert!(!rendered.contains(".git"));
+        assert!(!rendered.contains("SECRET"));
+        let bad = repo.join("src/symlink.rs");
+        std::os::unix::fs::symlink(repo.join("src/private.rs"), &bad).unwrap();
+        assert!(verified_tracked_file(&repo, "src/symlink.rs").is_err());
+        fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
     fn sandbox_denies_bad_commands_and_traversal() {
         for script in ["", "x\0y", "echo \u{1b}[31m"] {
             assert!(sandbox_shell(Path::new("/workspace"), script).is_err());
