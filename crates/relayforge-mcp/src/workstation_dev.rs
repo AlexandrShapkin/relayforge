@@ -142,7 +142,11 @@ fn command(program: &str, args: &[&str], max_seconds: u32) -> Result<Output, Str
     let status = process.wait().map_err(|_| "process wait failed")?;
     let out = out_reader.join().map_err(|_| "stdout reader failed")??;
     let err = err_reader.join().map_err(|_| "stderr reader failed")??;
-    Ok(Output { status, stdout: out, stderr: err })
+    Ok(Output {
+        status,
+        stdout: out,
+        stderr: err,
+    })
 }
 
 fn text_output(output: Output) -> Result<String, String> {
@@ -393,7 +397,8 @@ pub fn execute(args: &Value) -> Result<String, String> {
             "arbitrary_host_shell": false,
             "arbitrary_host_files": false,
             "local_grants_required_for_mutations": true
-        }).to_string()),
+        })
+        .to_string()),
         "process.list" if obj.len() == 1 => {
             text_output(command("ps", &["-eo", "pid=,comm=,etime=,rss="], 8)?)
         }
