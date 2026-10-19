@@ -458,21 +458,55 @@ fn sandbox_shell(repo: &Path, script: &str) -> Result<String, String> {
         return Err("invalid sandbox command".into());
     }
     let mut arguments = [
-        "--unshare-all", "--die-with-parent", "--new-session",
-        "--ro-bind", "/usr", "/usr",
-        "--ro-bind", "/bin", "/bin",
-        "--ro-bind", "/lib", "/lib",
-        "--ro-bind", "/lib64", "/lib64",
-        "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
-        "--dir", "/workspace",
-    ].iter().map(|v| (*v).to_owned()).collect::<Vec<_>>();
+        "--unshare-all",
+        "--die-with-parent",
+        "--new-session",
+        "--ro-bind",
+        "/usr",
+        "/usr",
+        "--ro-bind",
+        "/bin",
+        "/bin",
+        "--ro-bind",
+        "/lib",
+        "/lib",
+        "--ro-bind",
+        "/lib64",
+        "/lib64",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        "--tmpfs",
+        "/tmp",
+        "--dir",
+        "/workspace",
+    ]
+    .iter()
+    .map(|v| (*v).to_owned())
+    .collect::<Vec<_>>();
     arguments.extend(sandbox_file_mounts(repo)?);
-    arguments.extend([
-        "--chdir", "/workspace", "--clearenv",
-        "--setenv", "PATH", "/usr/bin:/bin",
-        "--setenv", "HOME", "/workspace",
-        "--", "/bin/bash", "--noprofile", "--norc", "-c", script,
-    ].iter().map(|v| (*v).to_owned()));
+    arguments.extend(
+        [
+            "--chdir",
+            "/workspace",
+            "--clearenv",
+            "--setenv",
+            "PATH",
+            "/usr/bin:/bin",
+            "--setenv",
+            "HOME",
+            "/workspace",
+            "--",
+            "/bin/bash",
+            "--noprofile",
+            "--norc",
+            "-c",
+            script,
+        ]
+        .iter()
+        .map(|v| (*v).to_owned()),
+    );
     let args: Vec<&str> = arguments.iter().map(String::as_str).collect();
     text_output(command("bwrap", &args, 15)?)
 }
@@ -795,7 +829,10 @@ mod tests {
         let unique = format!(
             "relayforge-sandbox-test-{}-{}",
             std::process::id(),
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         );
         let repo = std::env::temp_dir().join(unique);
         fs::create_dir_all(repo.join("src")).unwrap();
@@ -803,10 +840,18 @@ mod tests {
         fs::write(repo.join("src/private.rs"), "secret").unwrap();
         fs::write(repo.join(".env"), "SECRET=never").unwrap();
         let initialized = Command::new("git")
-            .arg("init").arg("-q").arg(&repo).status().unwrap();
+            .arg("init")
+            .arg("-q")
+            .arg(&repo)
+            .status()
+            .unwrap();
         assert!(initialized.success());
-        let added = Command::new("git").arg("-C").arg(&repo)
-            .args(["add", "src/allowed.rs"]).status().unwrap();
+        let added = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["add", "src/allowed.rs"])
+            .status()
+            .unwrap();
         assert!(added.success());
         let mounts = sandbox_file_mounts(&repo).unwrap();
         let rendered = mounts.join(" ");
