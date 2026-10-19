@@ -263,3 +263,27 @@ for human physical recovery after a machine/network failure.
 Do not execute this bootstrap through an MCP approval-bypass mechanism or
 give it API credentials. The operator must review the exact merge and
 authorize the one-time service restart separately.
+
+## Live diagnostics without RDC or a tunnel restart
+
+After hot-stdio activation, `capabilities` reports `api_revision=2` and two
+additional read-only operations:
+
+- `task.list`: returns up to 30 visible `relayforge-dev-*` transient
+  systemd unit identifiers and enumerated activity/substates. It does not
+  emit the freeform service description, environment, executable arguments,
+  other user's services or arbitrary journal contents. Completed units
+  using `--collect` may be absent.
+- `tunnel.inspect`: reports the fixed Secure MCP Tunnel's active state,
+  whether its control-plane poll succeeded recently, age of the last
+  successful poll, and the worker API revision. It never returns the tunnel
+  URL, bearer credential, control-plane profile or raw logs.
+
+Both operations reject extra parameters, do not need a local mutation grant
+and use existing bounded fixed commands. Together with `task.status` and
+`task.logs` they help diagnose updates without RDC.
+
+A successful `capabilities` response with revision 2 immediately after a
+`build.start` completion, *without* calling `tunnel.restart`, demonstrates
+that the active permanent MCP parent routed a request to the newly built
+worker.

@@ -239,6 +239,53 @@ fn audit(home: &Path, operation: &str) -> Result<(), String> {
     file.sync_all().map_err(|_| "audit unavailable".to_string())
 }
 
+// Return only allowlisted transient unit identities and state, never
+// systemd's freeform Description column, ExecStart, environment, or logs.
+fn bounded_task_inventory(output: &str) -> Result<Value, String> {
+    if output.len() > MAX_OUTPUT {
+        return Err("task inventory too large".into());
+    }
+    let mut tasks = Vec::new();
+    for line in output.lines() {
+        let tokens: Vec<_> = line.split_whitespace().collect();
+        let Some(position) = tokens
+            .iter()
+            .position(|token| token.strip_suffix(".service").is_some_and(unit_id))
+        else {
+            continue;
+        };
+        if tokens.len() < position + 4 {
+            continue;
+        }
+        let id = tokens[position].strip_suffix(".service").unwrap_or("");
+        let active = tokens[position + 2];
+        let sub = tokens[position + 3];
+        if !matches!(
+            active,
+            "active" | "activating" | "inactive" | "failed" | "deactivating"
+        ) || !matches!(
+            sub,
+            "running"
+                | "start"
+                | "dead"
+                | "exited"
+                | "failed"
+                | "auto-restart"
+                | "waiting"
+                | "stop-sigterm"
+                | "stop"
+                | "condition"
+        ) {
+            continue;
+        }
+        tasks.push(json!({"task_id":id, "active":active, "sub":sub}));
+        if tasks.len() == 30 {
+            break;
+        }
+    }
+    Ok(json!({"tasks":tasks, "limited":true}))
+}
+
 fn unit_id(input: &str) -> bool {
     let Some(raw) = input.strip_prefix("relayforge-dev-") else {
         return false;
@@ -435,12 +482,13 @@ pub fn execute(args: &Value) -> Result<String, String> {
             return Err("home invalid".into());
         }
         return Ok(json!({
-            "api_revision": 1,
+            "api_revision": 2,
             "transport": "private_secure_mcp_tunnel",
             "operations": [
                 "capabilities", "repo.status", "repo.list", "repo.read",
                 "repo.write", "repo.sync", "build.start",
-                "task.status", "task.logs", "tunnel.restart",
+                "task.status", "task.logs", "task.list",
+                "tunnel.inspect", "tunnel.restart",
                 "shell.sandbox", "process.list", "user.services"
             ],
             "write_grants": {
@@ -455,6 +503,49 @@ pub fn execute(args: &Value) -> Result<String, String> {
     }
     let (home, repo) = home_and_repo()?;
     match operation {
+        "task.list" if obj.len() == 1 => {
+            let output = command(
+                "systemctl",
+                &[
+                    "--user",
+                    "list-units",
+                    "--all",
+                    "--type=service",
+                    "--no-legend",
+                    "--plain",
+                    "relayforge-dev-*.service",
+                ],
+                8,
+            )?;
+            if !output.status.success() {
+                return Err("task inventory unavailable".into());
+            }
+            let text =
+                String::from_utf8(output.stdout).map_err(|_| "task inventory encoding invalid")?;
+            Ok(bounded_task_inventory(&text)?.to_string())
+        }
+        "tunnel.inspect" if obj.len() == 1 => {
+            // Compose fixed read-only health evidence; no service logs,
+            // credential reference, command line or environment is returned.
+            let snapshot = crate::workstation::snapshot(&json!({}))?;
+            let health: Value =
+                serde_json::from_str(&snapshot).map_err(|_| "health unavailable")?;
+            let active = health["tunnel"]["service_active"].as_bool();
+            let recent = health["tunnel"]["authenticated_poll_recent"].as_bool();
+            let age = health["tunnel"]["last_successful_poll_age_seconds"].as_u64();
+            Ok(json!({
+                "status":if active == Some(true) && recent == Some(true) {
+                    "healthy"
+                } else {
+                    "unverified"
+                },
+                "service_active":active,
+                "authenticated_poll_recent":recent,
+                "last_successful_poll_age_seconds":age,
+                "api_revision":2
+            })
+            .to_string())
+        }
         "process.list" if obj.len() == 1 => {
             text_output(command("ps", &["-eo", "pid=,comm=,etime=,rss="], 8)?)
         }
@@ -691,6 +782,23 @@ mod tests {
         assert!(read_capped(overflow.as_slice()).is_err());
         let cmd = command("sh", &["-c", "head -c 100000 /dev/zero"], 5);
         assert!(cmd.is_err());
+    }
+
+    #[test]
+    fn task_inventory_filters_freeform_service_descriptions() {
+        let input = concat!(
+            "relayforge-dev-1792370000-a0b1c2.service loaded active running API_SECRET=never_return\n",
+            "relayforge-tunnel.service loaded active running PRIVATE_TOKEN=hidden\n",
+            "relayforge-dev-1792370001-aaa111.service loaded failed failed KEY=never_return\n",
+            "relayforge-dev-1792370002-aaa111.service loaded weird unknown NOTE=hidden\n",
+            "untrusted arbitrary.service loaded active running secret\n");
+        let snapshot = bounded_task_inventory(input).unwrap();
+        let rendered = snapshot.to_string();
+        assert_eq!(snapshot["tasks"].as_array().unwrap().len(), 2);
+        assert!(rendered.contains("relayforge-dev-1792370000-a0b1c2"));
+        for value in ["SECRET", "PRIVATE_TOKEN", "KEY=", "NOTE=", "untrusted"] {
+            assert!(!rendered.contains(value));
+        }
     }
 
     #[test]
