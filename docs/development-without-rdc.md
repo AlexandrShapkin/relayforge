@@ -381,3 +381,15 @@ or provide arbitrary filesystem access. Stopping a job targets only its
 generated systemd unit. Use `job.remove` after completion to reclaim
 private storage. No RDC, root privileges, SSH, or tunnel restart is required
 for the supported workflow.
+
+### Durable worker failure receipts
+
+If the transient user service accepts a sandbox job but its worker cannot
+start the restricted sandbox (missing repository, inaccessible mount,
+unavailable binary), the worker writes a private `result.json` terminal
+receipt with `state=finished`, `exit_code=1`, and the fixed
+`failure_kind=worker_failed`. Host error strings, paths and credentials
+are not copied into MCP output. Such a job can be inspected and removed
+without waiting for the 900-second ambiguous-job cleanup grace period.
+If the worker is killed before writing anything, its status remains
+`unknown` and conservative cleanup rules still apply.
