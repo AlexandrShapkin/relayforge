@@ -13,7 +13,9 @@ const NOFOLLOW: i32 = 0x20000;
 
 fn uid() -> Result<u32, String> {
     let value = fs::read_to_string("/proc/self/status").map_err(|_| "uid unavailable")?;
-    value.lines().find_map(|line| line.strip_prefix("Uid:"))
+    value
+        .lines()
+        .find_map(|line| line.strip_prefix("Uid:"))
         .and_then(|line| line.split_whitespace().next())
         .and_then(|line| line.parse().ok())
         .ok_or("uid unavailable".to_string())
@@ -21,8 +23,11 @@ fn uid() -> Result<u32, String> {
 
 fn private_directory(dir: &Path) -> Result<(), String> {
     let m = fs::symlink_metadata(dir).map_err(|_| "directory unavailable")?;
-    if !m.is_dir() || m.file_type().is_symlink() || m.uid() != uid()?
-        || m.permissions().mode() & 0o077 != 0 {
+    if !m.is_dir()
+        || m.file_type().is_symlink()
+        || m.uid() != uid()?
+        || m.permissions().mode() & 0o077 != 0
+    {
         return Err("insecure directory".into());
     }
     Ok(())
@@ -34,25 +39,36 @@ fn load(path: &Path) -> Result<Option<String>, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err("file unavailable".into()),
     };
-    if !m.is_file() || m.file_type().is_symlink() || m.uid() != uid()?
-        || m.len() > MAX_BYTES || m.permissions().mode() & 0o022 != 0 {
+    if !m.is_file()
+        || m.file_type().is_symlink()
+        || m.uid() != uid()?
+        || m.len() > MAX_BYTES
+        || m.permissions().mode() & 0o022 != 0
+    {
         return Err("insecure or oversized ssh file".into());
     }
     let mut content = Vec::new();
-    OpenOptions::new().read(true).custom_flags(NOFOLLOW).open(path)
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(NOFOLLOW)
+        .open(path)
         .map_err(|_| "ssh file unavailable")?
-        .take(MAX_BYTES + 1).read_to_end(&mut content)
+        .take(MAX_BYTES + 1)
+        .read_to_end(&mut content)
         .map_err(|_| "ssh file unavailable")?;
     if content.len() > MAX_BYTES as usize {
         return Err("ssh file too large".into());
     }
-    Ok(Some(String::from_utf8(content).map_err(|_| "ssh file not utf8")?))
+    Ok(Some(
+        String::from_utf8(content).map_err(|_| "ssh file not utf8")?,
+    ))
 }
 
 fn retired_host(name: &str) -> bool {
-    matches!(name.to_ascii_lowercase().as_str(),
-        "ru1" | "ru1.alexandrshapkin.ru" | "[ru1]:22"
-        | "[ru1.alexandrshapkin.ru]:22")
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "ru1" | "ru1.alexandrshapkin.ru" | "[ru1]:22" | "[ru1.alexandrshapkin.ru]:22"
+    )
 }
 
 /// Remove exactly one Host stanza, delimited by next Host or Match. A
@@ -141,15 +157,23 @@ pub fn plan(home: &Path) -> Result<String, String> {
         results.push(result);
     }
     Ok(json!({"retired_host":"ru1","files":results,
-        "scope":"local_user_ssh_only","writes":false}).to_string())
+        "scope":"local_user_ssh_only","writes":false})
+    .to_string())
 }
 
 fn save_once(path: &Path, contents: &str) -> Result<(), String> {
     let temp = path.with_extension("relayforge-retire-pending");
-    let mut f = OpenOptions::new().write(true).create_new(true).mode(0o600)
-        .custom_flags(NOFOLLOW).open(&temp)
+    let mut f = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(NOFOLLOW)
+        .open(&temp)
         .map_err(|_| "staged ssh file unavailable")?;
-    if f.write_all(contents.as_bytes()).and_then(|_| f.sync_all()).is_err() {
+    if f.write_all(contents.as_bytes())
+        .and_then(|_| f.sync_all())
+        .is_err()
+    {
         let _ = fs::remove_file(&temp);
         return Err("staged ssh file write failed".into());
     }
@@ -167,9 +191,16 @@ pub fn apply(home: &Path, operation: &str) -> Result<String, String> {
     private_directory(&state)?;
     let backup = state.join(backup_name);
     // No replacement if an earlier backup exists; fail closed on replays.
-    let mut saved = OpenOptions::new().write(true).create_new(true).mode(0o600)
-        .custom_flags(NOFOLLOW).open(backup).map_err(|_| "backup already exists or unavailable")?;
-    saved.write_all(original.as_bytes()).and_then(|_| saved.sync_all())
+    let mut saved = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(NOFOLLOW)
+        .open(backup)
+        .map_err(|_| "backup already exists or unavailable")?;
+    saved
+        .write_all(original.as_bytes())
+        .and_then(|_| saved.sync_all())
         .map_err(|_| "backup write failed")?;
     // Detect a race with a local editor before atomically replacing the file.
     if load(&path)?.unwrap_or_default() != original {
@@ -177,7 +208,8 @@ pub fn apply(home: &Path, operation: &str) -> Result<String, String> {
     }
     save_once(&path, &updated)?;
     Ok(json!({"retired_host":"ru1","removed":removed,
-        "operation":operation,"backup_private":true}).to_string())
+        "operation":operation,"backup_private":true})
+    .to_string())
 }
 
 #[cfg(test)]
