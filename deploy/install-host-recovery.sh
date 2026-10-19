@@ -22,7 +22,7 @@ units="$HOME/.config/systemd/user"
 [[ -f "$grant" && ! -L "$grant" &&
    "$(stat -c '%u' "$grant")" == "$(id -u)" &&
    "$(stat -c '%a' "$grant")" == "600" &&
-   "$(cat "$grant")" == "ALLOW_RELAYFORGE_HOST_RECOVERY" ]] || {
+   ]] && cmp -s "$grant" <(printf '%s\n' "ALLOW_RELAYFORGE_HOST_RECOVERY") || {
   echo "Exact local opt-in grant absent or unsafe" >&2; exit 5;
 }
 [[ -f "$source_dir/relayforge-host-recovery.py" &&
