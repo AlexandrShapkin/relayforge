@@ -648,7 +648,7 @@ pub fn execute(args: &Value) -> Result<String, String> {
                 return Err("local development opt-in missing".into());
             }
             audit(&home, operation)?;
-            workstation_retire::apply(&home, operation)
+            workstation_retire::dispatch(&home, operation)
         }
         "dependency.audit" if obj.len() == 1 => workstation_dependency::snapshot(&home),
         "job.start" | "job.list" | "job.status" | "job.output" | "job.stop" | "job.remove" => {

@@ -1,11 +1,12 @@
 //! Exact, audit-gated retirement of the literal ru1 SSH entries only.
 //! Never accepts hostnames, paths, shell commands or file contents from MCP.
-use serde_json::json;
+use serde_json::{json, Value};
 use std::{
     fs::{self, OpenOptions},
     io::{Read, Write},
     os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
+    process::{Command, Stdio},
 };
 
 const MAX_BYTES: u64 = 128 * 1024;
@@ -190,18 +191,26 @@ pub fn apply(home: &Path, operation: &str) -> Result<String, String> {
     let state = home.join(".local/state/relayforge");
     private_directory(&state)?;
     let backup = state.join(backup_name);
-    // No replacement if an earlier backup exists; fail closed on replays.
-    let mut saved = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(NOFOLLOW)
-        .open(backup)
-        .map_err(|_| "backup already exists or unavailable")?;
-    saved
-        .write_all(original.as_bytes())
-        .and_then(|_| saved.sync_all())
-        .map_err(|_| "backup write failed")?;
+    // A prior attempt may have written the private backup but been denied
+    // at the tunnel service's ProtectHome boundary. Permit resuming only
+    // if that backup is byte-identical to the *current* original.
+    if backup.exists() {
+        if load(&backup)?.as_deref() != Some(original.as_str()) {
+            return Err("existing backup differs from live config".into());
+        }
+    } else {
+        let mut saved = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(NOFOLLOW)
+            .open(backup)
+            .map_err(|_| "backup unavailable")?;
+        saved
+            .write_all(original.as_bytes())
+            .and_then(|_| saved.sync_all())
+            .map_err(|_| "backup write failed")?;
+    }
     // Detect a race with a local editor before atomically replacing the file.
     if load(&path)?.unwrap_or_default() != original {
         return Err("ssh file changed since inspection".into());
@@ -210,6 +219,76 @@ pub fn apply(home: &Path, operation: &str) -> Result<String, String> {
     Ok(json!({"retired_host":"ru1","removed":removed,
         "operation":operation,"backup_private":true})
     .to_string())
+}
+
+/// The MCP tunnel worker cannot write ~/.ssh (ProtectHome=read-only).
+/// Delegate a fixed, tightly validated retirement operation to a short-lived
+/// user systemd unit without weakening or restarting the secure tunnel.
+pub fn dispatch(home: &Path, operation: &str) -> Result<String, String> {
+    let kind = match operation {
+        "ssh.retire.config" => "config",
+        "ssh.retire.known_hosts" => "known_hosts",
+        _ => return Err("ssh operation denied".into()),
+    };
+    let binary = home.join("Projects/relayforge/target/release/relayforge-mcp");
+    let binary = binary.to_str().ok_or("worker path invalid")?;
+    let output = Command::new("timeout")
+        .args([
+            "-k",
+            "2s",
+            "22s",
+            "systemd-run",
+            "--user",
+            "--wait",
+            "--pipe",
+            "--collect",
+            "--property=Type=exec",
+            "--property=RuntimeMaxSec=16",
+            "--",
+            binary,
+            "--retire-ssh-worker",
+            kind,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|_| "retirement worker unavailable")?;
+    if !output.status.success() || output.stdout.len() > 2048 {
+        return Err("retirement worker failed".into());
+    }
+    let result: Value =
+        serde_json::from_slice(&output.stdout).map_err(|_| "retirement worker reply invalid")?;
+    if result["retired_host"] != "ru1"
+        || (result.get("operation") != Some(&Value::String(operation.to_owned()))
+            && result["already_clean"] != true)
+    {
+        return Err("retirement worker reply invalid".into());
+    }
+    Ok(result.to_string())
+}
+
+/// Fixed local entrypoint, callable only with one of two exact names.
+pub fn run_worker(kind: &str) -> i32 {
+    let operation = match kind {
+        "config" => "ssh.retire.config",
+        "known_hosts" => "ssh.retire.known_hosts",
+        _ => return 2,
+    };
+    let Some(home) = std::env::var_os("HOME") else {
+        return 2;
+    };
+    let home = PathBuf::from(home);
+    if !home.is_absolute() || home.as_os_str().len() > 256 {
+        return 2;
+    }
+    match apply(&home, operation) {
+        Ok(result) => {
+            println!("{result}");
+            0
+        }
+        Err(_) => 1,
+    }
 }
 
 #[cfg(test)]

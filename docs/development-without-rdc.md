@@ -431,3 +431,17 @@ audit record first. Replays do not overwrite the backup.
 These changes do not modify SSH settings for `ru0` or `srv0`, remote
 servers, DNS or cloud infrastructure. Other active hosts must remain
 reachable after applying each step.
+
+### Tunnel hardening and SSH retirement
+
+The permanent MCP tunnel runs with `ProtectHome=read-only`. It cannot and
+must not write `~/.ssh` directly. A retirement action therefore starts the
+same installed RelayForge binary in a short-lived, bounded **user** systemd
+service, using `--retire-ssh-worker config|known_hosts` with no arbitrary
+path, script or host input. MCP receives only a sanitized structured result.
+The tunnel service restrictions and connection remain unchanged.
+
+A previous denied attempt may have created a private rollback copy while
+being unable to write `~/.ssh`. Such a backup is reused only if it is
+byte-identical to the original currently on disk; it can never silently
+replace a different earlier copy.
