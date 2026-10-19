@@ -4,8 +4,7 @@
 //! are returned to the MCP client. This module cannot create or change files.
 use serde_json::{json, Value};
 use std::{
-    fs::{self, File},
-    io::{Read, Seek, SeekFrom},
+    fs,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
