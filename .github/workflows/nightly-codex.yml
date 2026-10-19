@@ -1,0 +1,67 @@
+name: RelayForge opt-in nightly Codex (Draft PR only)
+
+# No cron, push or pull_request trigger. Each run requires an operator click.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: relayforge-autodev-night
+  cancel-in-progress: false
+
+jobs:
+  first-half:
+    if: github.ref == 'refs/heads/main' && github.repository == 'AlexandrShapkin/relayforge'
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Verify executor's offline safety tests
+        run: python3 scripts/test_nightly_codex.py
+      - name: Install pinned Codex CLI in disposable runner
+        run: npm install --global --ignore-scripts @openai/codex@0.154.0
+      - name: Run four serialized small stages
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/nightly_codex.py --start 1 --count 4 --interval-seconds 2700
+
+  second-half:
+    needs: first-half
+    if: ${{ always() && !cancelled() && github.ref == 'refs/heads/main' && github.repository == 'AlexandrShapkin/relayforge' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Verify executor's offline safety tests
+        run: python3 scripts/test_nightly_codex.py
+      - name: Install pinned Codex CLI in disposable runner
+        run: npm install --global --ignore-scripts @openai/codex@0.154.0
+      - name: Run four remaining stages
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/nightly_codex.py --start 5 --count 4 --interval-seconds 2700
