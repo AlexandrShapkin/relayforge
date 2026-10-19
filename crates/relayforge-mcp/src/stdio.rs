@@ -5,7 +5,12 @@ use crate::{
     workstation_dev,
 };
 use serde_json::{json, Value};
-use std::io::{self, BufRead, Write};
+use std::{
+    io::{self, BufRead, Read, Write},
+    path::PathBuf,
+    process::{Command, Stdio},
+    thread,
+};
 
 const MAX_LINE_BYTES: usize = 1024 * 1024;
 
@@ -314,7 +319,69 @@ pub fn handle_tunnel(input: &Value) -> Option<Value> {
 }
 
 pub fn serve_tunnel(reader: impl BufRead, writer: impl Write) -> io::Result<()> {
+    // The tunnel connects to a long-lived, fixed parent process. Each request
+    // is handled by the most recently built restricted worker on disk, so an
+    // update cannot kill the control-plane session by replacing the binary.
+    serve_with_handler(reader, writer, handle_hot_worker)
+}
+
+// The restricted one-request worker is never exposed as an unfiltered remote
+// server. The parent passes opaque JSON-RPC requests without a shell or
+// caller-selected program path.
+pub fn serve_tunnel_worker(reader: impl BufRead, writer: impl Write) -> io::Result<()> {
     serve_with_handler(reader, writer, handle_tunnel)
+}
+
+fn worker_binary() -> Result<PathBuf, ()> {
+    let home = PathBuf::from(std::env::var_os("HOME").ok_or(())?);
+    if !home.is_absolute() || home.as_os_str().len() > 256 {
+        return Err(());
+    }
+    Ok(home.join("Projects/relayforge/target/release/relayforge-mcp"))
+}
+
+fn worker_reply(input: &Value) -> Result<Value, ()> {
+    let worker = worker_binary()?;
+    let mut process = Command::new("timeout")
+        .args(["-k", "2s", "40s"])
+        .arg(worker)
+        .arg("--readonly-worker")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .env("RELAYFORGE_HOT_STDIO_WORKER", "1")
+        .spawn()
+        .map_err(|_| ())?;
+    let mut stdin = process.stdin.take().ok_or(())?;
+    let stdout = process.stdout.take().ok_or(())?;
+    let reader = thread::spawn(move || {
+        let mut data = Vec::new();
+        stdout
+            .take((MAX_LINE_BYTES + 1) as u64)
+            .read_to_end(&mut data)
+            .map(|_| data)
+    });
+    let sent = writeln!(stdin, "{input}").is_ok();
+    drop(stdin);
+    let finished = process.wait().map_err(|_| ())?;
+    let bytes = reader.join().map_err(|_| ())?.map_err(|_| ())?;
+    if !sent || !finished.success() || bytes.len() > MAX_LINE_BYTES {
+        return Err(());
+    }
+    let response: Value = serde_json::from_slice(&bytes).map_err(|_| ())?;
+    if response.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
+        || response.get("id").is_none()
+        || (response.get("result").is_none() && response.get("error").is_none())
+    {
+        return Err(());
+    }
+    Ok(response)
+}
+
+fn handle_hot_worker(input: &Value) -> Option<Value> {
+    // No response to notifications, and no need to allocate a child process.
+    let id = input.get("id")?.clone();
+    Some(worker_reply(input).unwrap_or_else(|_| error(id, -32603, "Restricted worker unavailable")))
 }
 
 pub fn serve(reader: impl BufRead, writer: impl Write) -> io::Result<()> {
