@@ -4,11 +4,15 @@ use serde_json::{json, Value};
 use std::{
     collections::HashMap,
     process::{Command, Stdio},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 const TIMER: &str = "relayforge-local-recover.timer";
 const SERVICE: &str = "relayforge-local-recover.service";
 const MAX_OUTPUT: usize = 8192;
+// Timer runs every ~5 minutes; 20 minutes tolerates host load and timer jitter.
+const MAX_LAST_RUN_AGE_SECONDS: i64 = 20 * 60;
+const MAX_SERVICE_DURATION_SECONDS: i64 = 10 * 60;
 
 fn unit_properties(unit: &str) -> Result<HashMap<String, String>, String> {
     let property = match unit {
@@ -30,6 +34,8 @@ fn unit_properties(unit: &str) -> Result<HashMap<String, String>, String> {
             "--",
             unit,
         ])
+        .env("TZ", "UTC") // Strict, comparable timestamps independent of host locale.
+        .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -65,18 +71,86 @@ fn meaningful_time(value: Option<&String>) -> bool {
     })
 }
 
+// systemctl show emits "Mon 2026-10-19 14:50:00 UTC" for USec
+// properties. Parse this narrow UTC grammar, never a free-form locale date.
+// Invalid, missing and out-of-range clocks fail closed.
+fn utc_epoch(raw: Option<&String>) -> Option<i64> {
+    let raw = raw?;
+    let parts: Vec<_> = raw.split_whitespace().collect();
+    if parts.len() != 4 || parts[0].len() != 3 || parts[3] != "UTC" {
+        return None;
+    }
+    let date = parts[1];
+    let clock = parts[2];
+    if date.len() != 10 || clock.len() != 8 {
+        return None;
+    }
+    let d: Vec<_> = date.split('-').collect();
+    let t: Vec<_> = clock.split(':').collect();
+    if d.len() != 3 || t.len() != 3 {
+        return None;
+    }
+    let year = d[0].parse::<i64>().ok()?;
+    let month = d[1].parse::<i64>().ok()?;
+    let day = d[2].parse::<i64>().ok()?;
+    let hour = t[0].parse::<i64>().ok()?;
+    let minute = t[1].parse::<i64>().ok()?;
+    let second = t[2].parse::<i64>().ok()?;
+    if !(2000..=2100).contains(&year)
+        || !(1..=12).contains(&month)
+        || !(0..24).contains(&hour)
+        || !(0..60).contains(&minute)
+        || !(0..60).contains(&second)
+    {
+        return None;
+    }
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days_in_month = match month {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    if day < 1 || day > days_in_month {
+        return None;
+    }
+    // Gregorian civil date -> days since Unix epoch, integer-only.
+    let y = year - if month <= 2 { 1 } else { 0 };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let m = month + if month > 2 { -3 } else { 9 };
+    let doy = (153 * m + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some((era * 146097 + doe - 719468) * 86400 + hour * 3600 + minute * 60 + second)
+}
+
 fn summarize(
     timer: &HashMap<String, String>,
     service: &HashMap<String, String>,
     opted_in: bool,
+    now_epoch: i64,
 ) -> Value {
     let active = timer.get("ActiveState").map(String::as_str) == Some("active");
     let enabled = timer.get("UnitFileState").map(String::as_str) == Some("enabled");
     let timer_triggered = meaningful_time(timer.get("LastTriggerUSec"));
     let completed = meaningful_time(service.get("ExecMainExitTimestampMonotonic"));
+    let timer_at = utc_epoch(timer.get("LastTriggerUSec"));
+    let service_at = utc_epoch(service.get("ExecMainExitTimestampMonotonic"));
     let result = service.get("Result").map(String::as_str);
     let code = service.get("ExecMainStatus").map(String::as_str);
-    let success = timer_triggered && completed && result == Some("success") && code == Some("0");
+    let historically_successful = timer_triggered
+        && completed
+        && result == Some("success")
+        && code == Some("0");
+    let last_run_fresh = timer_at.is_some_and(|at| {
+        (0..=MAX_LAST_RUN_AGE_SECONDS).contains(&(now_epoch - at))
+    }) && service_at.is_some_and(|at| {
+        (0..=MAX_LAST_RUN_AGE_SECONDS).contains(&(now_epoch - at))
+            && timer_at.is_some_and(|trigger| {
+                (0..=MAX_SERVICE_DURATION_SECONDS).contains(&(at - trigger))
+            })
+    });
+    let success = historically_successful && last_run_fresh;
     let state = if !opted_in {
         "not_opted_in"
     } else if !active || !enabled {
@@ -85,6 +159,8 @@ fn summarize(
         "awaiting_first_run"
     } else if success {
         "verified_last_run"
+    } else if historically_successful && timer_at.is_some() && service_at.is_some() && !last_run_fresh {
+        "last_run_stale"
     } else {
         "last_run_unverified"
     };
@@ -96,6 +172,7 @@ fn summarize(
         "last_timer_trigger_observed":timer_triggered,
         "last_service_completion_observed":completed,
         "last_run_success":success,
+        "last_run_fresh":last_run_fresh,
         "next_run_scheduled":meaningful_time(timer.get("NextElapseUSecRealtime"))
             || meaningful_time(timer.get("NextElapseUSecMonotonic")),
         "read_only":true,
@@ -105,7 +182,12 @@ fn summarize(
 pub fn snapshot(opted_in: bool) -> Result<String, String> {
     let timer = unit_properties(TIMER)?;
     let service = unit_properties(SERVICE)?;
-    Ok(summarize(&timer, &service, opted_in).to_string())
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "system clock unavailable")?
+        .as_secs();
+    let now = i64::try_from(now).map_err(|_| "system clock unavailable")?;
+    Ok(summarize(&timer, &service, opted_in, now).to_string())
 }
 
 #[cfg(test)]
@@ -136,10 +218,12 @@ mod tests {
         (timer, service)
     }
 
+    const SAMPLE_NOW: i64 = 1792421460; // 2026-10-19 14:51 UTC
+
     #[test]
     fn verified_success_requires_trigger_and_completed_service() {
         let (timer, service) = sample();
-        let result = summarize(&timer, &service, true);
+        let result = summarize(&timer, &service, true, SAMPLE_NOW);
         assert_eq!(result["status"], "verified_last_run");
         assert_eq!(result["last_run_success"], true);
         assert_eq!(result["read_only"], true);
@@ -151,12 +235,12 @@ mod tests {
         timer.insert("NextElapseUSecRealtime".into(), "n/a".into());
         timer.insert("NextElapseUSecMonotonic".into(), "2h 17min".into());
         assert_eq!(
-            summarize(&timer, &service, true)["next_run_scheduled"],
+            summarize(&timer, &service, true, SAMPLE_NOW)["next_run_scheduled"],
             true
         );
         timer.insert("NextElapseUSecMonotonic".into(), "n/a".into());
         assert_eq!(
-            summarize(&timer, &service, true)["next_run_scheduled"],
+            summarize(&timer, &service, true, SAMPLE_NOW)["next_run_scheduled"],
             false
         );
     }
@@ -166,19 +250,19 @@ mod tests {
         let (mut timer, mut service) = sample();
         timer.insert("LastTriggerUSec".into(), "n/a".into());
         assert_eq!(
-            summarize(&timer, &service, true)["status"],
+            summarize(&timer, &service, true, SAMPLE_NOW)["status"],
             "awaiting_first_run"
         );
         timer.insert("LastTriggerUSec".into(), "Mon 2026-10-19".into());
         service.insert("ExecMainStatus".into(), "1".into());
         assert_eq!(
-            summarize(&timer, &service, true)["status"],
+            summarize(&timer, &service, true, SAMPLE_NOW)["status"],
             "last_run_unverified"
         );
         service.insert("ExecMainStatus".into(), "0".into());
         service.insert("ExecMainExitTimestampMonotonic".into(), "0".into());
         assert_eq!(
-            summarize(&timer, &service, true)["status"],
+            summarize(&timer, &service, true, SAMPLE_NOW)["status"],
             "last_run_unverified"
         );
     }
@@ -186,11 +270,63 @@ mod tests {
     #[test]
     fn missing_opt_in_or_disabled_timer_is_not_green() {
         let (mut timer, service) = sample();
-        assert_eq!(summarize(&timer, &service, false)["status"], "not_opted_in");
+        assert_eq!(summarize(&timer, &service, false, SAMPLE_NOW)["status"], "not_opted_in");
         timer.insert("ActiveState".into(), "inactive".into());
         assert_eq!(
-            summarize(&timer, &service, true)["status"],
+            summarize(&timer, &service, true, SAMPLE_NOW)["status"],
             "timer_not_active"
+        );
+    }
+
+    #[test]
+    fn stale_and_future_runs_never_pass_as_recent() {
+        let (mut timer, mut service) = sample();
+        let old = SAMPLE_NOW + MAX_LAST_RUN_AGE_SECONDS + 1;
+        let result = summarize(&timer, &service, true, old);
+        assert_eq!(result["status"], "last_run_stale");
+        assert_eq!(result["last_run_success"], false);
+        assert_eq!(result["last_run_fresh"], false);
+        let future = SAMPLE_NOW - 600;
+        assert_eq!(
+            summarize(&timer, &service, true, future)["status"],
+            "last_run_stale"
+        );
+        timer.insert("LastTriggerUSec".into(), "n/a".into());
+        assert_eq!(
+            summarize(&timer, &service, true, SAMPLE_NOW)["status"],
+            "awaiting_first_run"
+        );
+        timer.insert(
+            "LastTriggerUSec".into(),
+            "Mon 2026-10-19 14:50:00 UTC".into(),
+        );
+        service.insert(
+            "ExecMainExitTimestampMonotonic".into(),
+            "Mon 2026-10-19 14:49:00 UTC".into(),
+        );
+        assert_eq!(
+            summarize(&timer, &service, true, SAMPLE_NOW)["status"],
+            "last_run_stale"
+        );
+    }
+
+    #[test]
+    fn utc_timestamp_parser_rejects_malformed_and_invalid_calendar_values() {
+        for input in [
+            "n/a",
+            "0",
+            "Mon 2026-02-30 14:50:00 UTC",
+            "Mon 2026-10-19 24:50:00 UTC",
+            "Mon 2026-10-19 14:60:00 UTC",
+            "Mon 2026-10-19 14:50:00 CEST",
+            "2026-10-19 14:50:00 UTC",
+            "Mon 2026-10-19 14:50:00 UTC extra",
+        ] {
+            assert_eq!(utc_epoch(Some(&input.to_owned())), None, "{input}");
+        }
+        assert_eq!(
+            utc_epoch(Some(&"Mon 2026-10-19 14:50:00 UTC".into())),
+            Some(1792421400)
         );
     }
 
