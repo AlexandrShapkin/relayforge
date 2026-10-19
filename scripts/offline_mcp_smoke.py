@@ -89,13 +89,13 @@ def main():
         fake_dir = pathlib.Path(home) / "Projects/relayforge/target/release"
         fake_dir.mkdir(parents=True)
         broken = fake_dir / "relayforge-mcp"
-        broken.write_text("#!/bin/sh\\nexit 7\\n")
+        broken.write_text("#!/bin/sh\nexit 7\n")
         broken.chmod(0o700)
         env = dict(os.environ, HOME=home)
         ping = {"jsonrpc": "2.0", "id": 51, "method": "ping"}
         fallback = subprocess.run(
             [sys.argv[1], "--readonly-stdio"],
-            input=json.dumps(ping) + "\\n", text=True,
+            input=json.dumps(ping) + "\n", text=True,
             capture_output=True, timeout=20, check=True, env=env)
         response = json.loads(fallback.stdout.strip())
         assert response["id"] == 51
