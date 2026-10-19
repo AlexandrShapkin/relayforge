@@ -1,0 +1,22 @@
+name: Feature request
+description: Propose a bounded improvement
+title: "feat: "
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: Problem to solve
+    validations:
+      required: true
+  - type: textarea
+    id: approach
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: security
+    attributes:
+      label: Security boundaries and required permissions
+    validations:
+      required: true
