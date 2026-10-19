@@ -16,10 +16,11 @@ use std::{
 const MAX_OUTPUT: usize = 64 * 1024;
 const MAX_CONTENT: usize = 48 * 1024;
 const OPT_IN: &str = ".config/relayforge/allow-workstation-development";
+const SOURCE_EDIT_OPT_IN: &str = ".config/relayforge/allow-workstation-source-edits";
 
 pub fn tool() -> Value {
     json!({"name":"relayforge_workstation_develop",
-        "description":"ThinkPad-only bounded development: tracked repository inventory/reads, fixed Git status, and operator-opted-in tracked source edits, Git sync, release build and tunnel restart. No arbitrary shell or filesystem access.",
+        "description":"ThinkPad-only bounded development: tracked repository inventory/reads, isolated read-only offline shell, process status, Git sync/build and tunnel restart. Source writes need a separate local opt-in. No unrestricted host shell.",
         "inputSchema":{"type":"object","properties":{
             "operation":{"type":"string","enum":["repo.status","repo.list","repo.read","repo.write","repo.sync","build.start","task.status","task.logs","tunnel.restart","shell.sandbox","process.list","user.services"]},
             "path":{"type":"string","maxLength":192},
@@ -41,8 +42,8 @@ fn home_and_repo() -> Result<(PathBuf, PathBuf), String> {
     Ok((home, repo))
 }
 
-fn dev_enabled(home: &Path) -> bool {
-    let path = home.join(OPT_IN);
+fn local_opt_in(home: &Path, name: &str, expected: &[u8]) -> bool {
+    let path = home.join(name);
     let Ok(meta) = fs::symlink_metadata(&path) else {
         return false;
     };
@@ -54,7 +55,15 @@ fn dev_enabled(home: &Path) -> bool {
     {
         return false;
     }
-    fs::read(&path).is_ok_and(|value| value == b"ALLOW_RELAYFORGE_DEVELOPMENT\n")
+    fs::read(&path).is_ok_and(|value| value == expected)
+}
+
+fn dev_enabled(home: &Path) -> bool {
+    local_opt_in(home, OPT_IN, b"ALLOW_RELAYFORGE_DEVELOPMENT\n")
+}
+
+fn source_edit_enabled(home: &Path) -> bool {
+    local_opt_in(home, SOURCE_EDIT_OPT_IN, b"ALLOW_RELAYFORGE_SOURCE_EDITS\n")
 }
 
 // Parse /proc/self/status rather than running id or accepting UID from MCP.
@@ -301,7 +310,7 @@ fn sandbox_shell(repo: &Path, script: &str) -> Result<String, String> {
             "/tmp",
             "--dir",
             "/workspace",
-            "--bind",
+            "--ro-bind",
             workdir,
             "/workspace",
             "--chdir",
@@ -323,6 +332,18 @@ fn sandbox_shell(repo: &Path, script: &str) -> Result<String, String> {
         15,
     )?;
     text_output(out)
+}
+
+fn clean_main_checkout(repo: &Path) -> Result<(), String> {
+    let branch = git(repo, &["symbolic-ref", "--quiet", "--short", "HEAD"])?;
+    if !branch.status.success() || branch.stdout != b"main\n" {
+        return Err("checkout not on main".into());
+    }
+    let diff = git(repo, &["diff", "--quiet", "HEAD", "--"])?;
+    if !diff.status.success() {
+        return Err("tracked changes require review before system tasks".into());
+    }
+    Ok(())
 }
 
 pub fn execute(args: &Value) -> Result<String, String> {
@@ -393,7 +414,7 @@ pub fn execute(args: &Value) -> Result<String, String> {
             Ok(json!({"path":path,"utf8_text":value}).to_string())
         }
         "repo.write" if obj.len() == 3 => {
-            if !dev_enabled(&home) {
+            if !dev_enabled(&home) || !source_edit_enabled(&home) {
                 return Err("local development opt-in missing".into());
             }
             let path = obj
@@ -425,6 +446,7 @@ pub fn execute(args: &Value) -> Result<String, String> {
             if !dev_enabled(&home) {
                 return Err("local development opt-in missing".into());
             }
+            clean_main_checkout(&repo)?;
             audit(&home, operation)?;
             spawn_task(&repo, operation)
         }
@@ -484,6 +506,7 @@ pub fn execute(args: &Value) -> Result<String, String> {
             if !dev_enabled(&home) {
                 return Err("local development opt-in missing".into());
             }
+            clean_main_checkout(&repo)?;
             audit(&home, operation)?;
             // A transient unit restarts the tunnel independently of the MCP
             // call that initiates it. Reconnection must be checked afterward.
