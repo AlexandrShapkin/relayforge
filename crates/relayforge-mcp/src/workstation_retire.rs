@@ -233,9 +233,22 @@ pub fn dispatch(home: &Path, operation: &str) -> Result<String, String> {
     let binary = home.join("Projects/relayforge/target/release/relayforge-mcp");
     let binary = binary.to_str().ok_or("worker path invalid")?;
     let output = Command::new("timeout")
-        .args(["-k", "2s", "22s", "systemd-run", "--user", "--wait", "--pipe",
-            "--collect", "--property=Type=exec", "--property=RuntimeMaxSec=16",
-            "--", binary, "--retire-ssh-worker", kind])
+        .args([
+            "-k",
+            "2s",
+            "22s",
+            "systemd-run",
+            "--user",
+            "--wait",
+            "--pipe",
+            "--collect",
+            "--property=Type=exec",
+            "--property=RuntimeMaxSec=16",
+            "--",
+            binary,
+            "--retire-ssh-worker",
+            kind,
+        ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -244,11 +257,12 @@ pub fn dispatch(home: &Path, operation: &str) -> Result<String, String> {
     if !output.status.success() || output.stdout.len() > 2048 {
         return Err("retirement worker failed".into());
     }
-    let result: Value = serde_json::from_slice(&output.stdout)
-        .map_err(|_| "retirement worker reply invalid")?;
-    if result["retired_host"] != "ru1" ||
-        (result.get("operation") != Some(&Value::String(operation.to_owned())) &&
-        result["already_clean"] != true) {
+    let result: Value =
+        serde_json::from_slice(&output.stdout).map_err(|_| "retirement worker reply invalid")?;
+    if result["retired_host"] != "ru1"
+        || (result.get("operation") != Some(&Value::String(operation.to_owned()))
+            && result["already_clean"] != true)
+    {
         return Err("retirement worker reply invalid".into());
     }
     Ok(result.to_string())
@@ -261,9 +275,13 @@ pub fn run_worker(kind: &str) -> i32 {
         "known_hosts" => "ssh.retire.known_hosts",
         _ => return 2,
     };
-    let Some(home) = std::env::var_os("HOME") else { return 2; };
+    let Some(home) = std::env::var_os("HOME") else {
+        return 2;
+    };
     let home = PathBuf::from(home);
-    if !home.is_absolute() || home.as_os_str().len() > 256 { return 2; }
+    if !home.is_absolute() || home.as_os_str().len() > 256 {
+        return 2;
+    }
     match apply(&home, operation) {
         Ok(result) => {
             println!("{result}");
