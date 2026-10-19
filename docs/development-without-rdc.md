@@ -393,3 +393,19 @@ are not copied into MCP output. Such a job can be inspected and removed
 without waiting for the 900-second ambiguous-job cleanup grace period.
 If the worker is killed before writing anything, its status remains
 `unknown` and conservative cleanup rules still apply.
+
+## Retirement dependency inventory
+
+`dependency.audit` is a strictly **read-only**, argument-free API revision 5
+operation. It checks owner-controlled, regular text files below fixed local
+roots: SSH config/known hosts, `~/.config/systemd/user`, and selected
+`~/Projects/assistant-hub` source/deploy/script directories. It looks for
+literal `ru1` references and returns only restricted relative file names,
+hit counts, a bounded completeness flag and a checklist of external systems.
+
+No credential values, matching lines, arbitrary directories, or remote hosts
+are read or returned. Symlinks and non-owned files are rejected, directory
+depth/file size/count are capped. This is an **inventory**, not automatic
+modification of live SSH, DNS or systemd state. A clean result does not prove
+that provider DNS, remote servers, private app databases or cloud connectors
+are free of `ru1` dependencies.
