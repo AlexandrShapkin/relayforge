@@ -392,7 +392,7 @@ pub fn execute(args: &Value) -> Result<String, String> {
             },
             "arbitrary_host_shell": false,
             "arbitrary_host_files": false,
-            "operator_local_approval_required_for_sensitive_changes": true
+            "local_grants_required_for_mutations": true
         }).to_string()),
         "process.list" if obj.len() == 1 => {
             text_output(command("ps", &["-eo", "pid=,comm=,etime=,rss="], 8)?)
