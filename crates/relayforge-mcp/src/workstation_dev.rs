@@ -665,7 +665,10 @@ pub fn execute(args: &Value) -> Result<String, String> {
         "dependency.audit" if obj.len() == 1 => workstation_dependency::snapshot(&home),
         "job.start" | "job.list" | "job.status" | "job.output" | "job.stop" | "job.remove"
         | "job.chain.start" | "job.chain.status" | "job.chain.output" => {
-            if matches!(operation, "job.start" | "job.stop" | "job.remove" | "job.chain.start") {
+            if matches!(
+                operation,
+                "job.start" | "job.stop" | "job.remove" | "job.chain.start"
+            ) {
                 if !dev_enabled(&home) {
                     return Err("local development opt-in missing".into());
                 }
