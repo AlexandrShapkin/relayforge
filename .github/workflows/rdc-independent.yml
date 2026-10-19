@@ -22,6 +22,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      - name: Validate recovery bootstrap syntax
+        run: bash -n deploy/relayforge-hot-activate.sh
       - name: Format
         run: cargo fmt --all -- --check
       - name: Check Rust
