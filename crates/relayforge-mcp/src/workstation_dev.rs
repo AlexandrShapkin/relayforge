@@ -2,7 +2,7 @@
 //! No caller-supplied executable, working directory, shell, service name,
 //! host, credentials or arbitrary filesystem root. Mutations require a
 //! separate local operator-created, permission-checked opt-in file.
-use crate::{workstation_dependency, workstation_jobs, workstation_transfer};
+use crate::{workstation_dependency, workstation_jobs, workstation_retire, workstation_transfer};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeSet,
@@ -615,7 +615,7 @@ pub fn execute(args: &Value) -> Result<String, String> {
             return Err("home invalid".into());
         }
         return Ok(json!({
-            "api_revision": 5,
+            "api_revision": 6,
             "transport": "private_secure_mcp_tunnel",
             "operations": [
                 "capabilities", "repo.status", "repo.list", "repo.read",
@@ -627,6 +627,7 @@ pub fn execute(args: &Value) -> Result<String, String> {
                 "job.start", "job.list", "job.status", "job.output",
                 "job.stop", "job.remove",
                 "dependency.audit",
+                "ssh.retire.plan", "ssh.retire.config", "ssh.retire.known_hosts",
                 "shell.sandbox", "process.list", "user.services"
             ],
             "write_grants": {
@@ -641,6 +642,14 @@ pub fn execute(args: &Value) -> Result<String, String> {
     }
     let (home, repo) = home_and_repo()?;
     match operation {
+        "ssh.retire.plan" if obj.len() == 1 => workstation_retire::plan(&home),
+        "ssh.retire.config" | "ssh.retire.known_hosts" if obj.len() == 1 => {
+            if !dev_enabled(&home) {
+                return Err("local development opt-in missing".into());
+            }
+            audit(&home, operation)?;
+            workstation_retire::apply(&home, operation)
+        }
         "dependency.audit" if obj.len() == 1 => workstation_dependency::snapshot(&home),
         "job.start" | "job.list" | "job.status" | "job.output" | "job.stop" | "job.remove" => {
             if matches!(operation, "job.start" | "job.stop" | "job.remove") {
