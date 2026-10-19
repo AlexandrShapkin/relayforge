@@ -290,3 +290,24 @@ A successful `capabilities` response with revision 2 immediately after a
 `build.start` completion, *without* calling `tunnel.restart`, demonstrates
 that the active permanent MCP parent routed a request to the newly built
 worker.
+
+## Sandbox launch under the restricted tunnel service
+
+The Secure MCP Tunnel service intentionally blocks `AF_NETLINK`. Linux
+`bubblewrap --unshare-all` requires a short-lived NETLINK_ROUTE socket
+to configure a loopback interface in its new, network-disconnected
+namespace. Consequently, the live `shell.sandbox` handler launches
+`bubblewrap` using a separately bounded transient **user** systemd
+service with `systemd-run --pipe --wait`, while leaving the long-lived
+tunnel service restrictions unchanged.
+
+The shell script is delivered on stdin to `/bin/bash -s`, **not** in the
+transient unit's `ExecStart` command line or freeform service description.
+The service has a 20-second runtime cap, with a 24-second local client timeout.
+The sandbox still mounts only vetted Git-tracked allowlisted source files
+read-only, exposes only ephemeral `/tmp`, has no network interface access,
+and does not inherit the user's home directory or credentials.
+
+If the user systemd manager is unavailable, this operation fails closed
+without running the script on the tunnel host. The remaining fixed Git,
+build and diagnostic operations continue to work independently.
