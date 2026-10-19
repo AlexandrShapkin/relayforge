@@ -532,7 +532,7 @@ mod tests {
     }
     #[test]
     fn sandbox_denies_bad_commands_and_traversal() {
-        for script in ["", "x\\0y", "echo \\u{1b}[31m"] {
+        for script in ["", "x\0y", "echo \u{1b}[31m"] {
             assert!(sandbox_shell(Path::new("/workspace"), script).is_err());
         }
         let response = sandbox_shell(Path::new("/nonexistent/relayforge"), "pwd");
