@@ -38,6 +38,12 @@ def main():
          "params": {"name": "relayforge_workstation_develop",
                     "arguments": {"operation": "capabilities",
                                   "parameters": {"shell": "id"}}}},
+        {"jsonrpc": "2.0", "id": 10, "method": "tools/call",
+         "params": {"name": "relayforge_workstation_develop",
+                    "arguments": {"operation": "task.list"}}},
+        {"jsonrpc": "2.0", "id": 11, "method": "tools/call",
+         "params": {"name": "relayforge_workstation_develop",
+                    "arguments": {"operation": "tunnel.inspect"}}},
     ]
     serialized = "".join(json.dumps(item) + "\n" for item in requests)
     completed = subprocess.run(
@@ -48,7 +54,7 @@ def main():
     responses = [json.loads(line) for line in completed.stdout.splitlines()
                  if line.strip()]
     by_id = {r["id"]: r for r in responses}
-    assert set(by_id) == {1, 2, 3, 4, 5, 6, 7, 8, 9}, "MCP responses missing or malformed"
+    assert set(by_id) == {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}, "MCP responses missing or malformed"
     assert by_id[1]["result"]["protocolVersion"] == "2025-11-25"
     names = {tool["name"] for tool in by_id[2]["result"]["tools"]}
     expected = {"relayforge_status", "relayforge_routeros_health",
@@ -76,8 +82,10 @@ def main():
         "workstation write succeeded without local operator opt-in")
     assert by_id[8]["result"]["isError"] is False
     capabilities = json.loads(by_id[8]["result"]["content"][0]["text"])
-    assert capabilities["api_revision"] == 1
+    assert capabilities["api_revision"] == 2
     assert "repo.sync" in capabilities["operations"]
+    assert "task.list" in capabilities["operations"]
+    assert "tunnel.inspect" in capabilities["operations"]
     assert capabilities["arbitrary_host_shell"] is False
     assert by_id[9]["result"]["isError"] is True, (
         "capabilities operation accepted unrecognized nested parameters")
@@ -101,6 +109,12 @@ def main():
         assert response["id"] == 51
         assert response.get("result") == {}, (
             "hot stdio fallback failed when the on-disk worker crashed")
+    # CI has no ThinkPad systemd user manager. Any result must remain
+    # a bounded read-only diagnostic or fail closed, never a remote command.
+    for ident in (10, 11):
+        reply = by_id[ident]["result"]
+        assert isinstance(reply["isError"], bool)
+        assert all(item["type"] == "text" for item in reply["content"])
     print("Hot stdio: broken worker fallback to mapped parent: PASS")
     print("Offline MCP handshake/tool discovery/workstation/deny-by-default: PASS")
     print("No physical device, tunnel, remote shell or credentials were used.")
