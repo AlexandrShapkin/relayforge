@@ -21,7 +21,7 @@ pub fn tool() -> Value {
     json!({"name":"relayforge_workstation_develop",
         "description":"ThinkPad-only bounded development: tracked repository inventory/reads, fixed Git status, and operator-opted-in tracked source edits, Git sync, release build and tunnel restart. No arbitrary shell or filesystem access.",
         "inputSchema":{"type":"object","properties":{
-            "operation":{"type":"string","enum":["repo.status","repo.list","repo.read","repo.write","repo.sync","build.start","task.status","task.logs","tunnel.restart","shell.sandbox"]},
+            "operation":{"type":"string","enum":["repo.status","repo.list","repo.read","repo.write","repo.sync","build.start","task.status","task.logs","tunnel.restart","shell.sandbox","process.list","user.services"]},
             "path":{"type":"string","maxLength":192},
             "content":{"type":"string","maxLength":49152},
             "task_id":{"type":"string","maxLength":32},
@@ -307,6 +307,13 @@ pub fn execute(args: &Value) -> Result<String, String> {
         .ok_or("missing operation")?;
     let (home, repo) = home_and_repo()?;
     match operation {
+        "process.list" if obj.len() == 1 => {
+            text_output(command("ps", &["-eo", "pid=,comm=,etime=,rss="], 8)?)
+        }
+        "user.services" if obj.len() == 1 => {
+            text_output(command("systemctl", &["--user", "list-units",
+                "--type=service", "--all", "--no-pager", "--no-legend"], 8)?)
+        }
         "repo.status" if obj.len() == 1 => text_output(git(
             &repo,
             &["status", "--short", "--branch", "--untracked-files=no"],
