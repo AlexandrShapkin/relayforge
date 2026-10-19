@@ -107,6 +107,9 @@ are returned. A green result is `verified_last_run`.
 
 A green result is only `verified_last_run` when the last timer trigger and
 the matching successful service completion are both no older than 20 minutes.
+The service completion is read from systemd's realtime field
+`ExecMainExitTimestamp`, **not** the numeric microseconds-since-boot
+`ExecMainExitTimestampMonotonic` counter.
 An older completed run is `last_run_stale`; malformed or unparseable timestamps
 are not accepted as green. The timestamp comparison uses bounded UTC systemd
 metadata and never reads journal entries or private logs.
