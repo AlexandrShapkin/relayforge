@@ -426,7 +426,7 @@ mod tests {
         assert_eq!(init["result"]["serverInfo"]["name"], "relayforge");
         assert_eq!(init["result"]["protocolVersion"], "2025-03-26");
         let list = handle(&json!({"jsonrpc":"2.0","id":2,"method":"tools/list"})).unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 17);
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 18);
     }
     #[test]
     fn protocol_version_negotiation_does_not_echo_unknown_versions() {
