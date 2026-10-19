@@ -26,12 +26,15 @@ git diff --quiet HEAD -- || { echo "Tracked checkout is dirty" >&2; exit 5; }
 
 # Save the last known working legacy MCP before Cargo replaces the file.
 install -m 700 "$binary" "$backup"
+restarted=0
 rollback() {
     echo "Activation failed: attempting to restore the previous restricted MCP." >&2
     if [[ -f "$backup" ]]; then
         install -m 700 "$backup" "$binary.rollback"
         mv -f "$binary.rollback" "$binary"
-        systemctl --user restart relayforge-tunnel.service || true
+        if [[ "$restarted" == 1 ]]; then
+            systemctl --user restart relayforge-tunnel.service || true
+        fi
     fi
 }
 trap rollback ERR
@@ -44,6 +47,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' |
     timeout 20s "$binary" --readonly-stdio |
     python3 -c 'import json,sys; data=json.load(sys.stdin); names={x["name"] for x in data["result"]["tools"]}; assert "relayforge_workstation_develop" in names'
 
+restarted=1
 systemctl --user restart relayforge-tunnel.service
 
 healthy=0
