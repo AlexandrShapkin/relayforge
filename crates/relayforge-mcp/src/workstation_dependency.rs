@@ -53,7 +53,7 @@ fn source_ext(path: &Path) -> bool {
 }
 
 fn count_reference(path: &Path) -> Option<usize> {
-    let mut file = File::open(path).ok()?;
+    let file = File::open(path).ok()?;
     let mut bytes = Vec::new();
     file.take(MAX_BYTES + 1).read_to_end(&mut bytes).ok()?;
     if bytes.len() > MAX_BYTES as usize {
@@ -243,7 +243,7 @@ mod tests {
         assert_eq!(checked, 1);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0]["references"], 2);
-        assert!(!out.to_string().contains("SECRET"));
+        assert!(!serde_json::to_string(&out).unwrap().contains("SECRET"));
         fs::remove_dir_all(root).unwrap();
     }
 
