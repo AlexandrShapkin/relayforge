@@ -385,11 +385,8 @@ impl Store {
         let host = prop["host"].as_str().ok_or("invalid record")?;
         println!("RelayForge approval ID: {id}");
         println!("Target host: {host} | Exact action: {action}");
-        match action {
-            "probe.restart" => {
-                println!("Exact user service: relayforge-probe.service (restart on ru0)")
-            }
-            _ => {}
+        if action == "probe.restart" {
+            println!("Exact user service: relayforge-probe.service (restart on ru0)")
         }
         if action == "sandbox.create" {
             println!(
