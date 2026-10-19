@@ -97,3 +97,31 @@ implicit authority over the operator's computer.
   development timers.
 - Request a separate, explicit approval before any security-sensitive local
   access or deployment capability is enabled.
+
+## Workstation development bridge (requires separately deployed binary)
+
+The `relayforge_workstation_develop` tool provides a bounded replacement
+for part of RDC on the authorized ThinkPad. Without local opt-in, the tool
+supports read-only Git status, public tracked repository listings and small
+tracked source reads. It never accepts executable names or shell arguments.
+
+Mutating operations (editing existing tracked sources, scheduling fixed
+`git pull --ff-only origin main`, scheduling fixed Cargo release builds,
+and restarting the tunnel user service) require a **local opt-in file**:
+`~/.config/relayforge/allow-workstation-development`, mode 0600,
+containing exactly `ALLOW_RELAYFORGE_DEVELOPMENT\n`. Its owner must match
+the invoking user. The operator must explicitly choose to create it locally.
+Every mutating operation is written to the private workstation audit log
+before execution, and fails closed when auditing is unavailable. No root
+commands, arbitrary shell, untracked private files, SSH keys, GUI control,
+or general process management are exposed by this initial stage.
+
+Use `repo.sync` and `build.start` separately and monitor background jobs
+with `task.status` / `task.logs`; changes must pass GitHub CI before host
+sync. Restarting the private tunnel temporarily disconnects MCP until the
+service reconnects. Do not assume local activation simply because CI passes.
+
+This initial bridge is **not RDC feature parity**: it establishes the
+repo-specific development and update path required to evolve RelayForge
+without another RDC session. More general workstation functionality needs
+separate policy, audit, containment and verification.
