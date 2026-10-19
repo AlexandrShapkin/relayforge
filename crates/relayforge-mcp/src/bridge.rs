@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use std::process::{Command, Stdio};
 
 const MAX_OUTPUT: usize = 16 * 1024;
-const HOSTS: &[&str] = &["ru0", "ru1", "srv0"];
+const HOSTS: &[&str] = &["ru0", "srv0"];
 const CHECKS: &[(&str, &str)] = &[
     ("identity", "id -un"),
     ("hostname", "hostname"),

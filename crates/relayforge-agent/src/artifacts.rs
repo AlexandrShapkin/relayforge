@@ -4,8 +4,7 @@
 //! are returned to the MCP client. This module cannot create or change files.
 use serde_json::{json, Value};
 use std::{
-    fs::{self, File},
-    io::{Read, Seek, SeekFrom},
+    fs,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -132,23 +131,6 @@ fn dated_ru0_dir(name: &str) -> bool {
             }
         })
 }
-fn dated_ru1_archive(name: &str) -> bool {
-    let Some(date) = name
-        .strip_prefix("state-")
-        .and_then(|s| s.strip_suffix(".sqlite3.gz"))
-    else {
-        return false;
-    };
-    date.len() == 10
-        && date.bytes().enumerate().all(|(i, c)| {
-            if i == 4 || i == 7 {
-                c == b'-'
-            } else {
-                c.is_ascii_digit()
-            }
-        })
-}
-
 fn sqlite_quick_check(kind: &str, path: &Path) -> bool {
     if !matches!(kind, "plain" | "gzip") {
         return false;
@@ -223,26 +205,6 @@ fn ru0_backup(home: &Path) -> Value {
     }
 }
 
-fn ru1_backup(home: &Path) -> Value {
-    const NAME: &str = "ru1_demo_backup";
-    let dir = home.join("assistant-hub/backups");
-    let path = match latest_entry(&dir, ".sqlite3.gz", dated_ru1_archive, false) {
-        Ok(Some(path)) => path,
-        Ok(None) => return report(NAME, "unverified", "backup_archive_missing", None),
-        Err(_) => return report(NAME, "failed", "latest_backup_path_invalid", None),
-    };
-    let age = age_minutes(&path);
-    if !sqlite_quick_check("gzip", &path) {
-        return report(NAME, "failed", "compressed_sqlite_integrity_failed", age);
-    }
-    match age {
-        Some(n) if n <= 48 * 60 => {
-            report(NAME, "verified", "compressed_snapshot_sqlite_valid", age)
-        }
-        _ => report(NAME, "stale", "backup_archive_too_old", age),
-    }
-}
-
 fn private_json(path: &Path) -> Option<Value> {
     if !safe_file(path, MAX_JSON_BYTES) {
         return None;
@@ -305,57 +267,6 @@ fn ru0_google_store(home: &Path) -> Value {
     )
 }
 
-fn latest_health_json(path: &Path) -> Option<Value> {
-    if !safe_file(path, 4 * 1024 * 1024) {
-        return None;
-    }
-    let mut file = File::open(path).ok()?;
-    let len = file.metadata().ok()?.len();
-    let start = len.saturating_sub(8192);
-    file.seek(SeekFrom::Start(start)).ok()?;
-    let mut data = Vec::new();
-    file.take(8192).read_to_end(&mut data).ok()?;
-    let last = data
-        .split(|b| *b == b'\n')
-        .rev()
-        .find(|line| !line.is_empty() && line.len() <= 2048)?;
-    serde_json::from_slice(last).ok()
-}
-
-fn ru1_monitor(home: &Path) -> Value {
-    const NAME: &str = "ru1_health_probe";
-    let path = home.join("assistant-hub/health.jsonl");
-    let age = age_minutes(&path);
-    let Some(data) = latest_health_json(&path) else {
-        return report(NAME, "unverified", "health_record_missing_or_invalid", age);
-    };
-    if !data["timestamp_utc"]
-        .as_str()
-        .is_some_and(|s| (20..=48).contains(&s.len()))
-    {
-        return report(NAME, "failed", "health_record_schema_invalid", age);
-    }
-    if age.is_none_or(|n| n > 120) {
-        return report(NAME, "stale", "health_record_outdated", age);
-    }
-    let aggregator = data["aggregator_http"].as_i64() == Some(200);
-    let vpn = data["telegram_vpn_success"].as_bool() == Some(true)
-        && data["telegram_vpn_http"].as_i64() == Some(200);
-    let rdc = matches!(
-        data["remote-desktop"].as_str(),
-        Some("active" | "running" | "ok" | "healthy")
-    );
-    let mut outcome = if aggregator && vpn && rdc {
-        report(NAME, "verified", "health_probe_passed", age)
-    } else {
-        report(NAME, "failed", "health_probe_endpoint_failed", age)
-    };
-    outcome["aggregator_ok"] = json!(aggregator);
-    outcome["vpn_probe_ok"] = json!(vpn);
-    outcome["remote_desktop_ok"] = json!(rdc);
-    outcome
-}
-
 /// Only these fixed, host-specific checks exist. Callers cannot choose paths,
 /// SQL, JSON keys or services. Every failure returns non-green metadata.
 pub fn summary(host: &str, home: &Path) -> Vec<Value> {
@@ -365,7 +276,6 @@ pub fn summary(host: &str, home: &Path) -> Vec<Value> {
             ru0_google_store(home),
             ru0_university(home),
         ],
-        "ru1.alexandrshapkin.ru" => vec![ru1_backup(home), ru1_monitor(home)],
         "srv0" => vec![],
         _ => vec![report(
             "unknown_host",
@@ -384,9 +294,6 @@ mod tests {
         assert!(dated_ru0_dir("20261018T032755Z"));
         assert!(!dated_ru0_dir("../20261018T032755Z"));
         assert!(!dated_ru0_dir("20261018T032755X"));
-        assert!(dated_ru1_archive("state-2026-10-18.sqlite3.gz"));
-        assert!(!dated_ru1_archive("state-2026-10-18.sqlite3.gz/../z"));
-        assert!(!dated_ru1_archive("state-2026-10-18.sqlite3.gz.tmp"));
     }
     #[test]
     fn missing_artifacts_are_never_verified() {
@@ -394,22 +301,7 @@ mod tests {
         assert!(summary("ru0.alexandrshapkin.ru", &path)
             .iter()
             .all(|v| v["status"] != "verified"));
-        assert!(summary("ru1.alexandrshapkin.ru", &path)
-            .iter()
-            .all(|v| v["status"] != "verified"));
         assert!(summary("srv0", &path).is_empty());
-    }
-    #[test]
-    fn malformed_monitor_snapshot_is_not_verified() {
-        let dir = std::env::temp_dir().join(format!("relayforge-artifacts-{}", std::process::id()));
-        fs::create_dir_all(dir.join("assistant-hub")).unwrap();
-        let path = dir.join("assistant-hub/health.jsonl");
-        fs::write(&path,r#"{"timestamp_utc":"2026-10-18T10:00:00+00:00","aggregator_http":200,"telegram_vpn_success":false,"telegram_vpn_http":502,"remote-desktop":"active"}"#).unwrap();
-        let result = ru1_monitor(&dir);
-        assert_eq!(result["status"], "failed");
-        assert_eq!(result["aggregator_ok"], true);
-        assert_eq!(result["vpn_probe_ok"], false);
-        fs::remove_dir_all(&dir).unwrap();
     }
     #[test]
     fn newest_symlink_does_not_fall_back_to_older_valid_archive() {
@@ -424,7 +316,7 @@ mod tests {
         let newer = dir.join("state-2026-10-18.sqlite3.gz");
         std::os::unix::fs::symlink(&older, &newer).unwrap();
         assert_eq!(
-            latest_entry(&dir, ".sqlite3.gz", dated_ru1_archive, false).unwrap_err(),
+            latest_entry(&dir, ".sqlite3.gz", |v| v.ends_with(".sqlite3.gz"), false).unwrap_err(),
             "latest_snapshot_path_insecure"
         );
         fs::remove_dir_all(dir).unwrap();
@@ -442,7 +334,7 @@ mod tests {
             fs::write(dir.join(format!("ignored-{i}.txt")), b"x").unwrap();
         }
         assert_eq!(
-            latest_entry(&dir, ".sqlite3.gz", dated_ru1_archive, false).unwrap_err(),
+            latest_entry(&dir, ".sqlite3.gz", |v| v.ends_with(".sqlite3.gz"), false).unwrap_err(),
             "backup_inventory_over_limit"
         );
         fs::remove_dir_all(dir).unwrap();

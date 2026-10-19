@@ -1,3 +1,5 @@
+> **2026-10-19 — ARCHIVED.** The `ru1` monitoring job and associated approval operation were removed from the active RelayForge API. This runbook is retained only as historical documentation; do not execute its commands.
+
 # First operator-approved production-adjacent job: ru1 health snapshot
 
 A narrowly scoped action `monitor.run` is available only through

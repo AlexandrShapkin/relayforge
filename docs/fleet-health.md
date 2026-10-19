@@ -1,3 +1,5 @@
+> **2026-10-19 — ru1 retired.** The production fleet now consists of `ru0` and `srv0`. Historical ru1 metrics below are not part of current monitoring. No checks, SSH connections, or service mutations may target ru1.
+
 # Read-only user-service fleet overview
 
 `relayforge_fleet_health` takes no arguments and checks three allowlisted

@@ -25,10 +25,10 @@ const DONE_RETENTION_SECONDS: u64 = 7 * 86400;
 
 pub fn prepare_tool() -> Value {
     json!({"name":"relayforge_change_prepare",
-          "description":"Prepare a tightly scoped change for manual approval within five minutes. After local approval, execution has its own 180-second window. Allowed: scratch create, inert probe restart, or ru1 health snapshot.",
+          "description":"Prepare a tightly scoped change for manual approval within five minutes. After local approval, execution has its own 180-second window. Allowed: scratch create or inert probe restart on active hosts.",
         "inputSchema":{"type":"object","properties":{
-            "host":{"type":"string","enum":["ru0","ru1","srv0"]},
-            "action":{"type":"string","enum":["sandbox.create","probe.restart","monitor.run"]},
+            "host":{"type":"string","enum":["ru0","srv0"]},
+            "action":{"type":"string","enum":["sandbox.create","probe.restart"]},
             "name":{"type":"string","maxLength":64,"description":"Only for sandbox.create: flat .txt/.md/.json filename"},
             "content":{"type":"string","maxLength":2048,"description":"Only for sandbox.create: up to 2048 UTF-8 bytes"}
         },"required":["host","action"],"additionalProperties":false}})
@@ -123,7 +123,7 @@ fn parse_action(args: &Value) -> Result<Value, String> {
         .get("host")
         .and_then(Value::as_str)
         .ok_or("missing host")?;
-    if !["ru0", "ru1", "srv0"].contains(&host) {
+    if !["ru0", "srv0"].contains(&host) {
         return Err("host denied".into());
     }
     match obj.get("action").and_then(Value::as_str) {
@@ -143,9 +143,6 @@ fn parse_action(args: &Value) -> Result<Value, String> {
         }
         Some("probe.restart") if host == "ru0" && obj.len() == 2 => {
             Ok(json!({"host":"ru0","action":"probe.restart"}))
-        }
-        Some("monitor.run") if host == "ru1" && obj.len() == 2 => {
-            Ok(json!({"host":"ru1","action":"monitor.run"}))
         }
         _ => Err("operation denied".into()),
     }
@@ -388,14 +385,8 @@ impl Store {
         let host = prop["host"].as_str().ok_or("invalid record")?;
         println!("RelayForge approval ID: {id}");
         println!("Target host: {host} | Exact action: {action}");
-        match action {
-            "monitor.run" => {
-                println!("Exact user service: assistant-hub-monitor.service (start once on ru1)")
-            }
-            "probe.restart" => {
-                println!("Exact user service: relayforge-probe.service (restart on ru0)")
-            }
-            _ => {}
+        if action == "probe.restart" {
+            println!("Exact user service: relayforge-probe.service (restart on ru0)")
         }
         if action == "sandbox.create" {
             println!(
@@ -605,7 +596,6 @@ pub fn commit(args: &Value) -> Result<String, String> {
                 "name":proposal["name"],"content":proposal["content"]
             })),
             Some("probe.restart") => crate::agent::restart_probe(&json!({"host":proposal["host"]})),
-            Some("monitor.run") => crate::agent::trigger_ru1_monitor(),
             _ => Err("operation denied".into()),
         })
         .map(|value| value.to_string())
@@ -677,24 +667,17 @@ mod tests {
         }
     }
     #[test]
-    fn ru1_monitor_request_requires_approval_and_is_host_bound() {
-        assert_eq!(
-            parse_action(&json!({"host":"ru1","action":"monitor.run"})).unwrap(),
-            json!({"host":"ru1","action":"monitor.run"})
-        );
+    fn retired_host_and_monitor_actions_are_always_denied() {
+        assert!(parse_action(&json!({"host":"ru1","action":"monitor.run"})).is_err());
+        assert!(parse_action(&json!({"host":"ru1","action":"sandbox.create",
+            "name":"x.txt","content":"x"}))
+        .is_err());
+        assert!(parse_action(&json!({"host":"ru0","action":"monitor.run"})).is_err());
+        assert!(parse_action(&json!({"host":"srv0","action":"monitor.run"})).is_err());
         let s = store();
-        let request = s
-            .prepare(&json!({"host":"ru1","action":"monitor.run"}))
-            .unwrap();
-        let id = request["approval_id"].as_str().unwrap();
-        let mut executions = 0;
         assert!(s
-            .commit_with(id, |_| {
-                executions += 1;
-                Ok("unexpected".into())
-            })
+            .prepare(&json!({"host":"ru1","action":"monitor.run"}))
             .is_err());
-        assert_eq!(executions, 0);
     }
 
     #[test]
@@ -770,13 +753,13 @@ mod tests {
         let s = store();
         let secret = "sensitive-test-content-only";
         let _ = s
-            .prepare(&json!({"host":"ru1","action":"sandbox.create",
+            .prepare(&json!({"host":"ru0","action":"sandbox.create",
             "name":"draft.md","content":secret}))
             .unwrap();
         let audit = s.recent_audit().unwrap();
         let output = audit.to_string();
         assert!(output.contains("prepared"));
-        assert!(output.contains("ru1"));
+        assert!(output.contains("ru0"));
         assert!(!output.contains(secret));
         assert_eq!(audit["events"].as_array().unwrap().len(), 1);
     }
@@ -792,7 +775,7 @@ mod tests {
     fn late_confirmation_gets_fresh_execution_window() {
         let s = store();
         let prepared = s
-            .prepare(&json!({"host":"ru1","action":"monitor.run"}))
+            .prepare(&json!({"host":"ru0","action":"probe.restart"}))
             .unwrap();
         let id = prepared["approval_id"].as_str().unwrap();
         let original = s.load("prepared", id).unwrap();
@@ -845,7 +828,7 @@ mod tests {
     fn execution_expiry_is_exclusive_and_approval_is_single_use() {
         let s = store();
         let data = s
-            .prepare(&json!({"host":"ru1","action":"monitor.run"}))
+            .prepare(&json!({"host":"ru0","action":"probe.restart"}))
             .unwrap();
         let id = data["approval_id"].as_str().unwrap();
         let orig = s.load("prepared", id).unwrap();
@@ -928,7 +911,7 @@ mod tests {
     fn tampered_execution_window_fails_closed() {
         let s = store();
         let data = s
-            .prepare(&json!({"host":"ru1","action":"monitor.run"}))
+            .prepare(&json!({"host":"ru0","action":"probe.restart"}))
             .unwrap();
         let id = data["approval_id"].as_str().unwrap();
         let original = s.load("prepared", id).unwrap();
@@ -977,7 +960,7 @@ mod tests {
     fn approved_window_survives_cleanup_until_its_own_expiry() {
         let s = store();
         let data = s
-            .prepare(&json!({"host":"ru1","action":"monitor.run"}))
+            .prepare(&json!({"host":"ru0","action":"probe.restart"}))
             .unwrap();
         let id = data["approval_id"].as_str().unwrap();
         let original = s.load("prepared", id).unwrap();
@@ -995,7 +978,7 @@ mod tests {
     fn audit_failure_prevents_confirmed_grant_creation() {
         let s = store();
         let prepared = s
-            .prepare(&json!({"host":"ru1","action":"monitor.run"}))
+            .prepare(&json!({"host":"ru0","action":"probe.restart"}))
             .unwrap();
         let id = prepared["approval_id"].as_str().unwrap();
         let original = s.load("prepared", id).unwrap();
