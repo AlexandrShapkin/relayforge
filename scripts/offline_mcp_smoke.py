@@ -23,6 +23,11 @@ def main():
                     "arguments": {"command": "id"}}},
         {"jsonrpc": "2.0", "id": 6, "method": "tools/call",
          "params": {"name": "relayforge_workstation_status", "arguments": {}}},
+        {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+         "params": {"name": "relayforge_workstation_develop",
+                    "arguments": {"operation": "repo.write",
+                                  "path": "crates/relayforge-mcp/src/main.rs",
+                                  "content": "malicious"}}},
     ]
     serialized = "".join(json.dumps(item) + "\n" for item in requests)
     completed = subprocess.run(
@@ -33,12 +38,13 @@ def main():
     responses = [json.loads(line) for line in completed.stdout.splitlines()
                  if line.strip()]
     by_id = {r["id"]: r for r in responses}
-    assert set(by_id) == {1, 2, 3, 4, 5, 6}, "MCP responses missing or malformed"
+    assert set(by_id) == {1, 2, 3, 4, 5, 6, 7}, "MCP responses missing or malformed"
     assert by_id[1]["result"]["protocolVersion"] == "2025-11-25"
     names = {tool["name"] for tool in by_id[2]["result"]["tools"]}
     expected = {"relayforge_status", "relayforge_routeros_health",
                 "relayforge_android_health", "relayforge_fleet_health",
-                "relayforge_workstation_status"}
+                "relayforge_workstation_status",
+                "relayforge_workstation_develop"}
     assert expected <= names, f"missing read-only tools: {expected - names}"
     forbidden = {"relayforge_agent_file", "relayforge_agent_probe_restart"}
     assert not (forbidden & names), "unrestricted tools exposed via private stdio"
@@ -56,6 +62,8 @@ def main():
     assert inventory["permissions"] == {
         "shell": False, "arbitrary_files": False, "service_mutation": False}
     assert "untracked_clean" in inventory["repository"]
+    assert by_id[7]["result"]["isError"] is True, (
+        "workstation write succeeded without local operator opt-in")
     print("Offline MCP handshake/tool discovery/workstation/deny-by-default: PASS")
     print("No physical device, tunnel, remote shell or credentials were used.")
 
