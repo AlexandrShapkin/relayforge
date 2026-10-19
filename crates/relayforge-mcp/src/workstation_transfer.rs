@@ -210,8 +210,16 @@ mod tests {
     fn rejects_unrecognized_arguments_and_operations() {
         let h = Path::new("/definitely-not-existing");
         assert!(execute(h, &json!({"operation":"workspace.exec"})).is_err());
-        assert!(execute(h, &json!({"operation":"workspace.put","path":"foo.rs",
-            "content":"x","shell":true})).is_err());
-        assert!(execute(h, &json!({"operation":"workspace.read","path":"../../.ssh/key"})).is_err());
+        assert!(execute(
+            h,
+            &json!({"operation":"workspace.put","path":"foo.rs",
+            "content":"x","shell":true})
+        )
+        .is_err());
+        assert!(execute(
+            h,
+            &json!({"operation":"workspace.read","path":"../../.ssh/key"})
+        )
+        .is_err());
     }
 }
