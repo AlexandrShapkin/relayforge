@@ -1,28 +1,41 @@
-# MCP clients
+# MCP client integration
 
-RelayForge exposes a standard JSON-RPC MCP adapter. The initial implementation
-supports **local stdio** only and advertises read-only diagnostic tools,
-`relayforge_status`. The optional SSH pilot can query a small allowlist of remote devices using existing SSH credentials; no mutating operations are available. See `docs/ssh-pilot.md`.
+RelayForge provides a JSON-RPC stdio MCP adapter with restricted
+diagnostics and narrowly scoped human-approved pilot changes.
 
-The stdio pilot negotiates handshake-era MCP revisions
-`2024-11-05`, `2025-03-26`, `2025-06-18`, and `2025-11-25`.
-If the client proposes an unsupported revision, the server counter-offers
-`2025-11-25` rather than echoing an unsupported version. The modern
-`2026-07-28` stateless MCP lifecycle is **not implemented** yet. This
-pilot does not yet enforce the full initialize-before-tools lifecycle.
+The adapter supports handshake-era MCP versions `2024-11-05`,
+`2025-03-26`, `2025-06-18`, and `2025-11-25`. The newer
+`2026-07-28` stateless lifecycle is not implemented. The initial
+initialize-before-tool lifecycle is not yet fully enforced. Do not
+claim complete protocol conformance.
 
-## Codex and other local stdio clients
+## Local stdio
 
-Build with `cargo build --release -p relayforge-mcp` and configure the client
-to start `target/release/relayforge-mcp` as its stdio MCP server. Do not launch
-through a wrapper that prints to stdout; stdout is reserved for JSON-RPC.
+```sh
+cargo build --release --locked -p relayforge-mcp
+target/release/relayforge-mcp --readonly-stdio
+```
 
-## ChatGPT and remote clients
+Standard output is reserved for protocol frames. Never connect a
+remote gateway to the unrestricted local development entrypoint.
 
-ChatGPT requires a supported remote MCP transport and appropriate authentication.
-**Do not point ChatGPT at this local stdio process.** HTTPS Streamable HTTP,
-identity verification, enrollment, and permission enforcement are planned but
-not implemented. Assistant Hub may eventually use the same MCP interface.
+## ChatGPT private Secure MCP Tunnel
 
-Client names are not credentials. No permission is implied by using Codex,
-ChatGPT, or Assistant Hub.
+The tested ChatGPT transport is an **outbound-only** Secure MCP Tunnel
+operated by an authorized ThinkPad user service. Its launcher invokes
+`--readonly-stdio` and exposes allowlisted Linux, RouterOS and Android
+read-only diagnostics. It can prepare tightly scoped changes for a
+separate **interactive local operator approval**; there is no remote
+approval tool.
+
+See [tunnel deployment](tunnel-readonly.md) and
+[onboarding](openai-secure-tunnel.md). Check both that the user service
+is active and that an authenticated control-plane poll succeeded
+recently. After modifying MCP tools, ChatGPT plugin discovery may
+need refreshing.
+
+## Other clients
+
+Codex and Assistant Hub might use standard MCP transport with suitable
+configuration but have not received the same end-to-end qualification
+as the private ChatGPT tunnel. Client names convey no permission.

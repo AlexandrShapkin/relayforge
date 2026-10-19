@@ -31,9 +31,11 @@ The profile is stored in `~/.config/tunnel-client/relayforge-local.yaml`
 The profile references `file:/home/user/.config/relayforge/tunnel/runtime-key`,
 which **must not** be checked into Git or sent to ChatGPT.
 
-The user service unit `deploy/systemd/relayforge-tunnel.service` is
-installed on ThinkPad but deliberately **not enabled** until credentials
+For a **new installation**, do not enable the
+`deploy/systemd/relayforge-tunnel.service` user unit before credentials
 pass `tunnel-client doctor --profile relayforge-local --explain`.
+The authorized ThinkPad deployment has already completed these steps
+and normally runs the service.
 It uses an outbound tunnel and binds only a loopback health endpoint.
 `ProtectHome=read-only` and `NoNewPrivileges` remain enabled.
 

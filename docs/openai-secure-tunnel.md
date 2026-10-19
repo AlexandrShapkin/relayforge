@@ -45,5 +45,9 @@ Only start the tunnel runtime after the profile and identity permissions
 are reviewed. Confirm the local /readyz endpoint and real ChatGPT discovery
 and tool invocation before calling remote access ready.
 
-The tunnel is not yet provisioned; no tunnel process is running.
-Until it is, this ChatGPT conversation does not have direct RelayForge tools.
+**Deployment note (October 2026):** A private Secure MCP Tunnel was
+provisioned on the authorized ThinkPad and verified with real ChatGPT
+tool invocations. The onboarding instructions above are for new
+installations, not a claim that the existing service is unconfigured.
+Always recheck a recent authenticated control-plane poll and a live
+MCP call when evaluating current availability.
