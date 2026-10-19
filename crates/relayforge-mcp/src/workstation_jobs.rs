@@ -254,13 +254,21 @@ pub(crate) fn sandbox_stage(
         .stdin(match previous {
             Some(path) => {
                 // Fail closed on symlinks, oversized or non-UTF8 handoffs.
-                read_text(path.parent().ok_or("handoff path invalid")?,
-                    path.file_name().and_then(|s| s.to_str())
-                        .ok_or("handoff path invalid")?, 8 * 1024)?
-                    .ok_or("handoff unavailable")?;
-                Stdio::from(OpenOptions::new().read(true)
-                    .custom_flags(NOFOLLOW).open(path)
-                    .map_err(|_| "handoff unavailable")?)
+                read_text(
+                    path.parent().ok_or("handoff path invalid")?,
+                    path.file_name()
+                        .and_then(|s| s.to_str())
+                        .ok_or("handoff path invalid")?,
+                    8 * 1024,
+                )?
+                .ok_or("handoff unavailable")?;
+                Stdio::from(
+                    OpenOptions::new()
+                        .read(true)
+                        .custom_flags(NOFOLLOW)
+                        .open(path)
+                        .map_err(|_| "handoff unavailable")?,
+                )
             }
             None => Stdio::null(),
         })
@@ -304,7 +312,8 @@ fn run_job(home: &Path, id: &str) -> Result<i32, String> {
             "stdout_truncated":result.stdout_truncated,
             "stderr_truncated":result.stderr_truncated
         })
-        .to_string().as_bytes()
+        .to_string()
+        .as_bytes(),
     )?;
     Ok(result.exit_code)
 }
@@ -439,9 +448,19 @@ pub(crate) fn schedule_worker(home: &Path, id: &str, limit: u32) -> Result<(), S
     let path = binary.to_str().ok_or("binary path unavailable")?;
     let output = Command::new("timeout")
         .args([
-            "-k", "2s", "12s", "systemd-run", "--user", "--collect",
-            &unit, "--property=Type=exec", &max, "--",
-            path, "--sandbox-job-worker", id,
+            "-k",
+            "2s",
+            "12s",
+            "systemd-run",
+            "--user",
+            "--collect",
+            &unit,
+            "--property=Type=exec",
+            &max,
+            "--",
+            path,
+            "--sandbox-job-worker",
+            id,
         ])
         .output()
         .map_err(|_| "job scheduler unavailable")?;
@@ -479,7 +498,11 @@ fn job_remove(home: &Path, id: &str) -> Result<String, String> {
     // cleanup margin before allowing removal of its script.
     if state["state"] == "unknown" || state["state"] == "failed" {
         let dir = job_dir(home, id)?;
-        let grace = if read_text(&dir, "chain.count", 16)?.is_some() { 3900 } else { 900 };
+        let grace = if read_text(&dir, "chain.count", 16)?.is_some() {
+            3900
+        } else {
+            900
+        };
         let epoch = id
             .strip_prefix(PREFIX)
             .unwrap_or("")
