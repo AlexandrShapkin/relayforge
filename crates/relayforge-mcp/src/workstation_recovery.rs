@@ -12,7 +12,7 @@ const MAX_OUTPUT: usize = 8192;
 
 fn unit_properties(unit: &str) -> Result<HashMap<String, String>, String> {
     let property = match unit {
-        TIMER => "Id,LoadState,ActiveState,UnitFileState,LastTriggerUSec,NextElapseUSecRealtime",
+        TIMER => "Id,LoadState,ActiveState,UnitFileState,LastTriggerUSec,NextElapseUSecRealtime,NextElapseUSecMonotonic",
         SERVICE => "Id,LoadState,ActiveState,Result,ExecMainStatus,ExecMainCode,ExecMainExitTimestampMonotonic",
         _ => return Err("unit denied".into()),
     };
@@ -96,7 +96,8 @@ fn summarize(
         "last_timer_trigger_observed":timer_triggered,
         "last_service_completion_observed":completed,
         "last_run_success":success,
-        "next_run_scheduled":meaningful_time(timer.get("NextElapseUSecRealtime")),
+        "next_run_scheduled":meaningful_time(timer.get("NextElapseUSecRealtime"))
+            || meaningful_time(timer.get("NextElapseUSecMonotonic")),
         "read_only":true,
     })
 }
@@ -142,6 +143,22 @@ mod tests {
         assert_eq!(result["status"], "verified_last_run");
         assert_eq!(result["last_run_success"], true);
         assert_eq!(result["read_only"], true);
+    }
+
+    #[test]
+    fn monotonic_next_elapse_is_a_valid_scheduled_run() {
+        let (mut timer, service) = sample();
+        timer.insert("NextElapseUSecRealtime".into(), "n/a".into());
+        timer.insert("NextElapseUSecMonotonic".into(), "2h 17min".into());
+        assert_eq!(
+            summarize(&timer, &service, true)["next_run_scheduled"],
+            true
+        );
+        timer.insert("NextElapseUSecMonotonic".into(), "n/a".into());
+        assert_eq!(
+            summarize(&timer, &service, true)["next_run_scheduled"],
+            false
+        );
     }
 
     #[test]
