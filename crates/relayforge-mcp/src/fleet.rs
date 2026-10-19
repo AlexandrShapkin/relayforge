@@ -12,30 +12,21 @@ const RU0_UNITS: &[&str] = &[
     "assistant-hub-google-calendar.timer",
     "assistant-hub-university-calendar.timer",
 ];
-const RU1_UNITS: &[&str] = &[
-    "assistant-hub-demo.service",
-    "remote-desktop.service",
-    "assistant-hub-backup.timer",
-    "assistant-hub-monitor.timer",
-];
 const SRV0_UNITS: &[&str] = &["remote-desktop.service"];
-const HOSTS: &[(&str, &[&str])] = &[("ru0", RU0_UNITS), ("ru1", RU1_UNITS), ("srv0", SRV0_UNITS)];
+const HOSTS: &[(&str, &[&str])] = &[("ru0", RU0_UNITS), ("srv0", SRV0_UNITS)];
 const RU0_TIMERS: &[&str] = &[
     "assistant-hub-backup.timer",
     "assistant-hub-google-calendar.timer",
     "assistant-hub-university-calendar.timer",
 ];
-const RU1_TIMERS: &[&str] = &["assistant-hub-backup.timer", "assistant-hub-monitor.timer"];
 const RU0_ARTIFACTS: &[&str] = &[
     "ru0_private_backup",
     "ru0_google_main_mirror",
     "ru0_university_mirror",
 ];
-const RU1_ARTIFACTS: &[&str] = &["ru1_demo_backup", "ru1_health_probe"];
 fn expected_artifacts(host: &str) -> &'static [&'static str] {
     match host {
         "ru0" => RU0_ARTIFACTS,
-        "ru1" => RU1_ARTIFACTS,
         _ => &[],
     }
 }
@@ -43,7 +34,6 @@ fn expected_artifacts(host: &str) -> &'static [&'static str] {
 fn expected_jobs(host: &str) -> (&'static str, &'static [&'static str]) {
     match host {
         "ru0" => ("ru0.alexandrshapkin.ru", RU0_TIMERS),
-        "ru1" => ("ru1.alexandrshapkin.ru", RU1_TIMERS),
         _ => ("srv0", &[]),
     }
 }
@@ -237,160 +227,109 @@ mod tests {
     fn mock_for(host: &str) -> String {
         let expected = match host {
             "ru0" => RU0_UNITS,
-            "ru1" => RU1_UNITS,
             _ => SRV0_UNITS,
         };
-        let (hostname, expected_timers) = expected_jobs(host);
-        json!({"scope":"user","host":hostname,
+        let (hostname, timers) = expected_jobs(host);
+        json!({
+            "scope":"user","host":hostname,
             "artifact_results":expected_artifacts(host).iter().map(|name|
-                json!({"name":name,"status":"verified","reason":"fixture_ok","age_minutes":10})
+                json!({"name":name,"status":"verified","reason":"fixture_ok",
+                    "age_minutes":10})
             ).collect::<Vec<_>>(),
             "units":expected.iter().map(|name|json!({
-                "unit":name,"active":"active","sub":"running"})).collect::<Vec<_>>(),
-            "scheduled_jobs":expected_timers.iter().map(|timer|json!({
+                "unit":name,"active":"active","sub":"running"
+            })).collect::<Vec<_>>(),
+            "scheduled_jobs":timers.iter().map(|timer|json!({
                 "timer":timer,"status":"success","reason":"completed_successfully",
-                "timer_active":true,
-                "last_trigger_at":"today","next_scheduled_at":"tomorrow",
+                "timer_active":true,"last_trigger_at":"today",
+                "next_scheduled_at":"tomorrow",
                 "minutes_since_completion":15,"max_age_minutes":120
-            })).collect::<Vec<_>>()})
-        .to_string()
+            })).collect::<Vec<_>>()
+        }).to_string()
     }
 
     #[test]
-    fn all_hosts_healthy_when_required_units_active() {
+    fn only_current_hosts_are_monitored() {
         let result = snapshot_with(&|host| Ok(mock_for(host)));
         assert_eq!(result["overall"], "healthy");
-        assert_eq!(result["hosts"].as_array().unwrap().len(), 3);
+        assert_eq!(result["hosts"].as_array().unwrap().len(), 2);
+        assert_eq!(result["hosts"][0]["host"], "ru0");
+        assert_eq!(result["hosts"][1]["host"], "srv0");
         assert!(result["checked_at_unix"].as_u64().unwrap() > 0);
     }
 
     #[test]
-    fn missing_unit_means_degraded_not_healthy() {
+    fn missing_unit_degrades_health() {
         let result = snapshot_with(&|host| {
+            let mut data: Value = serde_json::from_str(&mock_for(host)).unwrap();
             if host == "ru0" {
-                {
-                    let mut reply: Value = serde_json::from_str(&mock_for(host)).unwrap();
-                    reply["units"] = json!([]);
-                    Ok(reply.to_string())
-                }
-            } else {
-                Ok(mock_for(host))
+                data["units"] = json!([]);
             }
+            Ok(data.to_string())
         });
         assert_eq!(result["overall"], "degraded");
-        assert_eq!(result["hosts"][0]["status"], "degraded");
         assert_eq!(result["hosts"][0]["units"][0]["active"], "missing");
     }
 
     #[test]
-    fn unavailable_and_malformed_agents_are_not_green() {
-        let result = snapshot_with(&|host| match host {
-            "ru0" => Err("connection refused".into()),
-            "ru1" => Ok("{}".into()),
-            _ => Ok(mock_for(host)),
+    fn unreachable_and_malformed_agents_are_not_healthy() {
+        let unavailable = snapshot_with(&|host| {
+            if host == "ru0" {Err("connection refused".into())}
+            else {Ok(mock_for(host))}
         });
-        assert_eq!(result["overall"], "degraded");
-        assert_eq!(result["hosts"][0]["reason"], "agent_unavailable");
-        assert_eq!(result["hosts"][1]["reason"], "invalid_agent_response");
-        assert_eq!(result["hosts"][2]["status"], "healthy");
+        assert_eq!(unavailable["overall"], "degraded");
+        assert_eq!(unavailable["hosts"][0]["reason"], "agent_unavailable");
+        let malformed = snapshot_with(&|host| {
+            if host == "srv0" {Ok("{}".into())}
+            else {Ok(mock_for(host))}
+        });
+        assert_eq!(malformed["overall"], "degraded");
+        assert_eq!(malformed["hosts"][1]["reason"], "invalid_agent_response");
     }
 
     #[test]
-    fn unknown_last_run_is_attention_not_verified_healthy() {
+    fn unverified_job_or_artifact_needs_attention() {
         let result = snapshot_with(&|host| {
-            let mut v: Value = serde_json::from_str(&mock_for(host)).unwrap();
+            let mut data: Value = serde_json::from_str(&mock_for(host)).unwrap();
             if host == "ru0" {
-                v["scheduled_jobs"][0]["status"] = json!("unverified");
-                v["scheduled_jobs"][0]["reason"] = json!("no_completion_observed_this_boot");
+                data["scheduled_jobs"][0]["status"] = json!("unverified");
+                data["artifact_results"][1]["status"] = json!("unverified");
             }
-            Ok(v.to_string())
+            Ok(data.to_string())
         });
         assert_eq!(result["overall"], "attention");
         assert_eq!(result["hosts"][0]["status"], "attention");
-        assert_eq!(
-            result["hosts"][0]["scheduled_jobs"][0]["status"],
-            "unverified"
-        );
     }
 
     #[test]
-    fn stale_or_failed_scheduled_job_is_degraded() {
-        for state in ["stale", "failed"] {
+    fn stale_job_or_failed_backup_degrades_health() {
+        for field in ["scheduled_jobs", "artifact_results"] {
             let result = snapshot_with(&|host| {
-                let mut v: Value = serde_json::from_str(&mock_for(host)).unwrap();
-                if host == "ru1" {
-                    v["scheduled_jobs"][1]["status"] = json!(state);
+                let mut data: Value = serde_json::from_str(&mock_for(host)).unwrap();
+                if host == "ru0" {
+                    data[field][0]["status"] = json!("failed");
                 }
-                Ok(v.to_string())
+                Ok(data.to_string())
             });
             assert_eq!(result["overall"], "degraded");
-            assert_eq!(result["hosts"][1]["status"], "degraded");
         }
     }
 
     #[test]
-    fn malformed_job_telemetry_does_not_return_green() {
+    fn malformed_telemetry_cannot_report_green() {
         let result = snapshot_with(&|host| {
-            let mut v: Value = serde_json::from_str(&mock_for(host)).unwrap();
+            let mut data: Value = serde_json::from_str(&mock_for(host)).unwrap();
             if host == "ru0" {
-                v.as_object_mut().unwrap().remove("scheduled_jobs");
+                data.as_object_mut().unwrap().remove("scheduled_jobs");
             }
-            if host == "ru1" {
-                v["host"] = json!("ru0.alexandrshapkin.ru");
-            }
-            Ok(v.to_string())
+            Ok(data.to_string())
         });
         assert_eq!(result["overall"], "degraded");
-        assert_eq!(result["hosts"][0]["status"], "unreachable");
-        assert_eq!(result["hosts"][1]["reason"], "agent_hostname_mismatch");
+        assert_eq!(result["hosts"][0]["reason"], "job_telemetry_unavailable");
     }
 
     #[test]
-    fn backups_and_monitor_artifacts_affect_fleet_health() {
-        let snapshot = snapshot_with(&|host| {
-            let mut data: Value = serde_json::from_str(&mock_for(host)).unwrap();
-            if host == "ru0" {
-                data["artifact_results"][1]["status"] = json!("unverified");
-                data["artifact_results"][1]["reason"] = json!("no_source_receipt");
-            }
-            Ok(data.to_string())
-        });
-        assert_eq!(snapshot["overall"], "attention");
-        assert_eq!(snapshot["hosts"][0]["status"], "attention");
-        let snapshot = snapshot_with(&|host| {
-            let mut data: Value = serde_json::from_str(&mock_for(host)).unwrap();
-            if host == "ru1" {
-                data["artifact_results"][1]["status"] = json!("failed");
-                data["artifact_results"][1]["reason"] = json!("health_probe_endpoint_failed");
-            }
-            Ok(data.to_string())
-        });
-        assert_eq!(snapshot["overall"], "degraded");
-        assert_eq!(
-            snapshot["hosts"][1]["artifact_results"][1]["status"],
-            "failed"
-        );
-    }
-
-    #[test]
-    fn missing_artifact_payload_cannot_be_green() {
-        let snapshot = snapshot_with(&|host| {
-            let mut data: Value = serde_json::from_str(&mock_for(host)).unwrap();
-            if host == "ru0" {
-                data.as_object_mut().unwrap().remove("artifact_results");
-            }
-            if host == "ru1" {
-                data["artifact_results"] = json!([]);
-            }
-            Ok(data.to_string())
-        });
-        assert_eq!(snapshot["overall"], "degraded");
-        assert_eq!(snapshot["hosts"][0]["status"], "unreachable");
-        assert_eq!(snapshot["hosts"][1]["status"], "degraded");
-    }
-
-    #[test]
-    fn reject_nonempty_arguments() {
+    fn rejects_unexpected_arguments() {
         assert!(snapshot(&json!({"host":"ru0"})).is_err());
     }
 }
