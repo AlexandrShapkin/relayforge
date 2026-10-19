@@ -6,10 +6,11 @@ use serde_json::{json, Value};
 use std::{
     collections::BTreeSet,
     fs::{self, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Component, Path, PathBuf},
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
+    thread,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -22,11 +23,13 @@ pub fn tool() -> Value {
     json!({"name":"relayforge_workstation_develop",
         "description":"ThinkPad-only bounded development: tracked repository inventory/reads, isolated read-only offline shell, process status, Git sync/build and tunnel restart. Source writes need a separate local opt-in. No unrestricted host shell.",
         "inputSchema":{"type":"object","properties":{
-            "operation":{"type":"string","enum":["repo.status","repo.list","repo.read","repo.write","repo.sync","build.start","task.status","task.logs","tunnel.restart","shell.sandbox","process.list","user.services"]},
+            "operation":{"type":"string","minLength":1,"maxLength":48,
+                "description":"Server-validated operation name. Use capabilities for the current allowlist; unknown values always denied."},
             "path":{"type":"string","maxLength":192},
             "content":{"type":"string","maxLength":49152},
             "task_id":{"type":"string","maxLength":32},
-            "script":{"type":"string","maxLength":2048}
+            "script":{"type":"string","maxLength":2048},
+            "parameters":{"type":"object","description":"Reserved for future, strictly server-validated operation arguments. Unrecognized payloads denied."}
         },"required":["operation"],"additionalProperties":false}})
 }
 
@@ -109,17 +112,37 @@ fn source_file(path: &str) -> bool {
         .any(|ext| path.ends_with(ext))
 }
 
-fn command(program: &str, args: &[&str], max_seconds: u32) -> Result<Output, String> {
-    let seconds = format!("{max_seconds}s");
-    let output = Command::new("timeout")
-        .args(["-k", "2s", &seconds, program])
-        .args(args)
-        .output()
-        .map_err(|_| "local process unavailable")?;
-    if output.stdout.len() > MAX_OUTPUT || output.stderr.len() > MAX_OUTPUT {
+fn read_capped<R: Read>(reader: R) -> Result<Vec<u8>, String> {
+    let mut output = Vec::new();
+    reader
+        .take((MAX_OUTPUT + 1) as u64)
+        .read_to_end(&mut output)
+        .map_err(|_| "output unreadable")?;
+    if output.len() > MAX_OUTPUT {
         return Err("output too large".into());
     }
     Ok(output)
+}
+
+fn command(program: &str, args: &[&str], max_seconds: u32) -> Result<Output, String> {
+    let seconds = format!("{max_seconds}s");
+    // Two bounded readers prevent a compromised program from exhausting
+    // the MCP process memory through stdout or stderr in a short interval.
+    let mut process = Command::new("timeout")
+        .args(["-k", "2s", &seconds, program])
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|_| "local process unavailable")?;
+    let stdout = process.stdout.take().ok_or("stdout unavailable")?;
+    let stderr = process.stderr.take().ok_or("stderr unavailable")?;
+    let out_reader = thread::spawn(move || read_capped(stdout));
+    let err_reader = thread::spawn(move || read_capped(stderr));
+    let status = process.wait().map_err(|_| "process wait failed")?;
+    let out = out_reader.join().map_err(|_| "stdout reader failed")??;
+    let err = err_reader.join().map_err(|_| "stderr reader failed")??;
+    Ok(Output { status, stdout: out, stderr: err })
 }
 
 fn text_output(output: Output) -> Result<String, String> {
@@ -354,6 +377,23 @@ pub fn execute(args: &Value) -> Result<String, String> {
         .ok_or("missing operation")?;
     let (home, repo) = home_and_repo()?;
     match operation {
+        "capabilities" if obj.len() == 1 => Ok(json!({
+            "api_revision": 1,
+            "transport": "private_secure_mcp_tunnel",
+            "operations": [
+                "capabilities", "repo.status", "repo.list", "repo.read",
+                "repo.write", "repo.sync", "build.start",
+                "task.status", "task.logs", "tunnel.restart",
+                "shell.sandbox", "process.list", "user.services"
+            ],
+            "write_grants": {
+                "development": dev_enabled(&home),
+                "source_edit": source_edit_enabled(&home)
+            },
+            "arbitrary_host_shell": false,
+            "arbitrary_host_files": false,
+            "operator_local_approval_required_for_sensitive_changes": true
+        }).to_string()),
         "process.list" if obj.len() == 1 => {
             text_output(command("ps", &["-eo", "pid=,comm=,etime=,rss="], 8)?)
         }
@@ -406,7 +446,15 @@ pub fn execute(args: &Value) -> Result<String, String> {
                 .and_then(Value::as_str)
                 .ok_or("path required")?;
             let safe = safe_existing_file(&repo, path)?;
-            let data = fs::read(&safe).map_err(|_| "source unreadable")?;
+            let file = OpenOptions::new()
+                .read(true)
+                .custom_flags(0x20000) // O_NOFOLLOW
+                .open(&safe)
+                .map_err(|_| "source unreadable")?;
+            let mut data = Vec::new();
+            file.take((MAX_CONTENT + 1) as u64)
+                .read_to_end(&mut data)
+                .map_err(|_| "source unreadable")?;
             if data.len() > MAX_CONTENT {
                 return Err("source too large; use GitHub source browser".into());
             }
@@ -560,6 +608,24 @@ mod tests {
         }
         let response = sandbox_shell(Path::new("/nonexistent/relayforge"), "pwd");
         assert!(response.is_err() || response.is_ok_and(|value| value.contains("exit_code")));
+    }
+    #[test]
+    fn bounded_output_stops_large_streams() {
+        assert_eq!(read_capped(b"ok".as_slice()).unwrap(), b"ok");
+        let overflow = vec![b'a'; MAX_OUTPUT + 2048];
+        assert!(read_capped(overflow.as_slice()).is_err());
+        let cmd = command("sh", &["-c", "head -c 100000 /dev/zero"], 5);
+        assert!(cmd.is_err());
+    }
+
+    #[test]
+    fn open_schema_remains_server_validated() {
+        let schema = tool();
+        assert!(schema["inputSchema"]["properties"]["operation"]["enum"].is_null());
+        assert_eq!(schema["inputSchema"]["additionalProperties"], false);
+        assert!(execute(&json!({"operation":"shell.host"})).is_err());
+        assert!(execute(&json!({"operation":"capabilities","arbitrary":true})).is_err());
+        assert!(execute(&json!({"operation":"capabilities","parameters":{"shell":"id"}})).is_err());
     }
     #[test]
     fn strict_task_identifiers_and_required_arguments() {
