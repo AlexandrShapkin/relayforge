@@ -22,7 +22,8 @@ fn main() -> io::Result<()> {
         }
         std::process::exit(relayforge_mcp::workstation_jobs::run_worker(&id));
     } else if std::env::args().nth(1).as_deref() == Some("--retire-ssh-worker") {
-        let kind = std::env::args().nth(2)
+        let kind = std::env::args()
+            .nth(2)
             .ok_or_else(|| io::Error::other("retirement kind required"))?;
         if std::env::args().nth(3).is_some() {
             return Err(io::Error::other("unexpected arguments"));
