@@ -1,0 +1,13 @@
+[Unit]
+Description=Periodically check and recover local RelayForge tunnel on explicit opt-in
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+RandomizedDelaySec=15s
+AccuracySec=30s
+Unit=relayforge-local-recover.service
+Persistent=false
+
+[Install]
+WantedBy=timers.target
