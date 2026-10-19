@@ -2,6 +2,7 @@
 //! No device is reachable from this implementation.
 use crate::{
     agent, android, android_health, bridge, changes, fleet, routeros, routeros_health, workstation,
+    workstation_dev,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -53,12 +54,20 @@ pub fn handle(input: &Value) -> Option<Value> {
         "ping" => json!({}),
         "tools/list" => json!({"tools":[{"name":"relayforge_status",
             "description":"Read the status of this local RelayForge MCP adapter. Device actions are restricted by tool and host.",
-            "inputSchema":{"type":"object","properties":{},"additionalProperties":false}}, bridge::tool(), routeros::tool(), routeros_health::tool(), android::list_tool(), android::diagnostic_tool(), android_health::tool(), agent::tool(), agent::file_tool(), agent::probe_tool(), agent::file_inspect_tool(), fleet::tool(), workstation::tool(), changes::prepare_tool(), changes::commit_tool(), changes::status_tool(), changes::audit_tool()]}),
+            "inputSchema":{"type":"object","properties":{},"additionalProperties":false}}, bridge::tool(), routeros::tool(), routeros_health::tool(), android::list_tool(), android::diagnostic_tool(), android_health::tool(), agent::tool(), agent::file_tool(), agent::probe_tool(), agent::file_inspect_tool(), fleet::tool(), workstation::tool(), workstation_dev::tool(), changes::prepare_tool(), changes::commit_tool(), changes::status_tool(), changes::audit_tool()]}),
         "tools/call" => {
             let name = input.pointer("/params/name").and_then(Value::as_str);
             match name {
                 Some("relayforge_status") => {
                     json!({"content":[{"type":"text","text":"RelayForge diagnostic bridge ready."}],"isError":false})
+                }
+                Some("relayforge_workstation_develop") => {
+                    let empty = json!({});
+                    let args = input.pointer("/params/arguments").unwrap_or(&empty);
+                    match workstation_dev::execute(args) {
+                        Ok(value) => json!({"content":[{"type":"text","text":value}],"isError":false}),
+                        Err(message) => json!({"content":[{"type":"text","text":message}],"isError":true}),
+                    }
                 }
                 Some("relayforge_workstation_status") => {
                     let empty = json!({});
@@ -267,6 +276,7 @@ const TUNNEL_ALLOWED_TOOLS: &[&str] = &[
     "relayforge_file_inspect",
     "relayforge_fleet_health",
     "relayforge_workstation_status",
+    "relayforge_workstation_develop",
     "relayforge_change_prepare",
     "relayforge_change_commit",
     "relayforge_change_status",
