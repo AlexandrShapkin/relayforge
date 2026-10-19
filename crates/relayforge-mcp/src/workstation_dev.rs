@@ -884,6 +884,13 @@ mod tests {
         assert!(response.is_err() || response.is_ok_and(|value| value.contains("exit_code")));
     }
     #[test]
+    fn bounded_stdin_is_passed_without_argv_script() {
+        let out = command_input("sh", &["-s"], Some("printf 'FROM_STDIN'"), 5).unwrap();
+        assert!(out.status.success());
+        assert_eq!(out.stdout, b"FROM_STDIN");
+    }
+
+    #[test]
     fn bounded_output_stops_large_streams() {
         assert_eq!(read_capped(b"ok".as_slice()).unwrap(), b"ok");
         let overflow = vec![b'a'; MAX_OUTPUT + 2048];
