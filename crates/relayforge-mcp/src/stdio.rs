@@ -355,8 +355,7 @@ fn worker_binary() -> Result<PathBuf, ()> {
     }
 }
 
-fn worker_reply(input: &Value) -> Result<Value, ()> {
-    let worker = worker_binary()?;
+fn call_worker(worker: &std::path::Path, input: &Value) -> Result<Value, ()> {
     let mut process = Command::new("timeout")
         .args(["-k", "2s", "40s"])
         .arg(worker)
@@ -391,6 +390,17 @@ fn worker_reply(input: &Value) -> Result<Value, ()> {
         return Err(());
     }
     Ok(response)
+}
+
+fn worker_reply(input: &Value) -> Result<Value, ()> {
+    let binary = worker_binary()?;
+    // The long-lived parent executable remains mapped even after Cargo
+    // atomically replaces the on-disk release. A failed new worker can fall
+    // back to the running parent's known-good restricted worker code without
+    // interrupting the tunnel. This fallback lasts only for this parent
+    // process lifetime, not across a machine or service restart.
+    call_worker(&binary, input)
+        .or_else(|_| call_worker(std::path::Path::new("/proc/self/exe"), input))
 }
 
 fn handle_hot_worker(input: &Value) -> Option<Value> {
