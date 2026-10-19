@@ -35,3 +35,4 @@ pub mod http;
 pub mod routeros;
 pub mod routeros_health;
 pub mod ssh;
+pub mod workstation;

@@ -46,6 +46,25 @@ general filesystem operations on the laptop, or unattended remote
 administration. The VPN health probe on ru1 and unverified upstream calendar
 freshness should not be treated as proof of a RelayForge development failure.
 
+## Workstation status (source ready; deployment separate)
+
+The new `relayforge_workstation_status` tool is a **no-argument,
+read-only** local workstation summary through the preexisting private
+Secure MCP Tunnel. It reports whether the fixed RelayForge Git tree is
+present/on `main`/free of tracked modifications, uptime, memory available,
+whether the user tunnel service is active and whether a recent
+authenticated control-plane poll was recorded. It never discloses
+filesystem listings, secrets, environment variables, Git remote URLs
+or process command lines. Its internal fixed git/systemctl/health checks
+have timeouts and return `unverified` rather than claiming a healthy
+host if any required evidence is missing.
+
+Source code and CI tests alone do **not** activate a tool on ThinkPad.
+Deployment requires updating the ThinkPad MCP binary and refreshing
+the private ChatGPT plugin after a separate review. Do not spend an
+almost-exhausted RDC quota simply to run repetitive builds; use
+GitHub-hosted verification first.
+
 ## Capabilities still missing when RDC is gone
 
 GitHub editing/CI replaces repository inspection, commits, builds, tests,
