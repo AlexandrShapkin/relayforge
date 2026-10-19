@@ -612,6 +612,11 @@ pub fn execute(args: &Value) -> Result<String, String> {
             sandbox_shell(&repo, script)
         }
         "tunnel.restart" if obj.len() == 1 => {
+            // The persistent hot-stdio parent automatically adopts new worker
+            // binaries. Restarting the actual tunnel would sever this session.
+            if std::env::var_os("RELAYFORGE_HOT_STDIO_WORKER").is_some() {
+                return Err("tunnel restart disabled in hot-worker mode".into());
+            }
             if !dev_enabled(&home) {
                 return Err("local development opt-in missing".into());
             }
