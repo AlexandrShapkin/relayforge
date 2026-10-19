@@ -125,3 +125,26 @@ This initial bridge is **not RDC feature parity**: it establishes the
 repo-specific development and update path required to evolve RelayForge
 without another RDC session. More general workstation functionality needs
 separate policy, audit, containment and verification.
+
+## Limited local shell and process visibility
+
+The optional `shell.sandbox` workstation operation executes a bounded
+15-second shell command **inside bubblewrap namespaces**, not as an
+unrestricted host terminal. The command can read and write only the fixed
+RelayForge checkout at `/workspace`. The sandbox has no network, other
+home directories, operator SSH secrets, user service bus, or persistent
+runtime directories. The tool passes a fixed bubblewrap argument vector;
+user text is executed only by the isolated shell. The local development
+opt-in and private mutation audit are required for every call. If
+bubblewrap or its namespace support is absent, the command fails closed.
+
+Read-only `process.list` exposes PID, executable basename, elapsed time
+and memory use, but never full command lines or environment variables.
+`user.services` lists the workstation user's systemd services. Neither
+operation can terminate processes or change service configuration. Use
+`tunnel.restart` only after a verified release build; it can temporarily
+disconnect ChatGPT.
+
+This does not replace RDC's interactive terminal sessions, process input,
+file transfer outside the fixed checkout or GUI support. Those require
+separate explicit authorizations, confinement and testing.
