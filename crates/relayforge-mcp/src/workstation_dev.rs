@@ -125,12 +125,25 @@ fn read_capped<R: Read>(reader: R) -> Result<Vec<u8>, String> {
 }
 
 fn command(program: &str, args: &[&str], max_seconds: u32) -> Result<Output, String> {
+    command_input(program, args, None, max_seconds)
+}
+
+fn command_input(
+    program: &str,
+    args: &[&str],
+    input: Option<&str>,
+    max_seconds: u32,
+) -> Result<Output, String> {
     let seconds = format!("{max_seconds}s");
-    // Two bounded readers prevent a compromised program from exhausting
-    // the MCP process memory through stdout or stderr in a short interval.
+    // Cap stdout/stderr during acquisition; keep caller scripts off argv.
     let mut process = Command::new("timeout")
         .args(["-k", "2s", &seconds, program])
         .args(args)
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -139,9 +152,18 @@ fn command(program: &str, args: &[&str], max_seconds: u32) -> Result<Output, Str
     let stderr = process.stderr.take().ok_or("stderr unavailable")?;
     let out_reader = thread::spawn(move || read_capped(stdout));
     let err_reader = thread::spawn(move || read_capped(stderr));
+    let sent = if let Some(body) = input {
+        let mut writer = process.stdin.take().ok_or("stdin unavailable")?;
+        writer
+            .write_all(body.as_bytes())
+            .map_err(|_| "stdin write failed")
+    } else {
+        Ok(())
+    };
     let status = process.wait().map_err(|_| "process wait failed")?;
     let out = out_reader.join().map_err(|_| "stdout reader failed")??;
     let err = err_reader.join().map_err(|_| "stderr reader failed")??;
+    sent?;
     Ok(Output {
         status,
         stdout: out,
@@ -501,14 +523,29 @@ fn sandbox_shell(repo: &Path, script: &str) -> Result<String, String> {
             "/bin/bash",
             "--noprofile",
             "--norc",
-            "-c",
-            script,
+            "-s",
         ]
         .iter()
         .map(|v| (*v).to_owned()),
     );
-    let args: Vec<&str> = arguments.iter().map(String::as_str).collect();
-    text_output(command("bwrap", &args, 15)?)
+
+    // The tunnel service forbids AF_NETLINK. bwrap needs that socket while
+    // creating a NEW isolated network namespace. A separate transient user
+    // service performs the sandbox setup without relaxing the tunnel policy.
+    // The command script flows through stdin, never through ExecStart.
+    let mut launch = vec![
+        "--user".to_owned(),
+        "--wait".to_owned(),
+        "--pipe".to_owned(),
+        "--collect".to_owned(),
+        "--property=Type=exec".to_owned(),
+        "--property=RuntimeMaxSec=20".to_owned(),
+        "--".to_owned(),
+        "/usr/bin/bwrap".to_owned(),
+    ];
+    launch.extend(arguments);
+    let args: Vec<&str> = launch.iter().map(String::as_str).collect();
+    text_output(command_input("systemd-run", &args, Some(script), 24)?)
 }
 
 fn clean_main_checkout(repo: &Path) -> Result<(), String> {
@@ -874,6 +911,13 @@ mod tests {
         let response = sandbox_shell(Path::new("/nonexistent/relayforge"), "pwd");
         assert!(response.is_err() || response.is_ok_and(|value| value.contains("exit_code")));
     }
+    #[test]
+    fn bounded_stdin_is_passed_without_argv_script() {
+        let out = command_input("sh", &["-s"], Some("printf 'FROM_STDIN'"), 5).unwrap();
+        assert!(out.status.success());
+        assert_eq!(out.stdout, b"FROM_STDIN");
+    }
+
     #[test]
     fn bounded_output_stops_large_streams() {
         assert_eq!(read_capped(b"ok".as_slice()).unwrap(), b"ok");
