@@ -350,3 +350,34 @@ to the repository, executed by RelayForge, or accessible to arbitrary
 host file operations. Exchange of text does not grant access to private
 user documents, credentials or arbitrary directories. Binary files,
 streaming and interactive terminal sessions are not yet supported.
+
+## Asynchronous sandbox jobs (API revision 4)
+
+`job.start` launches one isolated script for at most **600 seconds** with a
+persistent receipt. The command runs inside the existing bubblewrap
+user/mount/network/PID namespace and can see only a read-only, allowlisted
+view of tracked RelayForge source files; it cannot access the host user's
+home, `.git`, ignored/untracked private files, network, user services or
+credentials. Scripts may write temporary files only under the isolated
+ephemeral `/tmp`. A fixed local `--sandbox-job-worker` entrypoint runs
+through a transient systemd **user** service, never an arbitrary executable
+or shell on the host. All scripts are supplied as bounded UTF-8 text in the
+MCP request and stored in the private per-job directory with 0600 permissions;
+scripts are not placed on the systemd command line or printed to journald.
+
+Operations: `job.start` (script), `job.list`, `job.status` (task_id),
+`job.output` (task_id), `job.stop` (task_id), and `job.remove` (task_id).
+Mutations require the local development opt-in and private audit. Reads
+validate a strict random job ID and never accept host unit names. The
+maximum stored jobs is 12; outputs are limited to 64 KiB per stream.
+Completed results contain an exit status and truncation flags. Worker
+termination by the service manager may leave the status `unknown`;
+in this case cleanup waits at least 900 seconds from creation to avoid
+erasing a task that might still be starting.
+
+These are **noninteractive background jobs**, not an unrestricted terminal.
+They do not accept additional stdin once started, attach to the host TTY,
+or provide arbitrary filesystem access. Stopping a job targets only its
+generated systemd unit. Use `job.remove` after completion to reclaim
+private storage. No RDC, root privileges, SSH, or tunnel restart is required
+for the supported workflow.
