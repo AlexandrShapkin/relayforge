@@ -24,6 +24,11 @@ jobs:
           components: clippy, rustfmt
       - name: Validate recovery bootstrap syntax
         run: bash -n deploy/relayforge-hot-activate.sh
+      - name: Verify independent recovery guard without hardware
+        run: |
+          bash -n deploy/install-local-recovery.sh
+          python3 -m py_compile deploy/relayforge-local-recover.py scripts/test_local_recovery.py
+          python3 scripts/test_local_recovery.py
       - name: Format
         run: cargo fmt --all -- --check
       - name: Check Rust

@@ -1,0 +1,15 @@
+[Unit]
+Description=RelayForge local opt-in recovery (no MCP or RDC access)
+ConditionPathExists=%h/.config/relayforge/allow-self-recovery
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 %h/.local/libexec/relayforge/relayforge-local-recover.py repair
+TimeoutStartSec=45
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/Projects/relayforge/target/release %h/.local/state/relayforge
+RestrictAddressFamilies=AF_UNIX
+UMask=0077
