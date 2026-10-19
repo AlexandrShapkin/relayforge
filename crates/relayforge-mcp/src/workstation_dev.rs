@@ -252,7 +252,9 @@ fn unit_id(input: &str) -> bool {
         (None, None) => true, // Old receipts remain readable.
         (Some(suffix), None) => {
             suffix.len() == 6
-                && suffix.bytes().all(|ch| ch.is_ascii_digit() || (b'a'..=b'f').contains(&ch))
+                && suffix
+                    .bytes()
+                    .all(|ch| ch.is_ascii_digit() || (b'a'..=b'f').contains(&ch))
         }
         _ => false,
     }
