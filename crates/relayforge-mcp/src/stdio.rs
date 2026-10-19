@@ -399,8 +399,8 @@ fn worker_reply(input: &Value) -> Result<Value, ()> {
     // back to the running parent's known-good restricted worker code without
     // interrupting the tunnel. This fallback lasts only for this parent
     // process lifetime, not across a machine or service restart.
-    call_worker(&binary, input)
-        .or_else(|_| call_worker(std::path::Path::new("/proc/self/exe"), input))
+    let parent_exe = PathBuf::from(format!("/proc/{}/exe", std::process::id()));
+    call_worker(&binary, input).or_else(|_| call_worker(&parent_exe, input))
 }
 
 fn handle_hot_worker(input: &Value) -> Option<Value> {
