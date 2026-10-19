@@ -2,7 +2,7 @@
 //! No caller-supplied executable, working directory, shell, service name,
 //! host, credentials or arbitrary filesystem root. Mutations require a
 //! separate local operator-created, permission-checked opt-in file.
-use crate::workstation_transfer;
+use crate::{workstation_jobs, workstation_transfer};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeSet,
@@ -474,7 +474,7 @@ fn schedule_failure_class(output: &Output) -> &'static str {
 // Materialize a read-only view of allowlisted, currently tracked source
 // files inside the sandbox. Never bind the repository directory itself:
 // that would expose .git, private untracked files and hidden local state.
-fn sandbox_file_mounts(repo: &Path) -> Result<Vec<String>, String> {
+pub(crate) fn sandbox_file_mounts(repo: &Path) -> Result<Vec<String>, String> {
     let paths = tracked_paths(repo)?;
     let mut dirs = BTreeSet::new();
     let mut mounts = Vec::new();
@@ -615,7 +615,7 @@ pub fn execute(args: &Value) -> Result<String, String> {
             return Err("home invalid".into());
         }
         return Ok(json!({
-            "api_revision": 3,
+            "api_revision": 4,
             "transport": "private_secure_mcp_tunnel",
             "operations": [
                 "capabilities", "repo.status", "repo.list", "repo.read",
@@ -624,6 +624,8 @@ pub fn execute(args: &Value) -> Result<String, String> {
                 "tunnel.inspect", "tunnel.restart",
                 "workspace.list", "workspace.read", "workspace.put",
                 "workspace.remove",
+                "job.start", "job.list", "job.status", "job.output",
+                "job.stop", "job.remove",
                 "shell.sandbox", "process.list", "user.services"
             ],
             "write_grants": {
@@ -638,6 +640,15 @@ pub fn execute(args: &Value) -> Result<String, String> {
     }
     let (home, repo) = home_and_repo()?;
     match operation {
+        "job.start" | "job.list" | "job.status" | "job.output" | "job.stop" | "job.remove" => {
+            if matches!(operation, "job.start" | "job.stop" | "job.remove") {
+                if !dev_enabled(&home) {
+                    return Err("local development opt-in missing".into());
+                }
+                audit(&home, operation)?;
+            }
+            workstation_jobs::execute(&home, args)
+        }
         "workspace.list" | "workspace.read" | "workspace.put" | "workspace.remove" => {
             if matches!(operation, "workspace.put" | "workspace.remove") {
                 if !dev_enabled(&home) {
