@@ -269,7 +269,7 @@ pub fn execute(args: &Value) -> Result<String, String> {
     let (home, repo) = home_and_repo()?;
     match operation {
         "repo.status" if obj.len() == 1 => {
-            text_output(git(&repo, &["status", "--short", "--branch"])?)
+            text_output(git(&repo, &["status", "--short", "--branch", "--untracked-files=no"])?)
         }
         "repo.list"
             if obj.len() <= 2 && obj.keys().all(|key| key == "operation" || key == "path") =>
