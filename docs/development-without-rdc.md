@@ -105,14 +105,19 @@ for part of RDC on the authorized ThinkPad. Without local opt-in, the tool
 supports read-only Git status, public tracked repository listings and small
 tracked source reads. It never accepts executable names or shell arguments.
 
-Mutating operations (editing existing tracked sources, scheduling fixed
-`git pull --ff-only origin main`, scheduling fixed Cargo release builds,
-and restarting the tunnel user service) require a **local opt-in file**:
+Mutating operations (scheduling fixed `git pull --ff-only origin main`,
+scheduling fixed Cargo release builds, and restarting the tunnel user
+service) require a **local opt-in file**:
 `~/.config/relayforge/allow-workstation-development`, mode 0600,
 containing exactly `ALLOW_RELAYFORGE_DEVELOPMENT\n`. Its owner must match
 the invoking user. The operator must explicitly choose to create it locally.
-Every mutating operation is written to the private workstation audit log
-before execution, and fails closed when auditing is unavailable. No root
+Direct edits of existing tracked sources require **both** that opt-in and
+a separate, locally operator-created 0600 file at
+`~/.config/relayforge/allow-workstation-source-edits` containing exactly
+`ALLOW_RELAYFORGE_SOURCE_EDITS\n`. It is **not** installed by the
+bootstrap procedure. All mutations are audited before execution and
+fail closed when auditing is unavailable. Release builds, Git sync and
+service restarts also refuse a dirty tracked checkout or a non-main branch. No root
 commands, arbitrary shell, untracked private files, SSH keys, GUI control,
 or general process management are exposed by this initial stage.
 
@@ -130,8 +135,8 @@ separate policy, audit, containment and verification.
 
 The optional `shell.sandbox` workstation operation executes a bounded
 15-second shell command **inside bubblewrap namespaces**, not as an
-unrestricted host terminal. The command can read and write only the fixed
-RelayForge checkout at `/workspace`. The sandbox has no network, other
+unrestricted host terminal. The command can read (but **not write**) the
+fixed RelayForge checkout at `/workspace`; transient `/tmp` is writable. The sandbox has no network, other
 home directories, operator SSH secrets, user service bus, or persistent
 runtime directories. The tool passes a fixed bubblewrap argument vector;
 user text is executed only by the isolated shell. The local development
