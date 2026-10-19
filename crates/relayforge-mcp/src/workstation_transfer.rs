@@ -212,7 +212,9 @@ mod tests {
             "relayforge-transfer-test-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         );
         let home = std::env::temp_dir().join(suffix);
         let state = home.join(".local/state/relayforge");
@@ -224,23 +226,40 @@ mod tests {
         assert_eq!(receipt["created"], true);
         assert!(execute(&home, &create).is_err()); // no overwrite
 
-        let list: Value = serde_json::from_str(
-            &execute(&home, &json!({"operation":"workspace.list"})).unwrap()
-        ).unwrap();
+        let list: Value =
+            serde_json::from_str(&execute(&home, &json!({"operation":"workspace.list"})).unwrap())
+                .unwrap();
         assert_eq!(list["files"], json!(["sample.md"]));
         let read: Value = serde_json::from_str(
-            &execute(&home, &json!({"operation":"workspace.read","path":"sample.md"})).unwrap()
-        ).unwrap();
+            &execute(
+                &home,
+                &json!({"operation":"workspace.read","path":"sample.md"}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
         assert_eq!(read["utf8_text"], "hello");
 
         let transfer = state.join("chat-transfer");
         fs::write(home.join("outside.md"), "secret").unwrap();
         std::os::unix::fs::symlink(home.join("outside.md"), transfer.join("private.md")).unwrap();
         assert!(execute(&home, &json!({"operation":"workspace.list"})).is_err());
-        assert!(execute(&home, &json!({"operation":"workspace.read","path":"private.md"})).is_err());
+        assert!(execute(
+            &home,
+            &json!({"operation":"workspace.read","path":"private.md"})
+        )
+        .is_err());
         fs::remove_file(transfer.join("private.md")).unwrap();
-        assert!(execute(&home, &json!({"operation":"workspace.remove","path":"sample.md"})).is_ok());
-        assert!(execute(&home, &json!({"operation":"workspace.read","path":"sample.md"})).is_err());
+        assert!(execute(
+            &home,
+            &json!({"operation":"workspace.remove","path":"sample.md"})
+        )
+        .is_ok());
+        assert!(execute(
+            &home,
+            &json!({"operation":"workspace.read","path":"sample.md"})
+        )
+        .is_err());
         fs::remove_dir_all(home).unwrap();
     }
 
