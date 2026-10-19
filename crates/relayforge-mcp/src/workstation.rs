@@ -247,7 +247,10 @@ mod tests {
             now - 3
         );
         assert_eq!(poll_age_seconds(&input, now), Some(3));
-        let fractional = format!(r#"{{"result":"ok","control_plane_poll":{{"value":{}.25}}}}"#, now - 3);
+        let fractional = format!(
+            r#"{{"result":"ok","control_plane_poll":{{"value":{}.25}}}}"#,
+            now - 3
+        );
         assert_eq!(poll_age_seconds(&fractional, now), Some(3));
         assert_eq!(poll_age_seconds(&input, now - 86400), None);
         assert_eq!(
