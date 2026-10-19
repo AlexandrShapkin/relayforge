@@ -337,7 +337,19 @@ fn worker_binary() -> Result<PathBuf, ()> {
     if !home.is_absolute() || home.as_os_str().len() > 256 {
         return Err(());
     }
-    Ok(home.join("Projects/relayforge/target/release/relayforge-mcp"))
+    let installed = home.join("Projects/relayforge/target/release/relayforge-mcp");
+    if installed.is_file() {
+        return Ok(installed);
+    }
+    // CI smoke tests run from a disposable checkout without the fixed
+    // ThinkPad home layout. This fallback cannot select arbitrary binaries:
+    // only the already running RelayForge executable is permitted.
+    let current = std::env::current_exe().map_err(|_| ())?;
+    if current.file_name().is_some_and(|name| name == "relayforge-mcp") {
+        Ok(current)
+    } else {
+        Err(())
+    }
 }
 
 fn worker_reply(input: &Value) -> Result<Value, ()> {
