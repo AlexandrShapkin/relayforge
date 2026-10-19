@@ -105,5 +105,11 @@ and service completion have been observed, and whether the last exit
 succeeded. No journals, unit contents, environment, paths or secrets
 are returned. A green result is `verified_last_run`.
 
+A green result is only `verified_last_run` when the last timer trigger and
+the matching successful service completion are both no older than 20 minutes.
+An older completed run is `last_run_stale`; malformed or unparseable timestamps
+are not accepted as green. The timestamp comparison uses bounded UTC systemd
+metadata and never reads journal entries or private logs.
+
 This is evidence of a clean **recent systemd run**, not a successful
 simulated failure-recovery test or a true external break-glass channel.
