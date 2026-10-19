@@ -46,3 +46,5 @@ pub mod workstation_jobs;
 pub mod workstation_dependency;
 
 pub mod workstation_retire;
+
+pub mod workstation_recovery;
