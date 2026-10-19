@@ -183,11 +183,10 @@ fn tunnel_snapshot(home: &str) -> Value {
 }
 
 fn classify(repo: &Value, tunnel: &Value) -> &'static str {
-    let repo_ok =
-        repo["present"] == true
-            && repo["on_main"] == true
-            && repo["tracked_clean"] == true
-            && repo["untracked_clean"] == true;
+    let repo_ok = repo["present"] == true
+        && repo["on_main"] == true
+        && repo["tracked_clean"] == true
+        && repo["untracked_clean"] == true;
     let tunnel_ok = tunnel["service_active"] == true && tunnel["authenticated_poll_recent"] == true;
     if repo_ok && tunnel_ok {
         "healthy"
@@ -311,7 +310,8 @@ mod tests {
 
     #[test]
     fn status_fails_closed_for_missing_evidence() {
-        let valid_repo = json!({"present":true,"on_main":true,"tracked_clean":true,"untracked_clean":true});
+        let valid_repo =
+            json!({"present":true,"on_main":true,"tracked_clean":true,"untracked_clean":true});
         let valid_tunnel = json!({"service_active":true,"authenticated_poll_recent":true});
         assert_eq!(classify(&valid_repo, &valid_tunnel), "healthy");
         assert_eq!(
@@ -324,11 +324,17 @@ mod tests {
         );
         assert_eq!(classify(&valid_repo, &json!({})), "unverified");
         assert_eq!(
-            classify(&json!({"present":true,"on_main":true,"tracked_clean":true}), &valid_tunnel),
+            classify(
+                &json!({"present":true,"on_main":true,"tracked_clean":true}),
+                &valid_tunnel
+            ),
             "unverified"
         );
         assert_eq!(
-            classify(&json!({"present":true,"on_main":true,"tracked_clean":true,"untracked_clean":false}), &valid_tunnel),
+            classify(
+                &json!({"present":true,"on_main":true,"tracked_clean":true,"untracked_clean":false}),
+                &valid_tunnel
+            ),
             "unverified"
         );
         assert_eq!(
