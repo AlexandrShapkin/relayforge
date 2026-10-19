@@ -260,10 +260,22 @@ fn bounded_task_inventory(output: &str) -> Result<Value, String> {
         let id = tokens[position].strip_suffix(".service").unwrap_or("");
         let active = tokens[position + 2];
         let sub = tokens[position + 3];
-        if !matches!(active, "active" | "activating" | "inactive" | "failed" | "deactivating")
-            || !matches!(sub, "running" | "start" | "dead" | "exited" | "failed" | "auto-restart"
-                | "waiting" | "stop-sigterm" | "stop" | "condition")
-        {
+        if !matches!(
+            active,
+            "active" | "activating" | "inactive" | "failed" | "deactivating"
+        ) || !matches!(
+            sub,
+            "running"
+                | "start"
+                | "dead"
+                | "exited"
+                | "failed"
+                | "auto-restart"
+                | "waiting"
+                | "stop-sigterm"
+                | "stop"
+                | "condition"
+        ) {
             continue;
         }
         tasks.push(json!({"task_id":id, "active":active, "sub":sub}));
@@ -508,8 +520,8 @@ pub fn execute(args: &Value) -> Result<String, String> {
             if !output.status.success() {
                 return Err("task inventory unavailable".into());
             }
-            let text = String::from_utf8(output.stdout)
-                .map_err(|_| "task inventory encoding invalid")?;
+            let text =
+                String::from_utf8(output.stdout).map_err(|_| "task inventory encoding invalid")?;
             Ok(bounded_task_inventory(&text)?.to_string())
         }
         "tunnel.inspect" if obj.len() == 1 => {
@@ -531,7 +543,8 @@ pub fn execute(args: &Value) -> Result<String, String> {
                 "authenticated_poll_recent":recent,
                 "last_successful_poll_age_seconds":age,
                 "api_revision":2
-            }).to_string())
+            })
+            .to_string())
         }
         "process.list" if obj.len() == 1 => {
             text_output(command("ps", &["-eo", "pid=,comm=,etime=,rss="], 8)?)
