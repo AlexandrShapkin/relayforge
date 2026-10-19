@@ -24,8 +24,34 @@ git diff --quiet HEAD -- || { echo "Tracked checkout is dirty" >&2; exit 5; }
 [[ -x "$binary" && -x "$client" ]] || { echo "Required executable missing" >&2; exit 6; }
 [[ -d "$state" && ! -L "$state" ]] || { echo "Private state unavailable" >&2; exit 7; }
 
-# Save the last known working legacy MCP before Cargo replaces the file.
-install -m 700 "$binary" "$backup"
+# A prior build may already have replaced the release file. Preserve the
+# *running legacy tunnel MCP executable*, not the current on-disk build.
+# /proc/PID/exe still references the mapped legacy image after replacement.
+[[ ! -e "$known_good" ]] || {
+    echo "Hot parent was already activated; refusing to overwrite rollback" >&2
+    exit 9
+}
+parent_pid=""
+while IFS= read -r pid; do
+    if [[ -r "/proc/$pid/cmdline" ]] &&
+       tr '\0' '\n' < "/proc/$pid/cmdline" | grep -Fxq -- "--readonly-stdio"; then
+        [[ -z "$parent_pid" ]] || {
+            echo "Ambiguous active tunnel MCP processes" >&2
+            exit 10
+        }
+        parent_pid="$pid"
+    fi
+done < <(pgrep -u "$(id -u)" -x relayforge-mcp || true)
+[[ -n "$parent_pid" && -r "/proc/$parent_pid/exe" ]] || {
+    echo "Cannot locate the mapped legacy tunnel MCP binary" >&2
+    exit 11
+}
+install -m 700 "/proc/$parent_pid/exe" "$backup.pending"
+mv -f "$backup.pending" "$backup"
+# The backup must still behave as a restricted MCP adapter.
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' |
+    timeout 20s "$backup" --readonly-stdio |
+    python3 -c 'import json,sys; d=json.load(sys.stdin); assert any(t["name"]=="relayforge_workstation_develop" for t in d["result"]["tools"])'
 restarted=0
 rollback() {
     echo "Activation failed: attempting to restore the previous restricted MCP." >&2
