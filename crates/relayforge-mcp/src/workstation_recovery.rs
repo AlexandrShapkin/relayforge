@@ -150,9 +150,15 @@ mod tests {
         let (mut timer, service) = sample();
         timer.insert("NextElapseUSecRealtime".into(), "n/a".into());
         timer.insert("NextElapseUSecMonotonic".into(), "2h 17min".into());
-        assert_eq!(summarize(&timer, &service, true)["next_run_scheduled"], true);
+        assert_eq!(
+            summarize(&timer, &service, true)["next_run_scheduled"],
+            true
+        );
         timer.insert("NextElapseUSecMonotonic".into(), "n/a".into());
-        assert_eq!(summarize(&timer, &service, true)["next_run_scheduled"], false);
+        assert_eq!(
+            summarize(&timer, &service, true)["next_run_scheduled"],
+            false
+        );
     }
 
     #[test]
