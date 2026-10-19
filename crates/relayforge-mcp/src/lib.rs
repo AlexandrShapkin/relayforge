@@ -44,3 +44,5 @@ pub mod workstation_transfer;
 pub mod workstation_jobs;
 
 pub mod workstation_dependency;
+
+pub mod workstation_retire;
