@@ -196,18 +196,6 @@ const RU0_SCHEDULED_JOBS: &[(&str, &str, u64)] = &[
         240,
     ),
 ];
-const RU1_SCHEDULED_JOBS: &[(&str, &str, u64)] = &[
-    (
-        "assistant-hub-backup.timer",
-        "assistant-hub-backup.service",
-        48 * 60,
-    ),
-    (
-        "assistant-hub-monitor.timer",
-        "assistant-hub-monitor.service",
-        120,
-    ),
-];
 
 fn user_job_properties(
     unit: &str,
@@ -321,7 +309,6 @@ fn user_jobs_summary() -> io::Result<Value> {
     let hostname = read_short("/etc/hostname", 128)?;
     let jobs: &[(&str, &str, u64)] = match hostname.as_str() {
         "ru0.alexandrshapkin.ru" => RU0_SCHEDULED_JOBS,
-        "ru1.alexandrshapkin.ru" => RU1_SCHEDULED_JOBS,
         "srv0" => &[],
         _ => {
             return Err(io::Error::new(
@@ -465,87 +452,6 @@ fn restart_probe() -> io::Result<Value> {
     Ok(json!({"restarted":true,"unit":UNIT}))
 }
 
-/// Run exactly one noncritical ru1 health-snapshot job when an already
-/// approved MCP change reaches the agent. No user-selected unit, host,
-/// shell or arbitrary service operation may reach this path.
-fn run_ru1_monitor() -> io::Result<Value> {
-    const HOSTNAME: &str = "ru1.alexandrshapkin.ru";
-    const UNIT: &str = "assistant-hub-monitor.service";
-    if read_short("/etc/hostname", 128)?.trim() != HOSTNAME {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "monitor is permitted only on ru1",
-        ));
-    }
-
-    fn properties(unit: &str) -> io::Result<std::collections::HashMap<String, String>> {
-        let output = Command::new("systemctl")
-            .args([
-                "--user",
-                "show",
-                "--no-pager",
-                "--property=Id,LoadState,Type,ActiveState,Result,ExecMainStatus",
-                "--",
-                unit,
-            ])
-            .stdin(Stdio::null())
-            .output()?;
-        if !output.status.success() {
-            return Err(io::Error::other("user service preflight unavailable"));
-        }
-        let mut values = std::collections::HashMap::new();
-        for (name, value) in String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter_map(|line| line.split_once('='))
-        {
-            if [
-                "Id",
-                "LoadState",
-                "Type",
-                "ActiveState",
-                "Result",
-                "ExecMainStatus",
-            ]
-            .contains(&name)
-            {
-                values.insert(name.to_owned(), value.to_owned());
-            }
-        }
-        Ok(values)
-    }
-
-    let before = properties(UNIT)?;
-    if before.get("Id").map(String::as_str) != Some(UNIT)
-        || before.get("LoadState").map(String::as_str) != Some("loaded")
-        || before.get("Type").map(String::as_str) != Some("oneshot")
-        || before.get("ActiveState").map(String::as_str) != Some("inactive")
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "monitor preflight denied",
-        ));
-    }
-
-    let result = Command::new("systemctl")
-        .args(["--user", "start", "--", UNIT])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-    if !result.success() {
-        return Err(io::Error::other("monitor job did not complete"));
-    }
-    let after = properties(UNIT)?;
-    if after.get("Id").map(String::as_str) != Some(UNIT)
-        || after.get("Result").map(String::as_str) != Some("success")
-        || after.get("ExecMainStatus").map(String::as_str) != Some("0")
-    {
-        return Err(io::Error::other("monitor job did not report success"));
-    }
-    Ok(json!({"started":true,"host":"ru1","unit":UNIT,
-        "scope":"user","result":"success"}))
-}
-
 pub fn handle(request: &Value) -> Value {
     let Some(obj) = request.as_object() else {
         return err("invalid request");
@@ -565,7 +471,6 @@ pub fn handle(request: &Value) -> Value {
             }
         }
         Some("probe.restart") if obj.len() == 2 => restart_probe(),
-        Some("monitor.run") if obj.len() == 2 => run_ru1_monitor(),
         Some("process.top") if obj.len() == 2 => top_processes(),
         Some("file.list") if obj.len() == 2 => files::list_files(),
         Some("file.read") if obj.len() == 3 => match obj.get("path").and_then(Value::as_str) {
@@ -752,12 +657,8 @@ mod tests {
     }
 
     #[test]
-    fn monitor_cannot_run_on_other_device() {
-        // Unit testing is done on the developer host, not ru1: hostname
-        // restriction must fail before any systemctl start invocation.
-        if read_short("/etc/hostname", 128).unwrap_or_default() != "ru1.alexandrshapkin.ru" {
-            assert!(run_ru1_monitor().is_err());
-        }
+    fn retired_monitor_action_is_denied() {
+        assert_eq!(handle(&json!({"version":1,"operation":"monitor.run"}))["ok"],false);
     }
 
     #[test]
