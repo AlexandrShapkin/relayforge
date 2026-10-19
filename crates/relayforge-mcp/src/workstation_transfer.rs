@@ -207,6 +207,44 @@ mod tests {
         }
     }
     #[test]
+    fn private_transfer_round_trip_and_symlink_denial() {
+        let suffix = format!(
+            "relayforge-transfer-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        );
+        let home = std::env::temp_dir().join(suffix);
+        let state = home.join(".local/state/relayforge");
+        fs::create_dir_all(&state).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let create = json!({"operation":"workspace.put","path":"sample.md","content":"hello"});
+        let receipt: Value = serde_json::from_str(&execute(&home, &create).unwrap()).unwrap();
+        assert_eq!(receipt["created"], true);
+        assert!(execute(&home, &create).is_err()); // no overwrite
+
+        let list: Value = serde_json::from_str(
+            &execute(&home, &json!({"operation":"workspace.list"})).unwrap()
+        ).unwrap();
+        assert_eq!(list["files"], json!(["sample.md"]));
+        let read: Value = serde_json::from_str(
+            &execute(&home, &json!({"operation":"workspace.read","path":"sample.md"})).unwrap()
+        ).unwrap();
+        assert_eq!(read["utf8_text"], "hello");
+
+        let transfer = state.join("chat-transfer");
+        fs::write(home.join("outside.md"), "secret").unwrap();
+        std::os::unix::fs::symlink(home.join("outside.md"), transfer.join("private.md")).unwrap();
+        assert!(execute(&home, &json!({"operation":"workspace.list"})).is_err());
+        assert!(execute(&home, &json!({"operation":"workspace.read","path":"private.md"})).is_err());
+        fs::remove_file(transfer.join("private.md")).unwrap();
+        assert!(execute(&home, &json!({"operation":"workspace.remove","path":"sample.md"})).is_ok());
+        assert!(execute(&home, &json!({"operation":"workspace.read","path":"sample.md"})).is_err());
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
     fn rejects_unrecognized_arguments_and_operations() {
         let h = Path::new("/definitely-not-existing");
         assert!(execute(h, &json!({"operation":"workspace.exec"})).is_err());
