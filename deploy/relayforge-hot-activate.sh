@@ -55,7 +55,11 @@ for attempt in {1..30}; do
     fi
     sleep 3
 done
-[[ "$healthy" == 1 ]] || { echo "No fresh authenticated poll after restart" >&2; exit 8; }
+if [[ "$healthy" != 1 ]]; then
+    echo "No fresh authenticated poll after restart" >&2
+    rollback
+    exit 8
+fi
 
 install -m 700 "$binary" "$known_good"
 trap - ERR
