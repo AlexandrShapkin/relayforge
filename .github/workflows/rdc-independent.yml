@@ -26,6 +26,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      - name: Install pinned just for recipe regression tests
+        run: |
+          cargo install just --version 1.40.0 --locked --root "$RUNNER_TEMP/just" --target-dir "$RUNNER_TEMP/just-build"
+          echo "$RUNNER_TEMP/just/bin" >> "$GITHUB_PATH"
       - name: Validate recovery bootstrap syntax
         run: bash -n deploy/relayforge-hot-activate.sh
       - name: Verify independent recovery guard without hardware
