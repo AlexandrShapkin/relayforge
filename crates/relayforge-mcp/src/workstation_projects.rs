@@ -85,12 +85,19 @@ fn project_root(home: &Path, project: &str) -> Option<Repository> {
     if !trusted_directory(&metadata) {
         return None;
     }
+    // A present redirect is refused. If one appears later it has no effect:
+    // inventory never asks Git to interpret metadata or follows commondir.
+    if !fs::symlink_metadata(fd_path(&metadata).join("commondir"))
+        .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+    {
+        return None;
+    }
     Some(Repository { root, metadata })
 }
 
 fn diagnostic_command(program: &str, args: &[&str]) -> Result<Output, String> {
     // Do not inherit GIT_DIR, config injection, PATH, pager or credential helpers.
-    // No optional locks: even git status must not refresh the on-disk index.
+    // Used only for fixed df probes; no Git command is executed by inventory.
     let mut child = Command::new("/usr/bin/timeout")
         .args(["-k", "2s", "12s", program])
         .args(args)
@@ -118,103 +125,191 @@ fn diagnostic_command(program: &str, args: &[&str]) -> Result<Output, String> {
     })
 }
 
-fn git(repo: &Repository, args: &[&str]) -> Result<Output, String> {
-    let root = fd_path(&repo.root);
-    let metadata = fd_path(&repo.metadata);
-    let mut fixed = vec![
-        "--no-pager",
-        "--no-optional-locks",
-        "--git-dir",
-        metadata.to_str().ok_or("invalid metadata")?,
-        "--work-tree",
-        root.to_str().ok_or("invalid root")?,
-        "-C",
-        root.to_str().ok_or("invalid root")?,
-        "-c",
-        "core.hooksPath=/dev/null",
-        "-c",
-        "core.fsmonitor=false",
-        "-c",
-        "core.untrackedCache=false",
-        "-c",
-        "submodule.recurse=false",
-    ];
-    fixed.extend_from_slice(args);
-    diagnostic_command("/usr/bin/git", &fixed)
+// Git is deliberately not invoked for inventory. Even nominally read-only Git
+// commands interpret mutable config, commondir, ref symlinks and object stores.
+// These bounded reads never interpret config, alternates, gitdir or commondir.
+fn metadata_text(root: &File, relative: &str) -> Option<String> {
+    let mut directory = root.try_clone().ok()?;
+    let mut parts = relative.split('/').peekable();
+    while let Some(name) = parts.next() {
+        if name.is_empty() || name == "." || name == ".." {
+            return None;
+        }
+        let path = fd_path(&directory).join(name);
+        if parts.peek().is_some() {
+            directory = open_directory(&path)?;
+            if !trusted_directory(&directory) {
+                return None;
+            }
+        } else {
+            // NONBLOCK avoids waiting on a substituted FIFO before fstat.
+            let file = OpenOptions::new()
+                .read(true)
+                .custom_flags(0x20000 | 0x800)
+                .open(path)
+                .ok()?;
+            let meta = file.metadata().ok()?;
+            if !meta.is_file()
+                || meta.nlink() != 1
+                || meta.uid() != unsafe_uid()
+                || meta.permissions().mode() & 0o022 != 0
+                || meta.len() > 65536
+            {
+                return None;
+            }
+            return String::from_utf8(read_capped(file).ok()?).ok();
+        }
+    }
+    None
 }
 
-fn tracked_clean(repo: &Repository) -> Option<bool> {
-    // Even status can execute clean/process filters while refreshing stat data.
-    // Never probe file contents in a checkout configured with executable filters
-    // or lazy object fetching. Config values/stderr are never returned.
-    let helpers = git(
-        repo,
-        &[
-            "config",
-            "--get-regexp",
-            r"^(filter\..*\.(clean|smudge|process)|extensions\.partialclone|remote\..*\.promisor)$",
-        ],
-    )
-    .ok()?;
-    if helpers.status.code() != Some(1) {
-        return None;
-    }
-    git_text(
-        repo,
-        &[
-            "status",
-            "--porcelain=v1",
-            "--untracked-files=no",
-            "--ignore-submodules=all",
-        ],
-    )
-    .map(|s| s.is_empty())
+fn sha(value: &str) -> Option<String> {
+    let value = value.trim();
+    (value.len() == 40 && value.bytes().all(|b| b.is_ascii_hexdigit())).then(|| value.to_owned())
 }
 
-fn git_text(repo: &Repository, args: &[&str]) -> Option<String> {
-    let output = git(repo, args).ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8(output.stdout).ok()
+fn ref_name(value: &str) -> bool {
+    value.starts_with("refs/")
+        && value.len() <= 192
+        && value.split('/').all(|part| {
+            !part.is_empty()
+                && !part.starts_with('.')
+                && !part.ends_with('.')
+                && !part.ends_with(".lock")
+        })
+        && !value.contains("..")
+        && !value.contains("@{")
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"/_-.".contains(&b))
 }
 
-fn git_count(repo: &Repository, args: &[&str], delim: u8) -> Option<usize> {
-    let output = git(repo, args).ok()?;
-    if !output.status.success() {
-        return None;
+fn packed_refs(repo: &Repository) -> Option<std::collections::BTreeMap<String, String>> {
+    let path = fd_path(&repo.metadata).join("packed-refs");
+    if fs::symlink_metadata(path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
+        return Some(std::collections::BTreeMap::new());
     }
-    Some(
-        output
-            .stdout
-            .split(|b| *b == delim)
-            .filter(|part| !part.is_empty())
-            .count(),
-    )
+    let text = metadata_text(&repo.metadata, "packed-refs")?;
+    let mut refs = std::collections::BTreeMap::new();
+    for line in text
+        .lines()
+        .filter(|s| !s.starts_with('#') && !s.starts_with('^'))
+    {
+        let (value, name) = line.split_once(' ')?;
+        if !ref_name(name) || refs.insert(name.to_owned(), sha(value)?).is_some() {
+            return None;
+        }
+    }
+    Some(refs)
 }
 
 fn head_sha(repo: &Repository, reference: &str) -> Option<String> {
-    let sha = git_text(repo, &["rev-parse", "--verify", reference])?;
-    let sha = sha.trim();
-    if sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()) {
-        Some(sha.to_owned())
-    } else {
-        None
+    let text = metadata_text(&repo.metadata, reference);
+    if let Some(value) = text.as_deref().and_then(sha) {
+        return Some(value);
     }
+    if reference == "HEAD" {
+        let name = text.as_deref()?.trim().strip_prefix("ref: ")?;
+        if !ref_name(name) {
+            return None;
+        }
+        return head_sha(repo, name);
+    }
+    // Do not follow symbolic-ref chains or symlinks from repository metadata.
+    if !ref_name(reference) {
+        return None;
+    }
+    packed_refs(repo)?.get(reference).cloned()
+}
+
+fn branch_count(repo: &Repository) -> Option<usize> {
+    fn visit(
+        dir: &File,
+        prefix: &str,
+        names: &mut std::collections::BTreeSet<String>,
+        budget: &mut usize,
+        depth: usize,
+    ) -> Option<()> {
+        if depth > 16 {
+            return None;
+        }
+        for item in fs::read_dir(fd_path(dir)).ok()? {
+            if *budget == 0 {
+                return None;
+            }
+            *budget -= 1;
+            let item = item.ok()?;
+            let name = item.file_name().into_string().ok()?;
+            let relative = format!("{prefix}/{name}");
+            if !ref_name(&relative) {
+                return None;
+            }
+            let meta = item.file_type().ok()?;
+            if meta.is_dir() {
+                let child = open_directory(&fd_path(dir).join(name))?;
+                if !trusted_directory(&child) {
+                    return None;
+                }
+                visit(&child, &relative, names, budget, depth + 1)?;
+            } else if meta.is_file() {
+                names.insert(relative);
+            } else {
+                return None;
+            }
+        }
+        Some(())
+    }
+    let mut names: std::collections::BTreeSet<_> = packed_refs(repo)?
+        .into_keys()
+        .filter(|name| name.starts_with("refs/heads/"))
+        .collect();
+    let refs = open_directory(&fd_path(&repo.metadata).join("refs"))?;
+    if !trusted_directory(&refs) {
+        return None;
+    }
+    let heads = open_directory(&fd_path(&refs).join("heads"))?;
+    if !trusted_directory(&heads) {
+        return None;
+    }
+    visit(&heads, "refs/heads", &mut names, &mut 1024, 0)?;
+    Some(names.len())
 }
 
 fn worktree_counts(repo: &Repository) -> Value {
-    let Some(text) = git_text(repo, &["worktree", "list", "--porcelain"]) else {
-        return json!({"status":"unverified"});
-    };
-    // Never return worktree absolute paths or names: they can be private.
-    json!({
-        "status":"observed",
-        "count":text.lines().filter(|line| line.starts_with("worktree ")).count(),
-        "locked":text.lines().filter(|line| *line == "locked" || line.starts_with("locked ")).count(),
-        "prunable":text.lines().filter(|line| *line == "prunable" || line.starts_with("prunable ")).count(),
-        "cleanup_authorized":false
-    })
+    let path = fd_path(&repo.metadata).join("worktrees");
+    if fs::symlink_metadata(&path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
+        return json!({"status":"observed","count":1,"locked":0,"prunable":Value::Null,"cleanup_authorized":false});
+    }
+    let observed = (|| {
+        let directory = open_directory(&path)?;
+        if !trusted_directory(&directory) {
+            return None;
+        }
+        let mut count = 1;
+        let mut locked = 0;
+        for item in fs::read_dir(fd_path(&directory)).ok()?.take(1025) {
+            if count > 1024 {
+                return None;
+            }
+            let item = item.ok()?;
+            let child = open_directory(&fd_path(&directory).join(item.file_name()))?;
+            if !trusted_directory(&child) {
+                return None;
+            }
+            // Never follow gitdir files or inspect registered checkout paths.
+            count += 1;
+            if fs::symlink_metadata(fd_path(&child).join("locked")).is_ok() {
+                locked += 1;
+            }
+        }
+        Some((count, locked))
+    })();
+    match observed {
+        Some((count, locked)) => {
+            json!({"status":"observed","count":count,"locked":locked,"prunable":Value::Null,"cleanup_authorized":false})
+        }
+        None => json!({"status":"unverified","cleanup_authorized":false}),
+    }
 }
 
 fn free_kib(root: &Path) -> Option<u64> {
@@ -275,29 +370,23 @@ fn one(home: &Path, project: &str) -> Value {
     };
     let head = head_sha(&root, "HEAD");
     let local_tracking = head_sha(&root, "refs/remotes/origin/main");
-    let branch = git_text(&root, &["symbolic-ref", "--quiet", "--short", "HEAD"])
-        .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty());
-    let tracked_clean = tracked_clean(&root);
-    let untracked_count = git_count(
-        &root,
-        &["ls-files", "--others", "--exclude-standard", "-z"],
-        0,
-    );
-    let branch_count = git_count(
-        &root,
-        &["for-each-ref", "--format=%(refname)", "refs/heads"],
-        b'\n',
-    );
+    let branch = metadata_text(&root.metadata, "HEAD")
+        .and_then(|text| {
+            text.trim()
+                .strip_prefix("ref: refs/heads/")
+                .map(str::to_owned)
+        })
+        .filter(|name| ref_name(&format!("refs/heads/{name}")));
+    let branch_count = branch_count(&root);
     json!({
         "project":project,
         "status":if head.is_some() {"observed"} else {"unverified"},
         "head":head,
         "branch":branch,
         "on_main":branch.as_deref()==Some("main"),
-        "tracked_clean":tracked_clean,
-        "tracked_clean_note":"null means unverified, including executable filters or partial-clone configuration; no helpers are authorized",
-        "untracked_count":untracked_count,
+        "tracked_clean":Value::Null,
+        "tracked_clean_note":"unverified: inventory never invokes Git status or reads working-file contents",
+        "untracked_count":Value::Null,
         "local_branch_count":branch_count,
         "origin_main_cached":local_tracking,
         // Remote tracking refs can be stale. A live GitHub main read
@@ -360,6 +449,225 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn external_commondir_is_denied_and_cannot_redirect_pinned_reads() {
+        let f = Fixture::new();
+        f.native_git(&["init", "--initial-branch=main"]);
+        fs::write(f.root().join("tracked"), b"local").unwrap();
+        f.native_git(&["add", "."]);
+        f.native_git(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-m",
+            "local",
+        ]);
+        let external = Fixture::new();
+        external.native_git(&["init", "--initial-branch=private-external-branch"]);
+        fs::write(external.root().join("tracked"), b"external").unwrap();
+        external.native_git(&["add", "."]);
+        external.native_git(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-m",
+            "external",
+        ]);
+        let pinned = project_root(&f.0, "relayforge").unwrap();
+        let local_sha = head_sha(&pinned, "HEAD").unwrap();
+        let external_sha = fs::read_to_string(
+            external
+                .root()
+                .join(".git/refs/heads/private-external-branch"),
+        )
+        .unwrap();
+        fs::write(
+            f.root().join(".git/commondir"),
+            external.root().join(".git").to_str().unwrap(),
+        )
+        .unwrap();
+        let out = one(&f.0, "relayforge");
+        assert_eq!(out["status"], "unavailable");
+        for private in [
+            "private-external-branch",
+            external_sha.trim(),
+            external.root().to_str().unwrap(),
+        ] {
+            assert!(!out.to_string().contains(private));
+        }
+        // A redirect appearing after validation cannot affect direct fd reads.
+        assert_eq!(
+            head_sha(&pinned, "HEAD").as_deref(),
+            Some(local_sha.as_str())
+        );
+    }
+
+    #[test]
+    fn metadata_symlinks_and_config_object_redirects_are_not_followed() {
+        let f = Fixture::new();
+        f.native_git(&["init", "--initial-branch=main"]);
+        let external = f.0.join("external-metadata");
+        fs::create_dir(&external).unwrap();
+        fs::write(
+            external.join("HEAD"),
+            b"ref: refs/heads/private-external-branch\n",
+        )
+        .unwrap();
+        let secret_sha = "1234567890123456789012345678901234567890";
+        fs::write(external.join("ref"), secret_sha).unwrap();
+        fs::write(
+            external.join("packed-refs"),
+            format!("{secret_sha} refs/heads/main\n"),
+        )
+        .unwrap();
+        let metadata = f.root().join(".git");
+        fs::remove_file(metadata.join("HEAD")).unwrap();
+        symlink(external.join("HEAD"), metadata.join("HEAD")).unwrap();
+        let out = one(&f.0, "relayforge");
+        assert!(out["head"].is_null() && out["branch"].is_null());
+        fs::remove_file(metadata.join("HEAD")).unwrap();
+        fs::write(metadata.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
+        symlink(external.join("ref"), metadata.join("refs/heads/main")).unwrap();
+        symlink(external.join("packed-refs"), metadata.join("packed-refs")).unwrap();
+        let out = one(&f.0, "relayforge");
+        assert!(out["head"].is_null());
+        assert!(!out.to_string().contains(secret_sha));
+        fs::remove_file(metadata.join("refs/heads/main")).unwrap();
+        fs::remove_file(metadata.join("packed-refs")).unwrap();
+        fs::hard_link(external.join("ref"), metadata.join("refs/heads/main")).unwrap();
+        assert!(one(&f.0, "relayforge")["head"].is_null());
+        fs::remove_file(metadata.join("refs/heads/main")).unwrap();
+        // Internal config/objects are never consulted, even when they redirect.
+        fs::write(
+            metadata.join("config"),
+            format!("[include]\npath = {}\n", external.join("HEAD").display()),
+        )
+        .unwrap();
+        fs::create_dir_all(metadata.join("objects/info")).unwrap();
+        fs::write(
+            metadata.join("objects/info/alternates"),
+            external.to_str().unwrap(),
+        )
+        .unwrap();
+        let out = one(&f.0, "relayforge");
+        assert!(!out.to_string().contains("private-external-branch"));
+        assert!(!out.to_string().contains(external.to_str().unwrap()));
+    }
+
+    #[test]
+    fn concurrent_git_config_cannot_execute_filters_or_write_checkout_data() {
+        use std::sync::{
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            Arc, Barrier,
+        };
+        let f = Fixture::new();
+        f.native_git(&["init", "--initial-branch=main"]);
+        fs::write(f.root().join("tracked.txt"), b"same").unwrap();
+        fs::write(f.root().join(".gitattributes"), b"*.txt filter=probe\n").unwrap();
+        f.native_git(&["add", "."]);
+        f.native_git(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-m",
+            "fixture",
+        ]);
+        fs::write(f.root().join("untracked.txt"), b"unique evidence").unwrap();
+        fs::write(f.root().join("tracked.txt"), b"same").unwrap();
+        let index = f.root().join(".git/index");
+        let index_bytes = fs::read(&index).unwrap();
+        let index_mtime = fs::metadata(&index).unwrap().modified().unwrap();
+        let tracked_mtime = fs::metadata(f.root().join("tracked.txt"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        let config = f.root().join(".git/config");
+        let baseline = fs::read_to_string(&config).unwrap();
+        let marker = f.0.join("filter-executed");
+        let hostile = format!("{baseline}\n[filter \"probe\"]\nclean = touch {}; cat\nsmudge = touch {}; cat\nprocess = touch {}\n", marker.display(), marker.display(), marker.display());
+        let barrier = Arc::new(Barrier::new(2));
+        let stop = Arc::new(AtomicBool::new(false));
+        let changes = Arc::new(AtomicUsize::new(0));
+        let thread_barrier = barrier.clone();
+        let thread_stop = stop.clone();
+        let thread_changes = changes.clone();
+        let writer = thread::spawn(move || {
+            let replacement = config.with_file_name("review-config-next");
+            fs::write(&replacement, &hostile).unwrap();
+            fs::rename(&replacement, &config).unwrap();
+            thread_changes.fetch_add(1, Ordering::SeqCst);
+            thread_barrier.wait();
+            while !thread_stop.load(Ordering::SeqCst) {
+                for content in [&baseline, &hostile] {
+                    fs::write(&replacement, content).unwrap();
+                    fs::rename(&replacement, &config).unwrap();
+                    thread_changes.fetch_add(1, Ordering::SeqCst);
+                    thread::yield_now();
+                }
+            }
+        });
+        barrier.wait();
+        let snapshots: Vec<_> = (0..32).map(|_| one(&f.0, "relayforge")).collect();
+        stop.store(true, Ordering::SeqCst);
+        writer.join().unwrap();
+        assert!(changes.load(Ordering::SeqCst) > 1);
+        assert!(snapshots
+            .iter()
+            .all(|out| out["tracked_clean"].is_null() && out["status"] == "observed"));
+        assert!(!marker.exists());
+        assert_eq!(fs::read(&index).unwrap(), index_bytes);
+        assert_eq!(
+            fs::metadata(index).unwrap().modified().unwrap(),
+            index_mtime
+        );
+        assert_eq!(fs::read(f.root().join("tracked.txt")).unwrap(), b"same");
+        assert_eq!(
+            fs::metadata(f.root().join("tracked.txt"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            tracked_mtime
+        );
+        assert_eq!(
+            fs::read(f.root().join("untracked.txt")).unwrap(),
+            b"unique evidence"
+        );
+        assert_eq!(
+            fs::read(f.root().join(".gitattributes")).unwrap(),
+            b"*.txt filter=probe\n"
+        );
+    }
+
+    #[test]
+    fn loose_and_packed_ref_observations_remain_bounded_and_local() {
+        let f = Fixture::new();
+        f.native_git(&["init", "--initial-branch=main"]);
+        fs::write(f.root().join("tracked"), b"local").unwrap();
+        f.native_git(&["add", "."]);
+        f.native_git(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-m",
+            "fixture",
+        ]);
+        let before = one(&f.0, "relayforge");
+        f.native_git(&["pack-refs", "--all"]);
+        let after = one(&f.0, "relayforge");
+        assert_eq!(before["head"], after["head"]);
+        assert_eq!(after["local_branch_count"], 1);
+        let repo = project_root(&f.0, "relayforge").unwrap();
+        assert!(head_sha(&repo, "refs/../../outside").is_none());
     }
 
     #[test]
@@ -445,8 +753,8 @@ mod tests {
         let out = one(&f.0, "relayforge");
         assert_eq!(out["status"], "observed");
         assert_eq!(out["branch"], "main");
-        assert_eq!(out["tracked_clean"], true);
-        assert_eq!(out["untracked_count"], 1);
+        assert!(out["tracked_clean"].is_null());
+        assert!(out["untracked_count"].is_null());
         assert_eq!(out["local_branch_count"], 1);
         assert_eq!(out["worktrees"]["count"], 1);
         assert!(out["disk_available_kib"].as_u64().is_some());
@@ -502,10 +810,8 @@ mod tests {
         fs::create_dir_all(f.0.join("outside/target")).unwrap();
         symlink(f.0.join("outside"), f.root()).unwrap();
         assert_eq!(
-            git_text(&repo, &["symbolic-ref", "--short", "HEAD"])
-                .unwrap()
-                .trim(),
-            "main"
+            metadata_text(&repo.metadata, "HEAD").unwrap().trim(),
+            "ref: refs/heads/main"
         );
         assert_eq!(artifact_snapshot(&repo.root), json!([]));
         assert!(project_root(&f.0, "relayforge").is_none());
