@@ -455,3 +455,15 @@ systemd user timer is **not installed or activated by CI**. It requires
 the local operator to review and install on ThinkPad, then execute real
 fault-injection tests. It does not recover a powered-off or offline
 laptop and is not full remote break-glass access.
+
+## Host-local production user-service recovery (activation separate)
+
+The reviewable ru0-specific source, installer and offline tests for an
+independent user-service watchdog are described in
+[host recovery](host-recovery.md). It can request a bounded start for only
+allowlisted, enabled, inactive/failed user services on ru0, after local opt-in;
+it never restarts healthy units or enables remote service control.
+A green CI run is **not** activation or a real recovery test. The local
+operator must arrange independent provider console access, verify lingering,
+install and exercise the guard on ru0 before claiming availability without
+ThinkPad or RDC. Root/system services and srv0 still need separate handling.

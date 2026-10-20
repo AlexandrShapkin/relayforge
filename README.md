@@ -67,5 +67,7 @@ not replace real-device testing or an independent deployment review.
 Do not commit credentials, SSH keys, ADB authorizations, private data,
 archives or production runtime settings.
 
+See the [independent ru0 user-service recovery plan](docs/host-recovery.md) for the separate local-only watchdog (source ready; not yet activated on ru0).
+
 See [MCP clients](docs/mcp-clients.md) and the
 [remaining roadmap](docs/roadmap.md).

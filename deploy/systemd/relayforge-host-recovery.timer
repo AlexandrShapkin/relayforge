@@ -1,0 +1,13 @@
+[Unit]
+Description=Check fixed enabled ru0 user services without MCP or RDC
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=10min
+RandomizedDelaySec=20s
+AccuracySec=30s
+Unit=relayforge-host-recovery.service
+Persistent=false
+
+[Install]
+WantedBy=timers.target
