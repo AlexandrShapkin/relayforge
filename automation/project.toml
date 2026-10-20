@@ -1,0 +1,34 @@
+# Autonomous Development Contract v1 candidate.
+# Metadata only: no consumer, executor or authorization is enabled.
+schema_version = 1
+project_id = "relayforge"
+project_type = "rust-workspace"
+repository = "AlexandrShapkin/relayforge"
+
+[context]
+entrypoint = "AGENTS.md"
+architecture = "README.md"
+workflow = "docs/development-without-rdc.md"
+current_plan = "docs/roadmap.md"
+security = "docs/security.md"
+task_source = "github-issues"
+
+[verification]
+# Names denote project-owned profiles, NOT shell text for execution.
+profiles = ["rust-format", "rust-clippy", "rust-tests", "rust-release"]
+ci_workflows = [".github/workflows/tests.yml", ".github/workflows/rdc-independent.yml"]
+live_device_proof = "separate"
+
+[execution]
+enabled = false
+max_stage_seconds = 1200
+max_changed_files = 2
+max_changed_lines = 180
+checkpoint_mode = "external-private"
+auto_merge = false
+auto_deploy = false
+
+[change_policy]
+# Informational candidate areas, never a grant from Git-tracked text.
+candidate_paths = ["crates/", "docs/", "scripts/", "automation/", "AGENTS.md"]
+blocked_unattended_paths = ["deploy/", ".github/"]
