@@ -493,8 +493,11 @@ ownership/modes. Git and disk probes use fixed `/usr/bin` executables with
 an explicit environment allowlist, bounded output and timeouts. Git ignores
 system/global configuration, disables hooks, fsmonitor and submodule
 inspection, and disables optional locks so status cannot refresh the index.
+Lazy object fetching is disabled. Tracked cleanliness is left `null` when
+executable clean/smudge/process filters or partial-clone settings are configured:
+even `git status` can execute a clean filter when refreshing file stat data.
 The native check catalog is returned as text only. No command from a caller,
-repository config, Issue or artifact name is executed.
+repository filter configuration, Issue or artifact name is executed.
 
 The v9 inventory requires a Linux host with `/proc` descriptor access and
 ordinary owned checkout directories with a `.git` **directory**. A root

@@ -100,6 +100,7 @@ fn diagnostic_command(program: &str, args: &[&str]) -> Result<Output, String> {
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_NO_LAZY_FETCH", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -140,6 +141,34 @@ fn git(repo: &Repository, args: &[&str]) -> Result<Output, String> {
     ];
     fixed.extend_from_slice(args);
     diagnostic_command("/usr/bin/git", &fixed)
+}
+
+fn tracked_clean(repo: &Repository) -> Option<bool> {
+    // Even status can execute clean/process filters while refreshing stat data.
+    // Never probe file contents in a checkout configured with executable filters
+    // or lazy object fetching. Config values/stderr are never returned.
+    let helpers = git(
+        repo,
+        &[
+            "config",
+            "--get-regexp",
+            r"^(filter\..*\.(clean|smudge|process)|extensions\.partialclone|remote\..*\.promisor)$",
+        ],
+    )
+    .ok()?;
+    if helpers.status.code() != Some(1) {
+        return None;
+    }
+    git_text(
+        repo,
+        &[
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=no",
+            "--ignore-submodules=all",
+        ],
+    )
+    .map(|s| s.is_empty())
 }
 
 fn git_text(repo: &Repository, args: &[&str]) -> Option<String> {
@@ -249,16 +278,7 @@ fn one(home: &Path, project: &str) -> Value {
     let branch = git_text(&root, &["symbolic-ref", "--quiet", "--short", "HEAD"])
         .map(|s| s.trim().to_owned())
         .filter(|s| !s.is_empty());
-    let tracked_clean = git_text(
-        &root,
-        &[
-            "status",
-            "--porcelain=v1",
-            "--untracked-files=no",
-            "--ignore-submodules=all",
-        ],
-    )
-    .map(|s| s.is_empty());
+    let tracked_clean = tracked_clean(&root);
     let untracked_count = git_count(
         &root,
         &["ls-files", "--others", "--exclude-standard", "-z"],
@@ -276,6 +296,7 @@ fn one(home: &Path, project: &str) -> Value {
         "branch":branch,
         "on_main":branch.as_deref()==Some("main"),
         "tracked_clean":tracked_clean,
+        "tracked_clean_note":"null means unverified, including executable filters or partial-clone configuration; no helpers are authorized",
         "untracked_count":untracked_count,
         "local_branch_count":branch_count,
         "origin_main_cached":local_tracking,
@@ -439,6 +460,40 @@ mod tests {
     }
 
     #[test]
+    fn configured_clean_filters_never_execute_during_status() {
+        let f = Fixture::new();
+        f.native_git(&["init", "--initial-branch=main"]);
+        fs::write(f.root().join("tracked.txt"), b"same").unwrap();
+        fs::write(f.root().join(".gitattributes"), b"*.txt filter=probe\n").unwrap();
+        f.native_git(&["add", "."]);
+        f.native_git(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-m",
+            "fixture",
+        ]);
+        let marker = f.0.join("executed");
+        f.native_git(&[
+            "config",
+            "filter.probe.clean",
+            &format!("touch {}; cat", marker.display()),
+        ]);
+        // Same-size rewrites can make status hash content and invoke a filter.
+        fs::write(f.root().join("tracked.txt"), b"same").unwrap();
+        let out = one(&f.0, "relayforge");
+        assert_eq!(out["status"], "observed");
+        assert!(out["tracked_clean"].is_null());
+        assert!(!marker.exists());
+        assert!(!out.to_string().contains("touch"));
+        f.native_git(&["config", "--unset", "filter.probe.clean"]);
+        f.native_git(&["config", "remote.origin.promisor", "true"]);
+        assert!(one(&f.0, "relayforge")["tracked_clean"].is_null());
+    }
+
+    #[test]
     fn pinned_checkout_survives_path_replacement_without_following_it() {
         let f = Fixture::new();
         f.native_git(&["init", "--initial-branch=main"]);
@@ -483,7 +538,8 @@ mod tests {
                 "LC_ALL",
                 "GIT_CONFIG_NOSYSTEM",
                 "GIT_CONFIG_GLOBAL",
-                "GIT_OPTIONAL_LOCKS"
+                "GIT_OPTIONAL_LOCKS",
+                "GIT_NO_LAZY_FETCH"
             ])
         );
     }
