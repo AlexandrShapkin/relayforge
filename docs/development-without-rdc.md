@@ -455,3 +455,38 @@ systemd user timer is **not installed or activated by CI**. It requires
 the local operator to review and install on ThinkPad, then execute real
 fault-injection tests. It does not recover a powered-off or offline
 laptop and is not full remote break-glass access.
+
+
+## Four-project workstation inventory (proposed API revision 9; Issue #75)
+
+The source-only `projects.inventory` operation extends the existing
+`relayforge_workstation_develop` request schema. It accepts **only**
+`{"operation":"projects.inventory"}` and never accepts project names,
+arbitrary paths, commands, scripts or nested parameters from a caller.
+A compiled-in registry inspects these names under the same local
+`~/Projects/` directory only: `codex-smart`, `relayforge`,
+`assistant-hub`, `rustcraft`. It denies unsafe/non-owned/symlinked
+checkout roots. Missing projects remain `unavailable`, not healthy.
+
+For each present Git checkout the operation gathers a full HEAD SHA, branch,
+tracked cleanliness, untracked item count (without names), cached
+`origin/main` SHA, local branch count, bounded worktree summary, free disk
+space and presence of fixed familiar artifact-directory candidates. It
+returns only a **read-only** list of the repository's native verification
+entrypoints; **it does not run those commands**. A normal source-only task is
+still validated by native GitHub-hosted PR CI. No artifact or worktree is
+declared stale or authorized for cleanup based on name or age.
+
+**Important:** The local `origin/main` ref is not a fresh remote check. The
+operation explicitly returns `remote_main_verified=false`; compare against
+a fresh independently retrieved GitHub `main` SHA before deciding whether
+a local checkout is current. Do not assume an unavailable project is on this
+workstation. This v9 implementation remains source-only until independently
+reviewed, merged and separately installed under existing local operator
+authority. The currently deployed v8 cannot serve `projects.inventory`.
+
+Existing `repo.sync`, `build.start`, job sandbox, transfer, tunnel and
+recovery protections are unchanged. No automatic source writes, system
+services, deletion, remote sync or additional permissions are introduced.
+Run read-only inventory before considering any cleanup; assess each item
+individually using verified Git state and independent authorization.
