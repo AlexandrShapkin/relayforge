@@ -12,3 +12,5 @@ build/
 *.key
 
 /target/
+
+/.build/

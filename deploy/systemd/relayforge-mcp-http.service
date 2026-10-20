@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/Projects/relayforge/target/release/relayforge-mcp --http
+ExecStart=%h/.local/libexec/relayforge/runtime/current/relayforge-mcp --http
 Environment=RELAYFORGE_HTTP_TOKEN_FILE=%h/.config/relayforge/http-token
 Environment=RELAYFORGE_HTTP_PORT=8765
 Restart=on-failure

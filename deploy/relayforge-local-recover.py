@@ -7,11 +7,12 @@ credentials, run arbitrary commands, or accept a caller-controlled path.
 from __future__ import annotations
 
 import fcntl
+from runtime_artifact import verify_installed, opened, ArtifactError
+import hashlib
 import json
 import os
 from pathlib import Path
 import pwd
-import shutil
 import stat
 import subprocess
 import sys
@@ -63,7 +64,7 @@ class Recovery:
     def __init__(self, home: Path) -> None:
         self.home = home
         self.repo = home / "Projects/relayforge"
-        self.binary = self.repo / "target/release/relayforge-mcp"
+        self.binary = home / ".local/libexec/relayforge/runtime/current/relayforge-mcp"
         self.state = home / ".local/state/relayforge"
         self.baseline = self.state / "mcp-hot-last-good"
         self.lock = self.state / "development.lock"
@@ -82,25 +83,27 @@ class Recovery:
             return False
 
     def probe(self, binary: Path) -> bool:
-        if not regular_owned(binary, 128 * 1024 * 1024, executable=True):
-            return False
+        if binary != self.binary:
+            return False  # historical backups have no accepted provenance here
         try:
-            reply = fixed_command([str(binary), "--readonly-worker"],
-                                  timeout=8, input_text=PROBE)
-            if reply.returncode != 0 or len(reply.stdout) > 32 * 1024:
+            selected = verify_installed(binary)
+            # Check and execute one pinned, frozen inode; never re-open current.
+            with opened(selected) as (fd, meta):
+                if meta.st_mode & 0o222:
+                    return False
+                with os.fdopen(os.dup(fd), "rb") as file:
+                    if hashlib.file_digest(file, "sha256").hexdigest() != selected.parent.name[41:]:
+                        return False
+                reply = fixed_command([f"/proc/{os.getpid()}/fd/{fd}", "--readonly-worker"],
+                                      timeout=8, input_text=PROBE)
+            if reply.returncode or len(reply.stdout) > 32 * 1024:
                 return False
             value = json.loads(reply.stdout)
             tools = value.get("result", {}).get("tools", [])
-            return (
-                value.get("jsonrpc") == "2.0"
-                and value.get("id") == 1
-                and isinstance(tools, list)
-                and any(isinstance(t, dict)
-                        and t.get("name") == "relayforge_workstation_develop"
-                        for t in tools)
-            )
-        except (OSError, ValueError, subprocess.TimeoutExpired, TypeError,
-                AttributeError):
+            return (value.get("jsonrpc") == "2.0" and value.get("id") == 1
+                    and isinstance(tools, list)
+                    and any(isinstance(t, dict) and t.get("name") == "relayforge_workstation_develop" for t in tools))
+        except (ArtifactError, OSError, ValueError, TypeError, AttributeError, subprocess.TimeoutExpired):
             return False
 
     def unit_state(self) -> str:
@@ -152,47 +155,7 @@ class Recovery:
     def restore_binary(self) -> bool:
         if self.probe(self.binary):
             return False
-        if not self.probe(self.baseline):
-            raise RecoveryError("no_verified_known_good")
-        parent = self.binary.parent
-        try:
-            meta = parent.lstat()
-            if (not stat.S_ISDIR(meta.st_mode)
-                    or meta.st_uid != os.getuid()
-                    or (meta.st_mode & 0o022)):
-                raise RecoveryError("binary_directory_insecure")
-        except OSError as exc:
-            raise RecoveryError("binary_directory_unavailable") from exc
-        self.audit_event("restore_verified_worker")
-        temp = parent / ".relayforge-recovery-pending"
-        fd = None
-        try:
-            fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
-                         os.O_NOFOLLOW, 0o700)
-            with os.fdopen(fd, "wb") as out, open(self.baseline, "rb") as src:
-                fd = None
-                shutil.copyfileobj(src, out, length=64 * 1024)
-                out.flush()
-                os.fsync(out.fileno())
-            os.chmod(temp, 0o700)
-            if not self.probe(temp):
-                raise RecoveryError("copied_worker_invalid")
-            os.replace(temp, self.binary)
-            dirfd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(dirfd)
-            finally:
-                os.close(dirfd)
-            return True
-        except OSError as exc:
-            raise RecoveryError("restore_failed") from exc
-        finally:
-            if fd is not None:
-                os.close(fd)
-            try:
-                temp.unlink(missing_ok=True)
-            except OSError:
-                pass
+        raise RecoveryError("verified_runtime_missing_operator_rollback_required")
 
     def start_if_needed(self) -> str:
         status = self.unit_state()
@@ -221,7 +184,8 @@ class Recovery:
     def check(self) -> dict[str, object]:
         return {
             "worker_valid": self.probe(self.binary),
-            "known_good_valid": self.probe(self.baseline),
+            "known_good_valid": False,
+            "automatic_binary_restore": False,
             "unit_state": self.unit_state(),
             "recovery_opted_in": self.allowed(),
         }
