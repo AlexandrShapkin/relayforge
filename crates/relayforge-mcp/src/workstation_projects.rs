@@ -91,8 +91,8 @@ fn worktree_counts(repo: &Path) -> Value {
     json!({
         "status":"observed",
         "count":text.lines().filter(|line| line.starts_with("worktree ")).count(),
-        "locked":text.lines().filter(|line| line == "locked" || line.starts_with("locked ")).count(),
-        "prunable":text.lines().filter(|line| line == "prunable" || line.starts_with("prunable ")).count(),
+        "locked":text.lines().filter(|line| *line == "locked" || line.starts_with("locked ")).count(),
+        "prunable":text.lines().filter(|line| *line == "prunable" || line.starts_with("prunable ")).count(),
         "cleanup_authorized":false
     })
 }
