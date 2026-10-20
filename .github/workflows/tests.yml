@@ -9,6 +9,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Verify reviewed governance sources
+        run: python3 -B scripts/test_governance_sources.py
       - name: Parse inert autonomy metadata (Python 3.11+)
         run: |
           python3 - <<'PY'
