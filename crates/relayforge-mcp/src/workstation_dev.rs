@@ -121,7 +121,7 @@ fn source_file(path: &str) -> bool {
             ))
 }
 
-fn read_capped<R: Read>(reader: R) -> Result<Vec<u8>, String> {
+pub(crate) fn read_capped<R: Read>(reader: R) -> Result<Vec<u8>, String> {
     let mut output = Vec::new();
     reader
         .take((MAX_OUTPUT + 1) as u64)

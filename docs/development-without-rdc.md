@@ -485,6 +485,39 @@ workstation. This v9 implementation remains source-only until independently
 reviewed, merged and separately installed under existing local operator
 authority. The currently deployed v8 cannot serve `projects.inventory`.
 
+### Source-only safety and rollout boundary
+
+Inventory pins directory descriptors while walking the home, `Projects`,
+checkout and `.git` directories, rejecting symlink components and unsafe
+ownership/modes. Git and disk probes use fixed `/usr/bin` executables with
+an explicit environment allowlist, bounded output and timeouts. Git ignores
+system/global configuration, disables hooks, fsmonitor and submodule
+inspection, and disables optional locks so status cannot refresh the index.
+The native check catalog is returned as text only. No command from a caller,
+repository config, Issue or artifact name is executed.
+
+The v9 inventory requires a Linux host with `/proc` descriptor access and
+ordinary owned checkout directories with a `.git` **directory**. A root
+checkout using a linked-worktree `.git` file is deliberately `unavailable`:
+that file can redirect metadata outside the fixed registry. Registered
+worktrees of an ordinary checkout are still counted without reading their
+contents or exposing their paths. Missing/unreadable roots are `unavailable`;
+Git failures are `unverified`/null, never a clean or fresh result.
+
+Regression tests use temporary fixtures only: unknown names/traversal,
+symlinked ancestors/metadata/artifact parents, permission denial, unsafe
+modes, redirected metadata, missing/corrupt repositories, path replacement,
+unchanged index and unique untracked data, and nonexecution of repo helpers.
+No production permissions or services are changed by these tests.
+
+Deployment remains a separate owner-approved step after independent technical
+ACCEPT and exact-head CI. Pin the reviewed full commit, retain the installed
+v8 rollback reference, and follow the existing local installation/verification
+procedure. Verify the reported API revision and read-only inventory on the
+host after that approval; CI does not establish live four-project coverage.
+No tunnel restart, permission change or v9 installation is authorized by this
+source-only PR.
+
 Existing `repo.sync`, `build.start`, job sandbox, transfer, tunnel and
 recovery protections are unchanged. No automatic source writes, system
 services, deletion, remote sync or additional permissions are introduced.
