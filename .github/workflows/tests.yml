@@ -9,6 +9,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Parse inert autonomy metadata (Python 3.11+)
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          import tomllib
+          contract = tomllib.loads(pathlib.Path("automation/project.toml").read_text(encoding="utf-8"))
+          assert contract["schema_version"] == 1
+          assert contract["repository"] == "AlexandrShapkin/relayforge"
+          assert contract["execution"]["enabled"] is False
+          assert contract["execution"]["auto_merge"] is False
+          assert contract["execution"]["auto_deploy"] is False
+          PY
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
