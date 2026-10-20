@@ -10,8 +10,14 @@ use std::{
 };
 
 const PROJECTS: [&str; 4] = ["codex-smart", "relayforge", "assistant-hub", "rustcraft"];
-const ARTIFACTS: [&str; 6] =
-    ["target", "dist", "node_modules", ".pytest_cache", "__pycache__", "web/node_modules"];
+const ARTIFACTS: [&str; 6] = [
+    "target",
+    "dist",
+    "node_modules",
+    ".pytest_cache",
+    "__pycache__",
+    "web/node_modules",
+];
 
 fn safe_directory(path: &Path) -> bool {
     let Ok(meta) = fs::symlink_metadata(path) else {
@@ -58,7 +64,13 @@ fn git_count(repo: &Path, args: &[&str], delim: u8) -> Option<usize> {
     if !output.status.success() {
         return None;
     }
-    Some(output.stdout.split(|b| *b == delim).filter(|part| !part.is_empty()).count())
+    Some(
+        output
+            .stdout
+            .split(|b| *b == delim)
+            .filter(|part| !part.is_empty())
+            .count(),
+    )
 }
 
 fn head_sha(repo: &Path, reference: &str) -> Option<String> {
@@ -189,7 +201,8 @@ mod tests {
 
     #[test]
     fn fixed_registry_rejects_arbitrary_names_and_symlinks() {
-        let base = std::env::temp_dir().join(format!("relayforge-inventory-{}", std::process::id()));
+        let base =
+            std::env::temp_dir().join(format!("relayforge-inventory-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(base.join("Projects/relayforge")).unwrap();
         fs::create_dir_all(base.join("Projects/codex-smart")).unwrap();
@@ -206,17 +219,25 @@ mod tests {
 
     #[test]
     fn missing_projects_never_become_claimed_verified() {
-        let base = std::env::temp_dir().join(format!("relayforge-inventory-missing-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!(
+            "relayforge-inventory-missing-{}",
+            std::process::id()
+        ));
         let out: Value = serde_json::from_str(&inventory(&base).unwrap()).unwrap();
         assert_eq!(out["projects"].as_array().unwrap().len(), 4);
-        assert!(out["projects"].as_array().unwrap().iter().all(
-            |p| p["status"]=="unavailable" && p["remote_main_verified"]==false
-        ));
+        assert!(out["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|p| p["status"] == "unavailable" && p["remote_main_verified"] == false));
     }
 
     #[test]
     fn paths_and_unknown_artifacts_never_authorize_deletion() {
-        let base = std::env::temp_dir().join(format!("relayforge-inventory-artifacts-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!(
+            "relayforge-inventory-artifacts-{}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(base.join("target")).unwrap();
         fs::write(base.join("target/unique-report.txt"), b"unique").unwrap();
