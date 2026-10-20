@@ -3,8 +3,8 @@
 //! host, credentials or arbitrary filesystem root. Mutations require a
 //! separate local operator-created, permission-checked opt-in file.
 use crate::{
-    workstation_dependency, workstation_jobs, workstation_recovery, workstation_retire,
-    workstation_transfer, workstation_projects,
+    workstation_dependency, workstation_jobs, workstation_projects, workstation_recovery,
+    workstation_retire, workstation_transfer,
 };
 use serde_json::{json, Value};
 use std::{
@@ -1091,6 +1091,9 @@ mod tests {
         assert!(execute(&json!({"operation":"repo.read","path":"../../etc/passwd"})).is_err());
         assert!(execute(&json!({"operation":"repo.sync","cmd":"sh"})).is_err());
         assert!(execute(&json!({"operation":"projects.inventory","path":"../outside"})).is_err());
-        assert!(execute(&json!({"operation":"projects.inventory","parameters":{"shell":"id"}})).is_err());
+        assert!(
+            execute(&json!({"operation":"projects.inventory","parameters":{"shell":"id"}}))
+                .is_err()
+        );
     }
 }
