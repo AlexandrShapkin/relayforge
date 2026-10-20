@@ -649,6 +649,15 @@ pub fn execute(args: &Value) -> Result<String, String> {
         })
         .to_string());
     }
+    // Inventory must still work if the RelayForge checkout itself is missing.
+    // No user-supplied root, project or command is consulted.
+    if operation == "projects.inventory" {
+        if obj.len() != 1 {
+            return Err("operation or parameters denied".into());
+        }
+        let home = PathBuf::from(std::env::var_os("HOME").ok_or("home unavailable")?);
+        return workstation_projects::inventory(&home);
+    }
     let (home, repo) = home_and_repo()?;
     match operation {
         "ssh.retire.plan" if obj.len() == 1 => workstation_retire::plan(&home),
@@ -748,7 +757,6 @@ pub fn execute(args: &Value) -> Result<String, String> {
             ],
             8,
         )?),
-        "projects.inventory" if obj.len() == 1 => workstation_projects::inventory(&home),
         "repo.status" if obj.len() == 1 => text_output(git(
             &repo,
             &["status", "--short", "--branch", "--untracked-files=no"],
