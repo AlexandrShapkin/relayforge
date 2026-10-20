@@ -455,3 +455,82 @@ systemd user timer is **not installed or activated by CI**. It requires
 the local operator to review and install on ThinkPad, then execute real
 fault-injection tests. It does not recover a powered-off or offline
 laptop and is not full remote break-glass access.
+
+
+## Four-project workstation inventory (proposed API revision 9; Issue #75)
+
+The source-only `projects.inventory` operation extends the existing
+`relayforge_workstation_develop` request schema. It accepts **only**
+`{"operation":"projects.inventory"}` and never accepts project names,
+arbitrary paths, commands, scripts or nested parameters from a caller.
+A compiled-in registry inspects these names under the same local
+`~/Projects/` directory only: `codex-smart`, `relayforge`,
+`assistant-hub`, `rustcraft`. It denies unsafe/non-owned/symlinked
+checkout roots. Missing projects remain `unavailable`, not healthy.
+
+For each present Git checkout the operation gathers a full HEAD SHA, branch,
+unverified cleanliness/untracked fields, cached
+`origin/main` SHA, local branch count, bounded worktree summary, free disk
+space and presence of fixed familiar artifact-directory candidates. It
+returns only a **read-only** list of the repository's native verification
+entrypoints; **it does not run those commands**. A normal source-only task is
+still validated by native GitHub-hosted PR CI. No artifact or worktree is
+declared stale or authorized for cleanup based on name or age.
+
+**Important:** The local `origin/main` ref is not a fresh remote check. The
+operation explicitly returns `remote_main_verified=false`; compare against
+a fresh independently retrieved GitHub `main` SHA before deciding whether
+a local checkout is current. Do not assume an unavailable project is on this
+workstation. This v9 implementation remains source-only until independently
+reviewed, merged and separately installed under existing local operator
+authority. The currently deployed v8 cannot serve `projects.inventory`.
+
+### Source-only safety and rollout boundary
+
+Inventory pins directory descriptors while walking home, `Projects`, checkout
+and `.git`. It does not invoke Git or interpret Git configuration. A present
+`commondir` is refused; a redirect added after the check has no effect because
+all metadata reads stay relative to pinned descriptors. Symlinked HEAD, refs,
+packed refs and metadata-directory components are never followed. Shared
+(hard-linked) metadata files are refused. Git config
+includes, alternate object stores and worktree `gitdir` targets are never read.
+
+HEAD, cached remote refs, branch counts and worktree registration counts use
+bounded, no-follow reads of ordinary SHA-1 file refs/packed refs. Unsupported,
+unreadable or excessive metadata stays unverified/null. These observations
+are not an atomic snapshot and do not prove referenced objects exist. Only
+fixed `/usr/bin/df` is executed, with a clean environment and bounded output.
+
+`tracked_clean`, `untracked_count` and worktree `prunable` remain **null**:
+working-file/index inspection and content-sensitive `git status` are deliberately
+not performed. This avoids clean/smudge/process filters even if configuration
+changes concurrently. Use separate trusted local Git tooling for those facts;
+there is no fallback through inventory. Native check names are text only.
+
+The v9 inventory requires a Linux host with `/proc` descriptor access and
+ordinary owned checkout directories with a `.git` **directory**. A root
+checkout using a linked-worktree `.git` file is deliberately `unavailable`:
+that file can redirect metadata outside the fixed registry. Registered
+worktrees of an ordinary checkout are still counted without reading their
+contents or exposing their paths. Missing/unreadable roots are `unavailable`;
+Metadata failures are `unverified`/null, never a clean or fresh result.
+
+Regression tests use temporary fixtures only: unknown names/traversal,
+symlinked ancestors/metadata/artifact parents, permission denial, unsafe
+modes, redirected metadata, missing/corrupt repositories, path replacement,
+unchanged index and unique untracked data, and nonexecution of repo helpers.
+No production permissions or services are changed by these tests.
+
+Deployment remains a separate owner-approved step after independent technical
+ACCEPT and exact-head CI. Pin the reviewed full commit, retain the installed
+v8 rollback reference, and follow the existing local installation/verification
+procedure. Verify the reported API revision and read-only inventory on the
+host after that approval; CI does not establish live four-project coverage.
+No tunnel restart, permission change or v9 installation is authorized by this
+source-only PR.
+
+Existing `repo.sync`, `build.start`, job sandbox, transfer, tunnel and
+recovery protections are unchanged. No automatic source writes, system
+services, deletion, remote sync or additional permissions are introduced.
+Run read-only inventory before considering any cleanup; assess each item
+individually using verified Git state and independent authorization.

@@ -3,8 +3,8 @@
 //! host, credentials or arbitrary filesystem root. Mutations require a
 //! separate local operator-created, permission-checked opt-in file.
 use crate::{
-    workstation_dependency, workstation_jobs, workstation_recovery, workstation_retire,
-    workstation_transfer,
+    workstation_dependency, workstation_jobs, workstation_projects, workstation_recovery,
+    workstation_retire, workstation_transfer,
 };
 use serde_json::{json, Value};
 use std::{
@@ -75,7 +75,7 @@ fn source_edit_enabled(home: &Path) -> bool {
 
 // Parse /proc/self/status rather than running id or accepting UID from MCP.
 // Filesystem ownership checks must use the real local process identity.
-fn unsafe_uid() -> u32 {
+pub(crate) fn unsafe_uid() -> u32 {
     let Ok(status) = fs::read_to_string("/proc/self/status") else {
         return u32::MAX;
     };
@@ -121,7 +121,7 @@ fn source_file(path: &str) -> bool {
             ))
 }
 
-fn read_capped<R: Read>(reader: R) -> Result<Vec<u8>, String> {
+pub(crate) fn read_capped<R: Read>(reader: R) -> Result<Vec<u8>, String> {
     let mut output = Vec::new();
     reader
         .take((MAX_OUTPUT + 1) as u64)
@@ -133,7 +133,7 @@ fn read_capped<R: Read>(reader: R) -> Result<Vec<u8>, String> {
     Ok(output)
 }
 
-fn command(program: &str, args: &[&str], max_seconds: u32) -> Result<Output, String> {
+pub(crate) fn command(program: &str, args: &[&str], max_seconds: u32) -> Result<Output, String> {
     command_input(program, args, None, max_seconds)
 }
 
@@ -188,7 +188,7 @@ fn text_output(output: Output) -> Result<String, String> {
     .to_string())
 }
 
-fn git(repo: &Path, args: &[&str]) -> Result<Output, String> {
+pub(crate) fn git(repo: &Path, args: &[&str]) -> Result<Output, String> {
     let path = repo.to_str().ok_or("repository path invalid")?;
     let mut fixed = vec![
         "-c",
@@ -623,10 +623,10 @@ pub fn execute(args: &Value) -> Result<String, String> {
             return Err("home invalid".into());
         }
         return Ok(json!({
-            "api_revision": 8,
+            "api_revision": 9,
             "transport": "private_secure_mcp_tunnel",
             "operations": [
-                "capabilities", "repo.status", "repo.list", "repo.read",
+                "capabilities", "projects.inventory", "repo.status", "repo.list", "repo.read",
                 "repo.write", "repo.sync", "build.start",
                 "task.status", "task.logs", "task.list",
                 "tunnel.inspect", "tunnel.restart", "recovery.inspect",
@@ -648,6 +648,15 @@ pub fn execute(args: &Value) -> Result<String, String> {
             "local_grants_required_for_mutations": true
         })
         .to_string());
+    }
+    // Inventory must still work if the RelayForge checkout itself is missing.
+    // No user-supplied root, project or command is consulted.
+    if operation == "projects.inventory" {
+        if obj.len() != 1 {
+            return Err("operation or parameters denied".into());
+        }
+        let home = PathBuf::from(std::env::var_os("HOME").ok_or("home unavailable")?);
+        return workstation_projects::inventory(&home);
     }
     let (home, repo) = home_and_repo()?;
     match operation {
@@ -1089,5 +1098,10 @@ mod tests {
         assert!(execute(&json!({"operation":"unknown"})).is_err());
         assert!(execute(&json!({"operation":"repo.read","path":"../../etc/passwd"})).is_err());
         assert!(execute(&json!({"operation":"repo.sync","cmd":"sh"})).is_err());
+        assert!(execute(&json!({"operation":"projects.inventory","path":"../outside"})).is_err());
+        assert!(
+            execute(&json!({"operation":"projects.inventory","parameters":{"shell":"id"}}))
+                .is_err()
+        );
     }
 }
