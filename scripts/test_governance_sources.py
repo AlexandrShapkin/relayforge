@@ -8,7 +8,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 RECORDS = {'.engineering-kit/source.json': 'ba0463e28ae15dc9f19a5d72b7fbc67a9374e2ab0e1b09854baa76c4f19ab12f', '.project-template/source.json': 'df3f4f93f44d9662e5b8c83dd24137ddbc5438215a717401b67d3215c90356e5'}
-LOCAL_SHA256 = 'f715a6df9e4e74b17b2d69ff0672bd386a2e8a0345797a4d10b1d080a725de8c'
+LOCAL_SHA256 = '3890afd7384cd844085170e5842796432563125a7cfa3178f5250e029d2664b4'
 
 
 def verify(root):
@@ -41,7 +41,7 @@ class GovernanceSources(unittest.TestCase):
         verify(ROOT)
 
     def test_native_ci_gates_retained(self):
-        gates = {'tests.yml': ['cargo fmt --all -- --check', 'cargo clippy --workspace --all-targets -- -D warnings', 'cargo test --workspace --locked'], 'rdc-independent.yml': ['cargo clippy --workspace --all-targets --locked -- -D warnings', 'cargo test --workspace --locked', 'python3 scripts/offline_mcp_smoke.py target/release/relayforge-mcp']}
+        gates = {'tests.yml': ['cargo fmt --all -- --check', 'cargo clippy --workspace --all-targets --locked -- -D warnings', 'cargo test --workspace --locked'], 'rdc-independent.yml': ['cargo clippy --workspace --all-targets --locked -- -D warnings', 'cargo test --workspace --locked', 'python3 scripts/offline_mcp_smoke.py .build/ci/release/relayforge-mcp']}
         for workflow, commands in gates.items():
             text = (ROOT / '.github/workflows' / workflow).read_text(encoding='utf-8')
             for command in commands:

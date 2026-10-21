@@ -86,3 +86,14 @@ production binary execution or deployment during governance work. Every local
 Cargo invocation requires an explicit isolated `CARGO_TARGET_DIR`; never share
 build outputs with existing worktrees. Release builds/live smoke require their
 separate authority; unavailable native evidence remains UNVERIFIED.
+
+## P0 runtime/build boundary
+
+Never build into legacy `target/release` or any installed runtime location.
+All local Cargo checks must explicitly select an isolated target directory;
+GitHub-hosted CI is preferred. `just verify` overrides stale target environment.
+The installed old parent remains vulnerable until separately approved migration;
+source changes alone are not deployment. Read [runtime artifacts](docs/runtime-artifacts.md)
+before touching any deployment/recovery entrypoint. No historical backup name
+proves v8 or authorizes rollback. Owner approval, verified artifact/rollback and
+independent technical ACCEPT remain separate gates.

@@ -368,7 +368,7 @@ impl Store {
             "expires_at_unix":created+APPROVAL_TTL_SECONDS,
             "approval_expires_at_unix":created+APPROVAL_TTL_SECONDS,
             "execution_window_seconds":EXECUTION_TTL_SECONDS,
-            "approval_command":format!("~/Projects/relayforge/target/release/relayforge-mcp --approve-change {id}")}))
+            "approval_command":format!("~/.local/libexec/relayforge/runtime/current/relayforge-mcp --approve-change {id}")}))
     }
 
     fn approve(&self, id: &str, interactive: bool) -> Result<String, String> {

@@ -16,6 +16,8 @@ concurrency:
 jobs:
   verify-offline:
     runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.build/ci
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -24,13 +26,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      - name: Install pinned just for recipe regression tests
+        run: |
+          cargo install just --version 1.40.0 --locked --root "$RUNNER_TEMP/just" --target-dir "$RUNNER_TEMP/just-build"
+          echo "$RUNNER_TEMP/just/bin" >> "$GITHUB_PATH"
       - name: Validate recovery bootstrap syntax
         run: bash -n deploy/relayforge-hot-activate.sh
       - name: Verify independent recovery guard without hardware
         run: |
           bash -n deploy/install-local-recovery.sh
           python3 -m py_compile deploy/relayforge-local-recover.py scripts/test_local_recovery.py
-          python3 scripts/test_local_recovery.py
+          python3 -B -m unittest discover -s scripts -p 'test_*.py'
       - name: Format
         run: cargo fmt --all -- --check
       - name: Check Rust
@@ -40,10 +46,18 @@ jobs:
       - name: Build Linux release binaries
         run: cargo build --release --locked -p relayforge-agent -p relayforge-mcp
       - name: Confirm restricted MCP operation without devices
-        run: python3 scripts/offline_mcp_smoke.py target/release/relayforge-mcp
+        run: python3 scripts/offline_mcp_smoke.py .build/ci/release/relayforge-mcp
       - name: Package CI-only binaries
         run: |
-          tar -C target/release -czf /tmp/relayforge-ci-linux-x86_64.tar.gz relayforge-agent relayforge-mcp
+          python3 - <<'PYMETA'
+          import hashlib, json, pathlib, subprocess
+          binary = pathlib.Path(".build/ci/release/relayforge-mcp")
+          commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          record = {"schema_version": 1, "commit": commit,
+                    "sha256": hashlib.sha256(binary.read_bytes()).hexdigest(), "binary": "relayforge-mcp"}
+          binary.with_name("manifest.json").write_text(json.dumps(record) + "\n")
+          PYMETA
+          tar -C .build/ci/release -czf /tmp/relayforge-ci-linux-x86_64.tar.gz relayforge-agent relayforge-mcp manifest.json
           sha256sum /tmp/relayforge-ci-linux-x86_64.tar.gz > /tmp/relayforge-ci-linux-x86_64.tar.gz.sha256
       - name: Retain disposable build for manual inspection only
         uses: actions/upload-artifact@v4

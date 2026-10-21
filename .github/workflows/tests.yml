@@ -7,12 +7,12 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.build/ci
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - name: Verify reviewed governance sources
-        run: python3 -B scripts/test_governance_sources.py
       - name: Parse inert autonomy metadata (Python 3.11+)
         run: |
           python3 - <<'PY'
@@ -25,11 +25,18 @@ jobs:
           assert contract["execution"]["auto_merge"] is False
           assert contract["execution"]["auto_deploy"] is False
           PY
+      - name: Verify reviewed governance sources
+        run: python3 -B scripts/test_governance_sources.py
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      - name: Install pinned just for recipe regression tests
+        run: |
+          cargo install just --version 1.40.0 --locked --root "$RUNNER_TEMP/just" --target-dir "$RUNNER_TEMP/just-build"
+          echo "$RUNNER_TEMP/just/bin" >> "$GITHUB_PATH"
+      - run: python3 -B -m unittest discover -s scripts -p 'test_*.py'
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       - name: Check shared developer interface syntax and offline status
         run: |

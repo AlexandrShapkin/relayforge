@@ -230,7 +230,7 @@ pub fn dispatch(home: &Path, operation: &str) -> Result<String, String> {
         "ssh.retire.known_hosts" => "known_hosts",
         _ => return Err("ssh operation denied".into()),
     };
-    let binary = home.join("Projects/relayforge/target/release/relayforge-mcp");
+    let binary = crate::runtime::current_image(home)?;
     let binary = binary.to_str().ok_or("worker path invalid")?;
     let output = Command::new("timeout")
         .args([
