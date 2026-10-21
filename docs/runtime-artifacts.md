@@ -67,6 +67,12 @@ unverified, identical or mismatched rollback. A separately recorded rollback
 receipt must exactly identify commit/digest and have
 `restricted_worker_ok=true` and `live_health_ok=true`. Those fields record
 independently obtained operator evidence, never grant execution authority.
+Identical executable bytes cannot serve as a distinct rollback by assigning
+them a different source commit. Installed-runtime checks require the canonical
+`current/relayforge-mcp` input, a private 0700 store, owner-controlled version
+directories, and owner-held 0500 binary / 0400 manifest files. Symlinked version
+directories or metadata fail closed. These checks do not establish provenance
+or protect against a malicious process running as the artifact owner.
 
 Success returns `operator_approval_required=true`, `actions_performed=[]`.
 There is intentionally no `--apply` and no automatic installation/restart path.

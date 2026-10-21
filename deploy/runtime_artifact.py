@@ -96,7 +96,7 @@ def verify(binary, manifest, commit, digest):
 
 
 def activation_plan(candidate, rollback, rollback_receipt):
-    if candidate["artifact_id"] == rollback["artifact_id"]:
+    if candidate["sha256"] == rollback["sha256"]:
         raise ArtifactError("distinct verified rollback required")
     receipt = document(rollback_receipt)
     if receipt.get("restricted_worker_ok") is not True or receipt.get("live_health_ok") is not True or receipt != {"commit": rollback["commit"], "sha256": rollback["sha256"],
@@ -109,6 +109,9 @@ def activation_plan(candidate, rollback, rollback_receipt):
 def verify_installed(binary):
     """Only for a migrated, frozen artifact. Never guesses a historical baseline."""
     binary = Path(binary)
+    if (not binary.is_absolute() or ".." in binary.parts
+            or binary.name != "relayforge-mcp" or binary.parent.name != "current"):
+        raise ArtifactError("canonical runtime selector required")
     # current is the one intentional, operator-managed directory symlink.
     store = binary.parent.parent
     try:
@@ -116,14 +119,23 @@ def verify_installed(binary):
             meta = path.lstat()
             if not stat.S_ISDIR(meta.st_mode) or meta.st_uid != os.getuid() or meta.st_mode & 0o022:
                 raise ArtifactError("unsafe runtime store")
+        if stat.S_IMODE(store.lstat().st_mode) != 0o700:
+            raise ArtifactError("runtime store must be private")
+        if (store / "current").lstat().st_uid != os.getuid():
+            raise ArtifactError("unsafe runtime selector owner")
         target = os.readlink(store / "current")
         if not re.fullmatch(r"artifacts/[0-9a-f]{40}-[0-9a-f]{64}", target):
             raise ArtifactError("invalid runtime selector")
         commit, digest = target.split('/')[1].split('-')
         selected = store / target / "relayforge-mcp"
-        with opened(selected) as (_, meta):
-            if meta.st_mode & 0o222:
-                raise ArtifactError("runtime artifact must be frozen")
+        meta = selected.parent.lstat()
+        if (not stat.S_ISDIR(meta.st_mode) or meta.st_uid != os.getuid()
+                or meta.st_mode & 0o022):
+            raise ArtifactError("unsafe runtime version directory")
+        for path, mode in [(selected, 0o500), (selected.with_name("manifest.json"), 0o400)]:
+            with opened(path) as (_, meta):
+                if meta.st_uid != os.getuid() or stat.S_IMODE(meta.st_mode) != mode:
+                    raise ArtifactError("runtime files must be owned and frozen")
         verify(selected, selected.with_name("manifest.json"), commit, digest)
         return selected
     except OSError as exc:
