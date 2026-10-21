@@ -68,3 +68,25 @@ jobs:
             /tmp/relayforge-ci-linux-x86_64.tar.gz.sha256
           retention-days: 7
           if-no-files-found: error
+
+  sandbox-integration:
+    # Noble's restricted userns policy denies bwrap's loopback RTM_NEWADDR.
+    # Do not relax AppArmor or networking. Build the exact source on Jammy
+    # for its libc; full workspace checks above retain the current Ubuntu.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.build/ci-sandbox
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install disposable-runner sandbox dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+      - name: Build exact-head sandbox worker for this runner
+        run: cargo build --release --locked -p relayforge-mcp
+      - name: Exercise real sandbox development fixture without grants or devices
+        run: python3 -B scripts/offline_development_workflow.py .build/ci-sandbox/release/relayforge-mcp
