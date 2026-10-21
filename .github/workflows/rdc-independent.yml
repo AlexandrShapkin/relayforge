@@ -47,6 +47,12 @@ jobs:
         run: cargo build --release --locked -p relayforge-agent -p relayforge-mcp
       - name: Confirm restricted MCP operation without devices
         run: python3 scripts/offline_mcp_smoke.py .build/ci/release/relayforge-mcp
+      - name: Install disposable-runner sandbox dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+      - name: Exercise real sandbox development fixture without grants or devices
+        run: python3 -B scripts/offline_development_workflow.py .build/ci/release/relayforge-mcp
       - name: Package CI-only binaries
         run: |
           python3 - <<'PYMETA'
