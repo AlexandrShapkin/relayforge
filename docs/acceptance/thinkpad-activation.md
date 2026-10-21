@@ -4,6 +4,107 @@ Prepared 2026-10-21. **Not an activation authorization or a live PASS.**
 This supplement instantiates [runtime-artifacts](../runtime-artifacts.md) and
 [development-tasks](../development-tasks.md), without installing anything.
 
+## Activation decision — 2026-10-22
+
+**BLOCKED: do not activate.** Combined source is accepted; actual active runtime,
+trusted rollback, target compatibility and independent recovery remain unknown.
+The October 21 observations below are historical; this record supersedes their
+pending CI/review status without asserting any new live device observation.
+
+| Decision field | Status | Evidence |
+|---|---|---|
+| Combined source | VERIFIED | Independent separate-context review of all 18 changed files against main `98f9cab77778932d9236dc9009f345af9c62ecc1`: **combined source-scope ACCEPT** at `f93982ddc97716cf1d5c96dbcaefa8775234e116`; no blocking findings |
+| Hosted exact-head CI | VERIFIED | [Rust](https://github.com/AlexandrShapkin/relayforge/actions/runs/39640121329) and [RDC-independent](https://github.com/AlexandrShapkin/relayforge/actions/runs/39640121420), including verify-offline and sandbox-integration, completed successfully at that SHA; run/job API independently read back |
+| Candidate executable identity/build provenance | VERIFIED | Artifact `12365206918`, produced by verify-offline at that exact source; downloaded archive, manifest and actual binary hashes independently checked below |
+| Candidate restricted offline health | VERIFIED | Hosted restricted MCP smoke passed before packaging; downloaded exact bytes also passed `offline_mcp_smoke.py` in disposable HOME, including parent-image pinning and denials; no device access |
+| Candidate ThinkPad compatibility | BLOCKED | ELF x86-64, interpreter `/lib64/ld-linux-x86-64.so.2`, highest required GLIBC symbol `GLIBC_2.39`; actual ThinkPad architecture/libc and offline health not collected. Jammy sandbox CI builds its own binary and does not prove compatibility of this downloaded artifact |
+| Active MCP parent/worker PID, PPID, mapped path/hash/inode | BLOCKED | No authorized device inspection result; clean PR #87 checkout, API 9 and healthy tunnel do not identify mapped bytes |
+| Installed launcher/hash, units, recovery helper/timer, selectors, store inventory, ownership/modes/free space | BLOCKED | Installed state not inspected; repository templates are not device evidence |
+| Rollback executable/hash/source provenance | BLOCKED | No actual mapped or historical backup bytes collected; no candidate classified as trustworthy rollback |
+| Rollback offline and live health | BLOCKED | No pinned artifact or actual restricted-worker/live-health receipts |
+| Approved absolute artifact/selector paths | BLOCKED | Actual owner home/store/selectors unverified; illustrative paths below are not approved installed paths |
+| Affected launcher/service | BLOCKED | Intended tunnel migration concerns `relayforge-tunnel.service`; actual launcher/executable selection unverified. HTTP unit, if affected, needs explicit separate scope |
+| Independent recovery channel | BLOCKED | Operator terminal or independently authorized channel has not been demonstrated usable during tunnel failure |
+| Human source merge approval | BLOCKED | All four PRs remain Draft; no merge authorized; formal PR #88 review submissions absent |
+| Runtime activation/restart/rollback approval | BLOCKED | No exact artifact/service/window authorization; do not request activation before missing evidence is collected |
+| Live task/grants/publication acceptance | BLOCKED | Installed interface lacks development.prepare/run/inspect; no real authorized task completed |
+| Release/publication of a distributable | NOT APPLICABLE | This decision does not authorize a release |
+
+Candidate digest chain (SHA-256):
+
+- GitHub artifact ZIP: `05ea5f0eb91ab07fed9cb4278b8d846d8e842cf42785be9c926094282c5a7edc`.
+  API digest and downloaded bytes agree.
+- Inner tar: `6e0681401ef5af0acd66550b7b1347576e9c8d1d92b76339526cd907d1ef79e6`.
+  Included checksum and calculated bytes agree.
+- `relayforge-mcp`: `c0d160a2d011e5dc85b9a894c5fae15b8b3c18f65ed98dc5dd8f9bf432c8437d`.
+  Calculated bytes agree with manifest commit
+  `f93982ddc97716cf1d5c96dbcaefa8775234e116` and manifest digest.
+
+These are trusted GitHub exact-head build/byte associations, not a signed
+attestation, ThinkPad installation, or live acceptance. Preserve downloaded
+archive/manifest/binary and smoke output privately. Do not install this artifact
+until target compatibility and all other activation gates pass.
+
+Independent review examined artifact ownership/selectors/distinct rollback,
+durable submission/worker claims and crash denial, failure-closed network and
+filesystem confinement, grants/revocation/expiry, editable-workspace boundaries,
+external watchdog/descendant termination, retained results, external publication,
+PR interactions and build/runtime separation. LOW finding at the reviewed
+source's acceptance step 4 (line 199): zero-context fixture versus default-context
+returned diff. The step below now requires exact semantic content, not equal
+patch bytes. No code changed. Source ACCEPT applies to the pinned combined tree;
+this documentation amendment is separate and has no new exact-head CI claim.
+No formal GitHub APPROVE or human/runtime approval is implied.
+
+### Required next evidence, before an activation authorization request
+
+The earlier RelayForge capability call was denied with
+`MCP tool call requires approval, but approval policy is never`.
+No retry or alternate channel is authorized to bypass that session restriction.
+There is no established separately authorized ThinkPad terminal in this session.
+The smallest next action is an ordinary local operator's read-only inspection,
+using the existing procedure below. Initial commands at the **actual ThinkPad**:
+
+```sh
+systemctl --user show relayforge-tunnel.service relayforge-mcp-http.service \
+  relayforge-local-recover.service relayforge-local-recover.timer \
+  -p Id -p MainPID -p ControlGroup -p FragmentPath -p DropInPaths \
+  -p ActiveState -p SubState -p Result -p ExecMainStatus
+ps -u "$(id -u)" -o pid,ppid,comm
+getconf GNU_LIBC_VERSION
+uname -m
+```
+
+The tunnel MainPID may identify tunnel-client, not MCP. Identify parent/worker
+through the actual service cgroup and PID/PPID tree. For each identified numeric
+PID, privately run `readlink /proc/PID/exe`,
+`stat -L -c 'device=%d inode=%i uid=%u mode=%a size=%s' /proc/PID/exe`, and
+`sha256sum /proc/PID/exe` (replace PID locally). Recheck if a process changes.
+Privately inspect the returned installed unit paths and launcher, then follow
+the existing bounded store/manifest/backup/recovery inspection below. Return
+sanitized identities only; no environment, arguments, credentials or profiles.
+Do not invoke recovery repair or restart services to collect this evidence.
+
+Evaluate rollback only after those actual identities are recorded. Unknown
+mapped bytes cannot become a verified baseline by renaming or adding a manifest.
+If no trusted prior artifact is recoverable, separately authorize an isolated
+reviewed-baseline build and offline checks, then a bounded baseline live-health
+and independent-recovery validation. Build success alone is not rollback health.
+
+Verification/rollback criteria remain steps 1, 5 and 6 below: exact mapped bytes,
+authenticated reconnect within 120 seconds, required operations, restricted
+health and independent recovery; any mismatch or deadline failure requires the
+separately approved pinned rollback, never a guessed backup.
+
+Owner approval still required separately for: source merges in the sequence
+below; any baseline live-validation window; exact frozen candidate/rollback,
+installed launcher/helper/unit files and selector changes; controlled tunnel
+restart/interruption/rollback window (HTTP separately if affected); local
+opt-in/task-specific expiring grants; and external publication of the live task.
+No blanket permission request is appropriate while artifact/recovery fields
+remain BLOCKED. Retarget #88 to accepted main only after #84, #86 and #87 are
+individually integrated under owner authority; the rehearsal is not a substitute.
+
 ## Verified source and integration sequence
 
 GitHub main: `98f9cab77778932d9236dc9009f345af9c62ecc1`.
@@ -196,7 +297,9 @@ After installation and explicit task preparation/authorization approval:
 4. `development.run(task_id=JOB_ID)` once. Poll `job.status` and `job.output`
    through the tunnel. Require finished exit 0, untruncated bounded logs,
    compile/test exit 0, two discovered tests, exact base/profile/paths,
-   `source_unchanged_by_tests=true`, `ok=true`, and precisely `first-task.patch`.
+   `source_unchanged_by_tests=true`, `ok=true`, and exactly the changed path and
+   before/after content specified by `first-task.patch`. Diff context may differ;
+   do not require patch-byte equality.
    Export immutable proposal, structured output and diff to durable external
    evidence before any cleanup. Unknown/interrupted/truncated results fail.
 5. Repeat `development.run` for the same job ID: require denial and no new
