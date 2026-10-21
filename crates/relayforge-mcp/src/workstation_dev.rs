@@ -3,8 +3,8 @@
 //! host, credentials or arbitrary filesystem root. Mutations require a
 //! separate local operator-created, permission-checked opt-in file.
 use crate::{
-    workstation_dependency, workstation_jobs, workstation_recovery, workstation_retire,
-    workstation_transfer,
+    workstation_dependency, workstation_development, workstation_jobs, workstation_recovery,
+    workstation_retire, workstation_transfer,
 };
 use serde_json::{json, Value};
 use std::{
@@ -33,7 +33,7 @@ pub fn tool() -> Value {
             "content":{"type":"string","maxLength":49152},
             "task_id":{"type":"string","maxLength":32},
             "script":{"type":"string","maxLength":2048},
-            "parameters":{"type":"object","description":"Only job.chain.start (scripts array) and job.chain.output (step number); all other nested payloads denied."}
+            "parameters":{"type":"object","description":"Strict server-validated job.chain payloads or development.prepare proposal; all other nested payloads denied."}
         },"required":["operation"],"additionalProperties":false}})
 }
 
@@ -65,7 +65,7 @@ fn local_opt_in(home: &Path, name: &str, expected: &[u8]) -> bool {
     fs::read(&path).is_ok_and(|value| value == expected)
 }
 
-fn dev_enabled(home: &Path) -> bool {
+pub(crate) fn dev_enabled(home: &Path) -> bool {
     local_opt_in(home, OPT_IN, b"ALLOW_RELAYFORGE_DEVELOPMENT\n")
 }
 
@@ -639,6 +639,7 @@ pub fn execute(args: &Value) -> Result<String, String> {
                 "job.start", "job.list", "job.status", "job.output",
                 "job.stop", "job.remove",
                 "job.chain.start", "job.chain.status", "job.chain.output",
+                "development.prepare", "development.run", "development.inspect",
                 "dependency.audit",
                 "ssh.retire.plan", "ssh.retire.config", "ssh.retire.known_hosts",
                 "shell.sandbox", "process.list", "user.services"
@@ -649,12 +650,32 @@ pub fn execute(args: &Value) -> Result<String, String> {
             },
             "arbitrary_host_shell": false,
             "arbitrary_host_files": false,
+            "development_tasks": {
+                "schema_version":1,
+                "repositories":["relayforge"],
+                "profiles":["python-stdlib-v1"],
+                "max_files":4,
+                "max_proposal_bytes":24576,
+                "task_grant_required":true,
+                "max_authorization_lifetime_seconds":3600,
+                "checkout_writes":false,
+                "publication":"external_github_only"
+            },
             "local_grants_required_for_mutations": true
         })
         .to_string());
     }
     let (home, repo) = home_and_repo()?;
     match operation {
+        "development.prepare" | "development.run" | "development.inspect" => {
+            if operation != "development.inspect" {
+                if !dev_enabled(&home) {
+                    return Err("local development opt-in missing".into());
+                }
+                audit(&home, operation)?;
+            }
+            workstation_development::execute(&home, &repo, args)
+        }
         "ssh.retire.plan" if obj.len() == 1 => workstation_retire::plan(&home),
         "ssh.retire.config" | "ssh.retire.known_hosts" if obj.len() == 1 => {
             if !dev_enabled(&home) {

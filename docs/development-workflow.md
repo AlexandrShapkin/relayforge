@@ -11,10 +11,10 @@ current tunnel health are unverified.
 | Discover/read fixed repository | `repo.list`, `repo.read`, `repo.status` | Real MCP fixture reads tracked source; private/untracked/traversal reads denied |
 | Four-project inventory | Draft #76 | Preserve existing review evidence; not on main or independently accepted here |
 | Source editing | `repo.write`, separate static local grant | Fixed checkout only; **blocked** for safe isolated task development |
-| Task-scoped editable worktree | Not implemented | Next source dependency: exact base, repository/path allowlist, no shared checkout mutation |
-| Expiring source authorization | Not implemented | Static grant is insufficient for bounded task expiry; no grant created by this task |
+| Task-scoped editable workspace | `development.prepare/run/inspect`, immutable exact-base proposals | Real editable sandbox for up to four allowlisted Python files; no full persistent worktree yet |
+| Expiring source authorization | Private local per-task grant, maximum one hour | Scope/expiry checked at submission and worker start; outside-sandbox watchdog enforces expiry during execution |
 | Isolated build output | #78 merged | Explicit isolated Cargo target; runtime activation remains separate |
-| Build edited repository | `build.start` requires clean main | **Blocked**: existing writes and clean-main builds do not compose |
+| Build edited source | Fixed `python-stdlib-v1` compile/unittest profile | Real authorized task fixture passes; full Cargo/dependency build profiles remain **blocked** |
 | Offline development experiment | Existing bubblewrap worker | Real source copy/edit, Python compile/test, diff and disposable Git commit pass |
 | Logs / exit / durable result | `job.status`, `job.output`, `job.chain.*` | Real worker/MCP success, exit 7, timeout 124 and chain handoff checked |
 | Duplicate / interrupted attempt | Persistent single-use `worker.claim` | Concurrent claim test; repeated/previously crashed attempts refused; no automatic replay |
@@ -48,9 +48,8 @@ The task's GitHub PR is separate source-development evidence.
 All host fixture source bytes and mtimes must remain unchanged. Failure,
 timeout, sequential handoff, duplicate attempt and killed-worker cases use real
 workers. Fresh MCP processes read the resulting receipts. The crashed attempt
-has no terminal success and cannot run again. There is no expiring permission
-test because that contract is not implemented; testing a fake expiry would
-not establish authorization enforcement.
+has no terminal success and cannot run again. A second real fixture exercises
+the task-scoped authorizations and development API described below.
 
 The integration job pins the disposable `ubuntu-22.04` image. The previous
 `ubuntu-latest` run used Ubuntu 24.04.5 and failed inside Bubblewrap's loopback
@@ -88,11 +87,10 @@ selection/restart; actual authenticated reconnect and executable identity checks
 If any prerequisite is missing, activation is blocked. This task performs none
 of those runtime mutations and cannot verify rollback health remotely by fiat.
 
-The next source milestone is an isolated editable repository workspace with a
-versioned, narrowly scoped, expiring authorization and fixed offline build/test
-profiles, reusing the current worker/receipts. Then extend this fixture through
-that API, including expiry, stale-base, concurrent edits, cancellation and
-recoverable diff export. GitHub publication stays in the authorized external
-workflow; credentials must not enter the sandbox. After independent review and
-separate live authorization, perform the real ThinkPad/tunnel end-to-end test.
-Full operational readiness requires that real execution to succeed.
+The initial source milestone now supports isolated Python tasks through the
+[task contract](development-tasks.md). Full repository/Cargo dependency profiles,
+live systemd cancellation/resource enforcement and actual tunnel interruption
+still require their own verification. GitHub publication stays in the authorized
+external workflow; credentials must not enter the sandbox. After independent
+review and separate runtime/grant authorization, perform the real ThinkPad/tunnel
+end-to-end test. Full operational readiness requires that real execution.
