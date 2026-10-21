@@ -90,3 +90,5 @@ jobs:
         run: cargo build --release --locked -p relayforge-mcp
       - name: Exercise real sandbox development fixture without grants or devices
         run: python3 -B scripts/offline_development_workflow.py .build/ci-sandbox/release/relayforge-mcp
+      - name: Exercise expiring task authorization and editable sandbox workspace
+        run: python3 -B scripts/offline_authorized_development.py .build/ci-sandbox/release/relayforge-mcp
