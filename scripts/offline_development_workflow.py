@@ -6,6 +6,8 @@ writes. Worker scheduling is deliberately bypassed; this is not live acceptance.
 Missing bubblewrap/user namespaces is a failure, never a simulated pass.
 """
 import json
+import ctypes
+import errno
 import os
 from pathlib import Path
 import signal
@@ -13,6 +15,52 @@ import subprocess
 import sys
 import tempfile
 import time
+
+
+def deny_namespace_creation():
+    """Test-only kernel fault injection, inherited by the real worker/bwrap.
+
+    Block namespace syscalls, not the sandbox executable. Ordinary fork/exec
+    remains available so a mistaken host-shell fallback would actually run.
+    """
+    lib = ctypes.CDLL('libseccomp.so.2', use_errno=True)
+    lib.seccomp_init.argtypes = [ctypes.c_uint32]
+    lib.seccomp_init.restype = ctypes.c_void_p
+    lib.seccomp_syscall_resolve_name.argtypes = [ctypes.c_char_p]
+    lib.seccomp_syscall_resolve_name.restype = ctypes.c_int
+    lib.seccomp_rule_add.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
+                                   ctypes.c_int, ctypes.c_uint]
+    lib.seccomp_load.argtypes = [ctypes.c_void_p]
+    lib.seccomp_release.argtypes = [ctypes.c_void_p]
+    context = lib.seccomp_init(0x7fff0000)  # SCMP_ACT_ALLOW
+    if not context:
+        raise RuntimeError('seccomp initialization failed')
+    try:
+        # clone3 returns ENOSYS to preserve normal libc fork fallback. bwrap
+        # namespace creation uses clone flags or unshare; both are denied.
+        for name, code in [(b'unshare', errno.EPERM), (b'clone3', errno.ENOSYS)]:
+            number = lib.seccomp_syscall_resolve_name(name)
+            if number < 0 or lib.seccomp_rule_add(context, 0x50000 | code, number, 0):
+                raise RuntimeError('seccomp rule failed')
+
+        class Compare(ctypes.Structure):
+            _fields_ = [('arg', ctypes.c_uint), ('op', ctypes.c_int),
+                        ('mask', ctypes.c_uint64), ('value', ctypes.c_uint64)]
+
+        lib.seccomp_rule_add_array.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
+                                             ctypes.c_int, ctypes.c_uint,
+                                             ctypes.POINTER(Compare)]
+        for flag in [0x20000, 0x2000000, 0x4000000, 0x8000000,
+                     0x10000000, 0x20000000, 0x40000000]:
+            rule = Compare(0, 7, flag, flag)  # SCMP_CMP_MASKED_EQ
+            if lib.seccomp_rule_add_array(context, 0x50000 | errno.EPERM,
+                                         lib.seccomp_syscall_resolve_name(b'clone'),
+                                         1, ctypes.byref(rule)):
+                raise RuntimeError('seccomp clone rule failed')
+        if lib.seccomp_load(context):
+            raise RuntimeError('seccomp installation failed')
+    finally:
+        lib.seccomp_release(context)
 
 
 WORKFLOW = r'''set -eu
@@ -130,6 +178,46 @@ def run(binary):
             assert worker(failed_id).returncode == code
             assert value('job.status', task_id=failed_id)['exit_code'] == code
 
+        # Verify namespace identity and interfaces before attempting TEST-NET
+        # addresses, so a regression cannot send probes through host networking.
+        host_net = os.readlink('/proc/self/ns/net')
+        isolation = """python3 - <<'PY'
+import errno, os, socket
+assert os.readlink('/proc/self/ns/net') != %r
+assert [name for _, name in socket.if_nameindex()] == ['lo']
+assert not os.path.exists(%r)
+for family, address in [(socket.AF_INET, ('192.0.2.1', 9)),
+                        (socket.AF_INET6, ('2001:db8::1', 9))]:
+    with socket.socket(family, socket.SOCK_STREAM) as sock:
+        sock.settimeout(0.2)
+        try:
+            sock.connect(address)
+        except OSError as error:
+            assert error.errno in (errno.ENETUNREACH, errno.EHOSTUNREACH,
+                                   errno.EAFNOSUPPORT), error
+        else:
+            raise AssertionError('external network accessible')
+print('network-and-private-file-isolation-verified')
+PY
+""" % (host_net, str(repo / '.env'))
+        isolated_id, _ = prepare(6, isolation)
+        assert worker(isolated_id).returncode == 0
+        assert value('job.output', task_id=isolated_id)['stdout'].strip() == \
+            'network-and-private-file-isolation-verified'
+
+        unavailable_id, unavailable_dir = prepare(7, "printf 'HOST_FALLBACK_EXECUTED'")
+        unavailable = subprocess.run([binary, '--sandbox-job-worker', unavailable_id],
+                                     env=env, capture_output=True, timeout=20,
+                                     preexec_fn=deny_namespace_creation)
+        assert unavailable.returncode != 0
+        denied = value('job.output', task_id=unavailable_id)
+        assert denied['status']['exit_code'] != 0, denied
+        assert 'HOST_FALLBACK_EXECUTED' not in denied['stdout'], denied
+        assert 'bwrap:' in denied['stderr'], denied
+        denied_receipt = (unavailable_dir / 'result.json').read_bytes()
+        assert worker(unavailable_id).returncode == 2
+        assert denied_receipt == (unavailable_dir / 'result.json').read_bytes()
+
         chain_id = 'relayforge-job-1792390000-000005'
         chain_dir = jobs / chain_id
         chain_dir.mkdir(mode=0o700)
@@ -174,6 +262,8 @@ def run(binary):
                            'missing_grants_denied', 'private_paths_denied',
                            'exit_status', 'command_timeout', 'duplicate_refused',
                            'real_chain_handoff_and_replay_denial',
+                           'network_namespace_and_external_route_denial',
+                           'kernel_denied_isolation_fails_closed_without_fallback',
                            'worker_crash_no_replay', 'new_mcp_client_reads_receipts',
                            'host_source_unchanged'],
                 'not_tested': ['systemd_scheduling_and_resource_enforcement',

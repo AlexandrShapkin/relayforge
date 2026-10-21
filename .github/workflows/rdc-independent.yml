@@ -15,7 +15,10 @@ concurrency:
 
 jobs:
   verify-offline:
-    runs-on: ubuntu-latest
+    # Noble's restricted userns policy denies bwrap's loopback RTM_NEWADDR.
+    # Keep real --unshare-all execution on a compatible disposable image;
+    # never disable AppArmor, share host networking, or fall back to host shell.
+    runs-on: ubuntu-22.04
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/.build/ci
     timeout-minutes: 25
@@ -23,6 +26,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt

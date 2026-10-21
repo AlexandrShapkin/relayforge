@@ -52,6 +52,24 @@ has no terminal success and cannot run again. There is no expiring permission
 test because that contract is not implemented; testing a fake expiry would
 not establish authorization enforcement.
 
+The integration job pins the disposable `ubuntu-22.04` image. The previous
+`ubuntu-latest` run used Ubuntu 24.04.5 and failed inside Bubblewrap's loopback
+setup (`RTM_NEWADDR: Operation not permitted`), consistent with Noble's
+[restricted user namespace capabilities](https://documentation.ubuntu.com/release-notes/24.04/).
+Runtime flags remain `--unshare-all`; AppArmor/sysctls are not relaxed. Python
+3.12 is selected explicitly for the repository's Python 3.11+ checks. GitHub
+[retires this runner on April 17, 2027](https://github.com/actions/runner-images/issues/14254);
+replace it with a verified compatible disposable environment before retirement.
+The Rust checks workflow continues to use the current Ubuntu image.
+
+Real negative tests compare host/sandbox network namespace identities, require
+only loopback, and reject external IPv4/IPv6 TEST-NET routes and private host
+files. Test-only libseccomp fault injection denies namespace creation to the
+actual worker/Bubblewrap subprocess while leaving ordinary fork/exec available.
+That attempt must publish a nonzero receipt, never execute its script on the
+host, and remain non-replayable. Missing libseccomp or unavailable isolation
+fails verification; no test is skipped or replaced with a mock.
+
 Claims are synced before execution and retained through terminal/unknown
 states. An ambiguous crash requires inspection and an explicitly new job, not
 resuming or deleting the claim to replay scripts. Existing conservative
