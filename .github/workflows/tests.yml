@@ -25,6 +25,8 @@ jobs:
           assert contract["execution"]["auto_merge"] is False
           assert contract["execution"]["auto_deploy"] is False
           PY
+      - name: Verify reviewed governance sources
+        run: python3 -B scripts/test_governance_sources.py
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
