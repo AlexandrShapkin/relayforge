@@ -15,10 +15,7 @@ concurrency:
 
 jobs:
   verify-offline:
-    # Noble's restricted userns policy denies bwrap's loopback RTM_NEWADDR.
-    # Keep real --unshare-all execution on a compatible disposable image;
-    # never disable AppArmor, share host networking, or fall back to host shell.
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/.build/ci
     timeout-minutes: 25
@@ -26,9 +23,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -53,12 +47,6 @@ jobs:
         run: cargo build --release --locked -p relayforge-agent -p relayforge-mcp
       - name: Confirm restricted MCP operation without devices
         run: python3 scripts/offline_mcp_smoke.py .build/ci/release/relayforge-mcp
-      - name: Install disposable-runner sandbox dependency
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes bubblewrap
-      - name: Exercise real sandbox development fixture without grants or devices
-        run: python3 -B scripts/offline_development_workflow.py .build/ci/release/relayforge-mcp
       - name: Package CI-only binaries
         run: |
           python3 - <<'PYMETA'
@@ -80,3 +68,25 @@ jobs:
             /tmp/relayforge-ci-linux-x86_64.tar.gz.sha256
           retention-days: 7
           if-no-files-found: error
+
+  sandbox-integration:
+    # Noble's restricted userns policy denies bwrap's loopback RTM_NEWADDR.
+    # Do not relax AppArmor or networking. Build the exact source on Jammy
+    # for its libc; full workspace checks above retain the current Ubuntu.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.build/ci-sandbox
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install disposable-runner sandbox dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+      - name: Build exact-head sandbox worker for this runner
+        run: cargo build --release --locked -p relayforge-mcp
+      - name: Exercise real sandbox development fixture without grants or devices
+        run: python3 -B scripts/offline_development_workflow.py .build/ci-sandbox/release/relayforge-mcp
