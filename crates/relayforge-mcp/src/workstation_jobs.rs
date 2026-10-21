@@ -439,7 +439,7 @@ pub(crate) fn schedule_worker(home: &Path, id: &str, limit: u32) -> Result<(), S
     if !valid_id(id) || !(600..=3600).contains(&limit) {
         return Err("worker schedule denied".into());
     }
-    let binary = home.join("Projects/relayforge/target/release/relayforge-mcp");
+    let binary = crate::runtime::current_image(home)?;
     if !binary.is_file() {
         return Err("worker binary unavailable".into());
     }

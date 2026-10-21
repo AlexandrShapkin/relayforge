@@ -40,6 +40,7 @@ installation and verified live-host state.
 Required source checks documented in [README.md](README.md):
 
 ```sh
+export CARGO_TARGET_DIR="$PWD/.build/verification"
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
@@ -74,3 +75,14 @@ device cleanup and uncertain/destructive operations require separate authority.
 Record exact candidates, actions and measured reclaimed space; if any
 precondition is unknown, preserve the item and report it for review.
 
+
+## P0 runtime/build boundary
+
+Never build into legacy `target/release` or any installed runtime location.
+All local Cargo checks must explicitly select an isolated target directory;
+GitHub-hosted CI is preferred. `just verify` overrides stale target environment.
+The installed old parent remains vulnerable until separately approved migration;
+source changes alone are not deployment. Read [runtime artifacts](docs/runtime-artifacts.md)
+before touching any deployment/recovery entrypoint. No historical backup name
+proves v8 or authorizes rollback. Owner approval, verified artifact/rollback and
+independent technical ACCEPT remain separate gates.

@@ -1,3 +1,7 @@
+> P0 runtime notice: old build/hot-swap instructions below are historical where
+> inconsistent with [runtime artifacts](runtime-artifacts.md). Never compile to
+> legacy `target/release`; no source-only action authorizes activation.
+
 # Development continuity when Remote Desktop Commander quota is exhausted
 
 This repository intentionally supports a **development path that does not need
@@ -177,22 +181,11 @@ only after a subprocess or large file has already exhausted memory. Retained
 limits: 64 KiB per command stream and 48 KiB per tracked source file.
 Excess output is denied; timeout and output caps are not permission grants.
 
-The established no-RDC update sequence is:
-
-1. Make and validate changes in GitHub, then merge to `main`.
-2. Invoke `repo.sync`, await completion through `task.status` and `task.logs`,
-   and verify the new checkout is clean.
-3. Invoke `build.start`, await `Result=success` and `ExecMainStatus=0`.
-4. On a hot-stdio deployment, leave the tunnel running and invoke
-   `capabilities` or another MCP operation: the persistent parent loads the
-   new release binary for each request. Verify `relayforge_workstation_status`
-   continues to report a recent authenticated poll.
-5. After the one-time transition to hot-stdio, `tunnel.restart` is refused
-   by new workers. A manual restart is reserved for explicit transport
-   maintenance, with an independent recovery path.
-
-This path still depends on GitHub, ChatGPT and the Secure MCP Tunnel for
-connectivity and identity, but it consumes no Remote Desktop Commander quota.
+The previous build-to-live update sequence is **retired after incident #77**.
+`repo.sync` and `build.start` are source/isolated-build operations only. Neither
+activates code. See [runtime artifacts](runtime-artifacts.md) for the independent
+artifact store, explicit operator approval, verified rollback and separately
+approved parent migration. Installed legacy code is not repaired by this text.
 
 ## Collision-safe workstation background operations
 
@@ -212,60 +205,18 @@ success; scheduling is not proof of successful execution.
 
 A restarted tunnel still needs live authenticated poll verification.
 
-## Stable tunnel stdio parent and worker hot swap
+## Stable parent and isolated runtime (source proposal; Issue #77)
 
-The `--readonly-stdio` entrypoint is now a long-lived JSON-RPC relay rather
-than the tool executor. It preserves the Secure MCP Tunnel stdio connection
-while spawning the **fixed** released MCP binary with `--readonly-worker`
-for each incoming request. Each worker uses the identical remote allowlist
-and processes one request only. The caller cannot provide the executable,
-environment, shell or worker arguments. Notifications remain silent. Failed,
-timed-out, malformed or oversized new worker replies fall back to the
-parent's already-running restricted executable (`/proc/self/exe`) for the
-same request; if that also fails, the parent returns a generic MCP error.
-The fallback does not use a user-supplied executable and does not weaken
-the tunnel's operation allowlist. This protects the current live connection
-from a bad on-disk upgrade, but **does not survive a parent restart**.
-A durable on-disk last-known-good release and boot recovery remain future work.
+The revised parent spawns its own pinned `/proc/<parent-pid>/exe` image for every
+request. It never opens mutable Cargo output or the `current` selector for a
+new worker. Versioned runtime artifacts, new launchers/jobs and controlled
+restart are specified in [runtime artifacts](runtime-artifacts.md).
 
-Consequently a new local Cargo release build replaces the **next** worker
-without disconnecting the tunnel or requiring a plugin reconnect. The
-`tools/list` response can reflect newly deployed operations without
-restarting the control-plane session; the ChatGPT client may still require
-a manual Refresh tools when the displayed parameter schema changes.
-
-**One-time transition:** an already running legacy `--readonly-stdio`
-process does not learn this behaviour merely by replacing its executable.
-After verifying CI and compiling the new binary, the tunnel must be
-restarted once (or the parent upgraded through a separate planned handoff)
-to activate hot-stdio. Future normal source builds must not restart it.
-Before the one-time transition, verify a rollback/recovery channel.
-
-This is a session-continuity improvement, not a guarantee of permanent
-tunnel connectivity: the OpenAI control plane, ThinkPad networking, and
-user service must still be running. It does not remove ChatGPT or GitHub
-provider dependencies. The optional `--readonly-worker` command is
-restricted to tunnel policy; never substitute the unrestricted default
-stdio mode.
-
-### One-time activation with rollback
-
-`deploy/relayforge-hot-activate.sh EXPECTED_MAIN_SHA` is a **local-user-only**
-one-time bootstrap after the reviewed merge is present on ThinkPad. It refuses
-a different commit or dirty tracked checkout, locates the currently running
-restricted legacy MCP and saves its **mapped executable** from
-`/proc/<pid>/exe` into private local state (not the possibly already-rebuilt
-on-disk release), runs a fresh locked release build and offline MCP smoke
-tests, restarts the tunnel once, and requires a **fresh** authenticated
-control-plane poll. If compilation, testing or tunnel recovery fails, it
-restores the previous MCP binary and attempts to restart the service.
-A verified new worker is also copied into local state as an initial
-last-known-good artifact. This is a recovery best effort, not a substitute
-for human physical recovery after a machine/network failure.
-
-Do not execute this bootstrap through an MCP approval-bypass mechanism or
-give it API credentials. The operator must review the exact merge and
-authorize the one-time service restart separately.
+The old deployed parent still uses the legacy build path until an independently
+approved local migration/reconnect. The old `relayforge-hot-activate.sh` now
+refuses all actions: it must not compile/install/restart. Historical successful
+hot swaps and rollback filenames do not authorize another deployment or prove
+that a retained binary is v8. There is no proven zero-downtime handoff in this PR.
 
 ## Live diagnostics without RDC or a tunnel restart
 

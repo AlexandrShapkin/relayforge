@@ -397,6 +397,8 @@ fn spawn_task(repo: &Path, kind: &str) -> Result<String, String> {
     }
     let repo_string = repo.to_str().ok_or("invalid repo path")?;
     let lock = task_lock(repo)?;
+    let build_target = repo.join(".build/workstation");
+    let build_target = build_target.to_str().ok_or("build target unavailable")?;
     let workdir = format!("--working-directory={repo_string}");
     let mut last_reason = "unavailable";
     for attempt in 1..=3 {
@@ -431,6 +433,8 @@ fn spawn_task(repo: &Path, kind: &str) -> Result<String, String> {
                 "build",
                 "--release",
                 "--locked",
+                "--target-dir",
+                build_target,
                 "-p",
                 "relayforge-mcp",
                 "-p",

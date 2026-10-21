@@ -10,6 +10,6 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=%h/Projects/relayforge/target/release %h/.local/state/relayforge
+ReadWritePaths=%h/.local/state/relayforge
 RestrictAddressFamilies=AF_UNIX
 UMask=0077
