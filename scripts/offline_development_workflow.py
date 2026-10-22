@@ -267,7 +267,7 @@ PY
                            'worker_crash_no_replay', 'new_mcp_client_reads_receipts',
                            'host_source_unchanged'],
                 'not_tested': ['systemd_scheduling_and_resource_enforcement',
-                               'expiring_source_authorization_not_implemented',
+                               'task_authorization_covered_by_separate_fixture',
                                'secure_tunnel_disconnect', 'live_device_workflow',
                                'github_publication_from_fixture'],
                 'production_ready': False}
