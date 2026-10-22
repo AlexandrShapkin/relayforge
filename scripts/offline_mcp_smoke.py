@@ -106,7 +106,7 @@ def main():
         "workstation write succeeded without local operator opt-in")
     assert by_id[8]["result"]["isError"] is False
     capabilities = json.loads(by_id[8]["result"]["content"][0]["text"])
-    assert capabilities["api_revision"] == 8
+    assert capabilities["api_revision"] == 9
     assert "repo.sync" in capabilities["operations"]
     assert "task.list" in capabilities["operations"]
     assert "tunnel.inspect" in capabilities["operations"]

@@ -64,11 +64,14 @@ class IsolationTests(unittest.TestCase):
             cargo.write_text('#!/usr/bin/env python3\nimport sys,json,os,pathlib\na=sys.argv[1:]\nt=pathlib.Path(os.environ["CARGO_TARGET_DIR"])\nif a[0]!="fmt": assert a[a.index("--target-dir")+1]==str(t)\nassert str(t).endswith("/.build/verification")\nwith open("cargo-calls.jsonl","a") as f:f.write(json.dumps(a)+"\\n")\nif a[0]=="build":\n (t/"release").mkdir(parents=True)\n (t/"release/relayforge-mcp").write_bytes(b"fixture build")\n')
             cargo.chmod(0o700)
             (root / 'scripts/offline_mcp_smoke.py').write_text('import sys,pathlib\np=pathlib.Path(sys.argv[1]);assert p==pathlib.Path.cwd()/".build/verification/release/relayforge-mcp";assert p.read_bytes()==b"fixture build"\npathlib.Path("smoke-ran").write_text("ok")')
+            (root / 'scripts/offline_artifact_acceptance.py').write_text(
+                (root / 'scripts/offline_mcp_smoke.py').read_text().replace('smoke-ran', 'artifact-acceptance-ran'))
             env = dict(os.environ, PATH=str(root / 'bin') + os.pathsep + os.environ['PATH'], CARGO_TARGET_DIR=str(root / 'target'))
             result = subprocess.run(['just', 'verify'], cwd=root, env=env, capture_output=True, text=True, timeout=40)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(snapshot(live), before)
             self.assertTrue((root / 'smoke-ran').exists())
+            self.assertTrue((root / 'artifact-acceptance-ran').exists())
             self.assertEqual(len((root / 'cargo-calls.jsonl').read_text().splitlines()), 4)
 
     def test_legacy_activation_is_fail_closed_and_new_workers_do_not_select_cargo(self):

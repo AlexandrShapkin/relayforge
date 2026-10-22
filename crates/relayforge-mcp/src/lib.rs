@@ -52,3 +52,5 @@ pub mod workstation_retire;
 pub mod workstation_recovery;
 
 mod runtime;
+
+mod workstation_artifacts;

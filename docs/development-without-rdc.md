@@ -406,3 +406,63 @@ systemd user timer is **not installed or activated by CI**. It requires
 the local operator to review and install on ThinkPad, then execute real
 fault-injection tests. It does not recover a powered-off or offline
 laptop and is not full remote break-glass access.
+
+## Owner-approved artifact reports (API revision 9; activation separate)
+
+`artifact.read` and `artifact.list` use `path` as `<root-id>/<relative-path>`
+(or just `<root-id>` for listing). There is no root-management MCP operation.
+Missing local configuration denies access. The existing mutation grants do not
+approve artifact reads, and artifact configuration grants no mutations.
+
+The local owner may separately approve a private 0600, singly linked UTF-8 JSON
+file at `~/.config/relayforge/artifact-roots.json`, containing only, for example:
+
+```json
+{"roots":{"activation":"/home/user/Projects/relayforge/.build/issue77-development-activation-20261022"}}
+```
+
+This is an example for attended configuration, not an instruction to create a
+grant during source development. Up to eight root IDs may select **one directory**
+below `~/Projects/relayforge/.build/` or
+`~/.local/state/relayforge/artifacts/`; HOME, entire projects and arbitrary host
+roots are refused. Ancestors are pinned without following symlinks. Root/subdirs
+and files must belong to the invoking user and be non-writable by group/others;
+system ancestors of HOME may be root-owned. Files must have one hardlink.
+Configuration ancestors must also be owner-controlled; configuration is re-read
+on each call. Revocation affects subsequent calls, not an already pinned read.
+
+Only non-hidden ASCII relative names and `.md`, `.txt`, `.json`, `.log` reports
+are eligible. Depth is capped at four components below the root; files are
+limited to 48 KiB of UTF-8 without binary control characters. Sensitive names,
+credential extensions and common credential markers are denied. These checks
+are defense in depth, **not a general secret detector**: owners must review and
+approve report-only roots and their contents, including future sibling reports.
+Listing examines at most 64 entries, returns sorted eligible report names and
+fails closed on unsafe eligible entries or overflow; it does not recurse or
+paginate. Reads return `utf8_text` and `byte_length`. Errors use fixed artifact
+categories (`artifact denied`, `artifact path denied`, `artifact root denied`,
+`artifact too large`, `artifact list too large`, or text/authorization denial),
+never host errors or rejected contents. The existing private audit is required
+and records only operation/time, never paths or file bodies. No shell, writes
+to artifacts, services, selectors or source-edit permission are added.
+
+Minimum attended activation after independent exact-head review/CI:
+
+1. The owner separately authorizes the existing verified artifact installation
+   and pinned-parent migration procedure in [runtime artifacts](runtime-artifacts.md).
+   This feature does not replace that procedure or establish rollback evidence.
+2. Locally review the intended AUTHORIZATION.md and sibling reports, directory
+   ownership/modes and the exact JSON root map; separately approve installing
+   that configuration with mode 0600. Do not reuse a mutation grant as consent.
+3. Through the authenticated MCP connection, call `capabilities`: require API 9,
+   `artifacts.configured=true`, `read_only=true`, `source_edit=false` and unchanged
+   shell/file restrictions. Call `artifact.read` with
+   `activation/AUTHORIZATION.md`, then `artifact.list` with `activation`.
+4. Confirm unknown root, `../`, absolute path, sensitive filename and symlink
+   reads fail. Preserve the sanitized receipt. Source/offline success is not
+   evidence of this live authenticated acceptance.
+5. Revoke by removing the locally approved root map entry/file; confirm new
+   reads fail. Any runtime rollback follows the separately approved procedure.
+
+Offline verification (disposable HOME/config only):
+`python3 -B scripts/offline_artifact_acceptance.py <isolated-built-mcp>`.

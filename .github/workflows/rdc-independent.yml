@@ -47,6 +47,8 @@ jobs:
         run: cargo build --release --locked -p relayforge-agent -p relayforge-mcp
       - name: Confirm restricted MCP operation without devices
         run: python3 scripts/offline_mcp_smoke.py .build/ci/release/relayforge-mcp
+      - name: Verify owner-approved artifact reads in a disposable home
+        run: python3 -B scripts/offline_artifact_acceptance.py .build/ci/release/relayforge-mcp
       - name: Package CI-only binaries
         run: |
           python3 - <<'PYMETA'
