@@ -18,6 +18,7 @@ def commands(root=ROOT):
         ["cargo", "test", "--workspace", "--locked", "--target-dir", str(target)],
         ["cargo", "build", "--release", "--locked", "--target-dir", str(target), "-p", "relayforge-agent", "-p", "relayforge-mcp"],
         ["python3", "-B", "scripts/offline_mcp_smoke.py", str(target / "release/relayforge-mcp")],
+        ["python3", "-B", "scripts/offline_artifact_acceptance.py", str(target / "release/relayforge-mcp")],
     ]
 
 
