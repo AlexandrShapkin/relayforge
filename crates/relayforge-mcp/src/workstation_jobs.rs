@@ -337,6 +337,11 @@ fn run_worker_at(home: &Path, id: &str) -> i32 {
     if !valid_id(id) {
         return 2;
     }
+    // A worker invocation is single-use, including after a crash. Never replay
+    // scripts just because a terminal receipt was not durably published.
+    if claim_worker(home, id).is_err() {
+        return 2;
+    }
     match run_job(home, id) {
         Ok(code) => code,
         Err(_) => {
@@ -357,6 +362,23 @@ fn run_worker_at(home: &Path, id: &str) -> i32 {
             1
         }
     }
+}
+
+fn claim_worker(home: &Path, id: &str) -> Result<(), String> {
+    let dir = job_dir(home, id)?;
+    for terminal in ["result.json", "stopped"] {
+        match fs::symlink_metadata(dir.join(terminal)) {
+            Ok(_) => return Err("job already terminal".into()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(_) => return Err("job state unavailable".into()),
+        }
+    }
+    // create_new arbitrates concurrent invocations. Retain even an incomplete
+    // claim: an ambiguous attempt requires inspection, never automatic replay.
+    write_private(&dir, "worker.claim", b"single-use\n")?;
+    fs::File::open(&dir)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| "worker claim unavailable".to_string())
 }
 
 fn unit_state(id: &str) -> Result<Option<String>, String> {
@@ -457,6 +479,12 @@ pub(crate) fn schedule_worker(home: &Path, id: &str, limit: u32) -> Result<(), S
             &unit,
             "--property=Type=exec",
             &max,
+            "--property=MemoryMax=512M",
+            "--property=TasksMax=64",
+            "--property=CPUQuota=100%",
+            "--property=LimitFSIZE=8M",
+            "--property=NoNewPrivileges=yes",
+            "--property=UMask=0077",
             "--",
             path,
             "--sandbox-job-worker",
@@ -526,6 +554,7 @@ fn job_remove(home: &Path, id: &str) -> Result<String, String> {
         "stderr.log",
         "result.json",
         "stopped",
+        "worker.claim",
     ];
     let chain_steps = if read_text(&dir, "chain.count", 16)?.is_some() {
         Some(crate::workstation_chain::chain_count(&dir)?)
@@ -663,6 +692,43 @@ mod tests {
         assert_eq!(status["failure_kind"], "worker_failed");
         assert!(!status.to_string().contains("private"));
         assert!(read_text(&job, "result.json", 2048).unwrap().is_some());
+        let receipt = fs::read(job.join("result.json")).unwrap();
+        assert_eq!(run_worker_at(&home, id), 2);
+        assert_eq!(fs::read(job.join("result.json")).unwrap(), receipt);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn concurrent_worker_claims_allow_one_attempt_and_crashes_cannot_replay() {
+        let home = std::env::temp_dir().join(format!(
+            "relayforge-worker-claim-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let state = home.join(".local/state/relayforge");
+        fs::create_dir_all(&state).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+        let jobs = root(&home, true).unwrap().unwrap();
+        let id = "relayforge-job-1792390000-a1b2c3";
+        let job = jobs.join(id);
+        DirBuilder::new().mode(0o700).create(&job).unwrap();
+        write_private(&job, "script.sh", b"echo must-not-replay").unwrap();
+        let winners = thread::scope(|scope| {
+            let attempts: Vec<_> = (0..8)
+                .map(|_| scope.spawn(|| claim_worker(&home, id).is_ok()))
+                .collect();
+            attempts
+                .into_iter()
+                .map(|t| usize::from(t.join().unwrap()))
+                .sum::<usize>()
+        });
+        assert_eq!(winners, 1);
+        assert_eq!(run_worker_at(&home, id), 2);
+        assert!(!job.join("result.json").exists());
+        assert!(!job.join("stdout.log").exists());
         fs::remove_dir_all(home).unwrap();
     }
 
