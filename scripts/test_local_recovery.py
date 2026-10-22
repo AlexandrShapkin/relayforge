@@ -54,6 +54,7 @@ class RecoveryTests(unittest.TestCase):
         digest = hashlib.sha256(data.encode()).hexdigest()
         version = store / "artifacts" / ("a" * 40 + "-" + digest)
         version.mkdir(parents=True, exist_ok=True)
+        store.chmod(0o700)
         write(version / "relayforge-mcp", data, 0o500)
         write(version / "manifest.json", json.dumps({"schema_version": 1, "commit": "a" * 40,
               "sha256": digest, "binary": "relayforge-mcp"}), 0o400)

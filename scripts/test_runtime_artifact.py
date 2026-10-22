@@ -1,9 +1,11 @@
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "deploy"))
 import runtime_artifact as runtime
@@ -56,6 +58,15 @@ class ArtifactTests(unittest.TestCase):
         self.assertEqual(before, {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in self.root.iterdir()})
         self.assertFalse((self.root / 'current').exists())
 
+    def test_relabeling_identical_bytes_does_not_establish_a_rollback(self):
+        candidate = self.artifact('candidate', 'a' * 40, b'identical')
+        rollback = self.artifact('rollback', 'b' * 40, b'identical')
+        receipt = self.root / 'receipt.json'
+        receipt.write_text(json.dumps({'commit': rollback[2], 'sha256': rollback[3],
+                                      'restricted_worker_ok': True, 'live_health_ok': True}))
+        with self.assertRaisesRegex(runtime.ArtifactError, 'distinct verified rollback'):
+            runtime.activation_plan(runtime.verify(*candidate), runtime.verify(*rollback), receipt)
+
     def test_symlinked_artifacts_and_redirected_parent_are_rejected(self):
         args = self.artifact('candidate', 'a' * 40, b'candidate')
         alias = self.root / 'alias'
@@ -66,6 +77,62 @@ class ArtifactTests(unittest.TestCase):
         directory.symlink_to(self.root, target_is_directory=True)
         with self.assertRaises(runtime.ArtifactError):
             runtime.verify(directory / 'candidate', *args[1:])
+
+    def installed(self):
+        store = self.root / 'runtime'
+        store.mkdir(mode=0o700)
+        binary, manifest, commit, digest = self.artifact('candidate', 'a' * 40, b'candidate')
+        version = store / 'artifacts' / f'{commit}-{digest}'
+        version.mkdir(parents=True)
+        binary.rename(version / 'relayforge-mcp')
+        manifest.rename(version / 'manifest.json')
+        (version / 'manifest.json').chmod(0o400)
+        (store / 'current').symlink_to(f'artifacts/{version.name}')
+        return store, version, store / 'current/relayforge-mcp'
+
+    def test_installed_runtime_requires_private_store_and_frozen_owned_files(self):
+        store, version, selector = self.installed()
+        self.assertEqual(runtime.verify_installed(selector), version / 'relayforge-mcp')
+        for path, mode in [(store, 0o755), (store / 'artifacts', 0o777),
+                           (version, 0o777), (version / 'relayforge-mcp', 0o700),
+                           (version / 'manifest.json', 0o600)]:
+            with self.subTest(path=path):
+                original = path.stat().st_mode & 0o777
+                path.chmod(mode)
+                try:
+                    with self.assertRaises(runtime.ArtifactError):
+                        runtime.verify_installed(selector)
+                finally:
+                    path.chmod(original)
+        with patch.object(runtime.os, 'getuid', return_value=os.getuid() + 1):
+            with self.assertRaises(runtime.ArtifactError):
+                runtime.verify_installed(selector)
+
+    def test_installed_runtime_rejects_redirected_version_and_metadata(self):
+        store, version, selector = self.installed()
+        moved = self.root / 'moved'
+        version.rename(moved)
+        version.symlink_to(moved, target_is_directory=True)
+        with self.assertRaises(runtime.ArtifactError):
+            runtime.verify_installed(selector)
+        version.unlink()
+        moved.rename(version)
+        manifest = version / 'manifest.json'
+        manifest.rename(self.root / 'manifest.json')
+        manifest.symlink_to(self.root / 'manifest.json')
+        with self.assertRaises(runtime.ArtifactError):
+            runtime.verify_installed(selector)
+
+    def test_installed_runtime_requires_canonical_selector_and_preserves_files(self):
+        store, version, selector = self.installed()
+        before = {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in version.iterdir()}
+        for path in [version / 'relayforge-mcp', store / 'current/other',
+                     Path('runtime/current/relayforge-mcp'),
+                     store / 'current/../current/relayforge-mcp']:
+            with self.subTest(path=path), self.assertRaises(runtime.ArtifactError):
+                runtime.verify_installed(path)
+        self.assertEqual(runtime.verify_installed(selector), version / 'relayforge-mcp')
+        self.assertEqual(before, {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in version.iterdir()})
 
 
 if __name__ == '__main__':
