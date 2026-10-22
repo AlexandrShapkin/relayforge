@@ -21,6 +21,9 @@ def main():
         audit.mkdir(parents=True, mode=0o700)
         report = root / "AUTHORIZATION.md"
         report.write_text("Fixture only: attended authorization report.\n")
+        receipt = root / "operation-1792634926759214000.jsonl"
+        receipt.write_text('{"time":1792634926.759214,"event":"started activate"}\n'
+                           '{"time":1792634927.0,"event":"candidate staged and verified"}\n')
         (root / "secret.md").write_text("NEVER_RETURN_THIS")
         os.mkfifo(root / "pipe.txt", mode=0o600)
         (root / "binary.txt").write_bytes(b"binary\x00data")
@@ -57,6 +60,11 @@ def main():
         result = call("artifact.read", "activation/AUTHORIZATION.md")
         assert result["isError"] is False, result
         assert json.loads(result["content"][0]["text"])["utf8_text"] == report.read_text()
+        result = call("artifact.read", "activation/" + receipt.name)
+        assert result["isError"] is False, result
+        payload = json.loads(result["content"][0]["text"])
+        assert payload["utf8_text"] == receipt.read_text()
+        assert payload["byte_length"] == len(receipt.read_bytes())
         for path in ["unknown/AUTHORIZATION.md", "activation/../outside.md", str(report),
                      "activation/secret.md", "activation/escape.md", "activation/binary.txt",
                      "activation/large.txt", "activation/pipe.txt"]:
@@ -65,9 +73,16 @@ def main():
         assert call("artifact.list", "activation")["isError"]
         for name in ["escape.md", "binary.txt", "large.txt", "pipe.txt"]:
             (root / name).unlink()
+        original = receipt.read_bytes()
+        for forbidden in [b'{"event":"access_token: NEVER_RETURN_THIS"}\n',
+                          b'{"event":"bad\x00text"}\n', b'\xff', b'x' * 49153]:
+            receipt.write_bytes(forbidden)
+            assert call("artifact.read", "activation/" + receipt.name)["isError"]
+            assert call("artifact.list", "activation")["isError"]
+        receipt.write_bytes(original)
         result = call("artifact.list", "activation")
         assert result["isError"] is False, result
-        assert json.loads(result["content"][0]["text"])["files"] == ["AUTHORIZATION.md"]
+        assert json.loads(result["content"][0]["text"])["files"] == ["AUTHORIZATION.md", receipt.name]
         assert before[0].st_mtime_ns == report.stat().st_mtime_ns
         assert before[1:] == (report.read_bytes(), config.read_bytes())
         log = (audit / "workstation-dev-audit.jsonl").read_text()

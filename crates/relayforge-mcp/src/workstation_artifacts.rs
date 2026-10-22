@@ -159,7 +159,7 @@ fn parts(path: &str) -> Result<Vec<&str>, String> {
 
 fn report(name: &str) -> bool {
     name_ok(name)
-        && [".md", ".txt", ".log", ".json"]
+        && [".md", ".txt", ".log", ".json", ".jsonl"]
             .iter()
             .any(|ext| name.ends_with(ext))
 }
@@ -427,6 +427,33 @@ mod tests {
             f.call("artifact.list", "activation").unwrap_err(),
             "artifact list too large"
         );
+    }
+
+    #[test]
+    fn operation_jsonl_receipts_keep_report_restrictions() {
+        let f = Fixture::new();
+        let name = "operation-1792634926759214000.jsonl";
+        let path = format!("activation/{name}");
+        let receipt = "{\"time\":1792634926.759214,\"event\":\"started activate\"}\n{\"time\":1792634927.0,\"event\":\"candidate staged and verified\"}\n";
+        fs::write(f.root.join(name), receipt).unwrap();
+        let read: Value = serde_json::from_str(&f.call("artifact.read", &path).unwrap()).unwrap();
+        assert_eq!(read["utf8_text"], receipt);
+        assert_eq!(read["byte_length"], receipt.len());
+        assert!(f
+            .call("artifact.list", "activation")
+            .unwrap()
+            .contains(name));
+        for bytes in [
+            b"{\"event\":\"access_token: hidden\"}\n".to_vec(),
+            b"{\"event\":\"-----BEGIN OPENSSH PRIVATE KEY-----\"}\n".to_vec(),
+            b"{\"event\":\"bad\x00text\"}\n".to_vec(),
+            vec![0xff],
+            vec![b'a'; MAX_BYTES + 1],
+        ] {
+            fs::write(f.root.join(name), bytes).unwrap();
+            assert!(f.call("artifact.read", &path).is_err());
+            assert!(f.call("artifact.list", "activation").is_err());
+        }
     }
 
     #[test]

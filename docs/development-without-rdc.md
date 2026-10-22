@@ -431,7 +431,7 @@ system ancestors of HOME may be root-owned. Files must have one hardlink.
 Configuration ancestors must also be owner-controlled; configuration is re-read
 on each call. Revocation affects subsequent calls, not an already pinned read.
 
-Only non-hidden ASCII relative names and `.md`, `.txt`, `.json`, `.log` reports
+Only non-hidden ASCII relative names and `.md`, `.txt`, `.json`, `.jsonl`, `.log` reports
 are eligible. Depth is capped at four components below the root; files are
 limited to 48 KiB of UTF-8 without binary control characters. Sensitive names,
 credential extensions and common credential markers are denied. These checks
