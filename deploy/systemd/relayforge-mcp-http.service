@@ -14,6 +14,12 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=read-only
+# /home/%u layout only: private 0700 scaffold containing only empty %u/.
+# Mask unmapped system-owned /home; retain the actual home read-only.
+BindReadOnlyPaths=%h/.local/share/relayforge/http-home:/home %h:%h
+# Must already exist as an owner-held 0600 regular file in a 0700 directory.
+# A missing file fails service startup; never make the whole state tree writable.
+ReadWritePaths=%h/.local/state/relayforge/workstation-dev-audit.jsonl
 UMask=0077
 TimeoutStopSec=5
 
