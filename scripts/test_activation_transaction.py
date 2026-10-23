@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """Crash recovery and clean/preserved filesystem installation, without services."""
+import contextlib
 import importlib.util
 import os
 import subprocess
 import sys
+import stat
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 
-spec = importlib.util.spec_from_file_location('activation', Path(__file__).resolve().parents[1] / 'deploy/activation_transaction.py')
+SOURCE = Path(__file__).resolve().parents[1] / 'deploy/activation_transaction.py'
+if Path(__file__).with_name('activation_transaction.py').exists():
+    SOURCE = Path(__file__).with_name('activation_transaction.py')
+spec = importlib.util.spec_from_file_location('activation', SOURCE)
 a = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(a)
 
@@ -107,7 +112,7 @@ os.kill(os.getpid(),signal.SIGKILL)
             self.assertEqual(a.state(path), t.doc['targets'][str(path)]['before'])
             self.assertTrue(t.temporary(path).exists())
 
-    def test_unknown_target_is_not_overwritten_and_other_targets_restore(self):
+    def test_unknown_target_refuses_all_restoration(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             targets = self.fixture(root)
@@ -119,7 +124,7 @@ os.kill(os.getpid(),signal.SIGKILL)
             with self.assertRaises(RuntimeError):
                 t.rollback()
             self.assertEqual(path.read_bytes(), b'unknown owner change')
-            self.assertEqual(os.readlink(root / 'current'), 'baseline')
+            self.assertEqual(os.readlink(root / 'current'), 'candidate')
             path.write_bytes(b'candidate\n')
             t.rollback()
 
@@ -158,6 +163,59 @@ os.kill(os.getpid(),signal.SIGKILL)
             t.commit()
             a.Transaction(root / 'journal', targets).rollback()
             self.assertEqual(os.readlink(root / 'current'), 'candidate')
+
+    def test_commit_io_failures_remain_recoverable(self):
+        for failure in ('write', 'replace', 'file-fsync', 'directory-fsync'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                targets = self.fixture(root)
+                tx = a.Transaction(root / 'journal', targets, True)
+                for path in targets:
+                    tx.apply(path)
+                real_write, real_sync = a.write, a.os.fsync
+                def failing_write(path, value, temporary):
+                    if failure == 'write':
+                        raise OSError('write failed')
+                    return real_write(path, value, temporary)
+                def failing_sync(fd):
+                    directory = stat.S_ISDIR(os.fstat(fd).st_mode)
+                    # Guard is persisted before injecting journal failures.
+                    if failure == ('directory-fsync' if directory else 'file-fsync'):
+                        raise OSError('fsync failed')
+                    return real_sync(fd)
+                a.private_file(tx.path.with_name('journal.commit-in-progress'), True)
+                with patch.object(a, 'write', failing_write), patch.object(a.os, 'fsync', failing_sync):
+                    with patch.object(a.os, 'replace', side_effect=OSError('rename failed')) if failure == 'replace' else contextlib.nullcontext():
+                        with self.assertRaises(OSError):
+                            tx.commit()
+                self.assertEqual(tx.doc['status'], 'pending')
+                reopened = a.Transaction(tx.path, targets)
+                self.assertEqual(reopened.doc['status'], 'pending')
+                reopened.rollback()
+                for path in targets:
+                    self.assertEqual(a.state(path), reopened.doc['targets'][str(path)]['before'])
+
+    def test_commit_guard_cleanup_failure_never_publishes_memory_status(self):
+        for failure in ('unlink', 'directory-fsync'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                targets = self.fixture(root)
+                tx = a.Transaction(root / 'journal', targets, True)
+                for path in targets:
+                    tx.apply(path)
+                real_sync = a.sync
+                def sync(path):
+                    if not tx.path.with_name('journal.commit-in-progress').exists():
+                        raise OSError('guard removal fsync failed')
+                    real_sync(path)
+                with patch.object(Path, 'unlink', side_effect=OSError('unlink failed')) if failure == 'unlink' else patch.object(a, 'sync', sync):
+                    with self.assertRaises(OSError):
+                        tx.commit()
+                self.assertEqual(tx.doc['status'], 'pending')
+                reopened = a.Transaction(tx.path, targets)
+                # The committed journal itself was durably synced before guard
+                # removal; a surviving guard conservatively requires rollback.
+                self.assertEqual(reopened.doc['status'], 'pending' if failure == 'unlink' else 'committed')
 
     def test_symlinks_hardlinks_modes_and_oversize_are_blockers(self):
         with tempfile.TemporaryDirectory() as tmp:

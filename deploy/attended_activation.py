@@ -94,7 +94,7 @@ def configuration():
         m.require(m.digest(path) == item['sha256'], 'grant/credential changed')
 
 
-def invariant():
+def invariant(recovery=False):
     m.require(os.getuid() == m.M['uid'], 'wrong physical owner')
     configuration()
     artifact(BASE, m.M['commit'], m.M['baseline'])
@@ -115,7 +115,8 @@ def invariant():
     m.require(all(m.props(u)['ActiveState'] == 'inactive' for u in m.LEGACY), 'legacy recovery active')
     for unit in m.M['units']:
         props = m.props(unit)
-        m.require(props['NeedDaemonReload'] == 'no' and props['FragmentPath'] == str(UNITS / unit), 'loaded unit changed')
+        m.require((recovery or props['NeedDaemonReload'] == 'no')
+                  and props['FragmentPath'] == str(UNITS / unit), 'loaded unit changed')
         m.require(props['DropInPaths'] == (str(m.GUARD) if unit == m.LEGACY[1] else ''), 'unexpected drop-in')
         drop = UNITS / (unit + '.d')
         m.require(not drop.exists() or (unit == m.LEGACY[1] and set(drop.iterdir()) == {m.GUARD}), 'unexpected drop-in directory')
@@ -220,6 +221,7 @@ def ready():
             if journal.exists():
                 a.regular(journal)
                 transaction = load_attempt(path.name)
+                m.require(transaction.doc['status'] != 'rolling-back', 'rollback requires recovery')
                 if transaction.doc['status'] == 'pending':
                     m.require(all(a.state(target) == row['before']
                                   for target, row in transaction.doc['targets'].items()),
@@ -305,9 +307,17 @@ WantedBy=timers.target
 
 def arm(transaction):
     attempt = transaction.doc['id']
-    templates = recovery_templates(attempt, transaction.doc['deadline'])
+    templates = recovery_templates(attempt, transaction.doc.get('rollback_deadline', transaction.doc['deadline']))
     for name, data in templates.items():
         path = UNITS / name
+        if a.state(path) == a.file_state(data, 0o600):
+            continue
+        old = recovery_templates(attempt, transaction.doc['deadline'])[name]
+        if ('rollback_deadline' in transaction.doc
+                and a.state(path) == a.file_state(old, 0o600)):
+            a.write(path, a.file_state(data, 0o600),
+                    path.with_name(path.name + '.next-' + uuid.uuid4().hex))
+            continue
         m.require(a.state(path) is None, 'recovery unit collision')
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         with os.fdopen(fd, 'wb') as stream:
@@ -325,7 +335,7 @@ def arm(transaction):
 
 
 def disarm(transaction):
-    templates = recovery_templates(transaction.doc['id'], transaction.doc['deadline'])
+    templates = recovery_templates(transaction.doc['id'], transaction.doc.get('rollback_deadline', transaction.doc['deadline']))
     timer = 'relayforge-activation-' + transaction.doc['id'] + '.timer'
     link = UNITS / 'timers.target.wants' / timer
     if (UNITS / timer).exists() or link.exists() or link.is_symlink():
@@ -402,6 +412,23 @@ def rollback(transaction, record, owner_requested=False):
     if transaction.doc['status'] == 'rolled-back' or (transaction.doc['status'] == 'committed' and not owner_requested):
         disarm(transaction)
         return
+    # Reopen the fixed plan and validate every target before any mutation,
+    # including recovery-unit installation and stopping services.
+    verified = load_attempt(transaction.doc['id'])
+    m.require(verified.doc == transaction.doc, 'attempt identity changed')
+    transaction.validate_rollback(exact_after=transaction.doc['status'] == 'committed')
+    invariant(recovery=True)
+    if a.state(m.STORE / 'current') == {'link': CAND}:
+        artifact(CAND, COMMIT, SHA)
+    if transaction.doc['status'] != 'rolling-back':
+        previous = transaction.doc
+        transaction.doc = dict(previous, status='rolling-back', rollback_deadline=int(time.time()) + 90)
+        try:
+            transaction.save()
+        except BaseException:
+            transaction.doc = previous
+            raise
+    arm(transaction)
     baseline = m.STORE / BASE
     if not baseline.exists() and not baseline.is_symlink():
         m.artifact.verify(FROZEN / 'baseline/relayforge-mcp', FROZEN / 'baseline/manifest.json',
@@ -549,10 +576,14 @@ def load_attempt(name):
     transaction = a.Transaction(path, targets(root_map))
     m.require(transaction.doc.get('physical_owner_approved') is True
               and transaction.doc['id'] == name
-              and transaction.doc['status'] in ('pending', 'committed', 'rolled-back')
+              and transaction.doc['status'] in ('pending', 'committed', 'rolling-back', 'rolled-back')
               and isinstance(transaction.doc.get('created'), int)
               and transaction.doc['deadline'] == transaction.doc['created'] + WINDOW,
               'invalid attended recovery journal')
+    if transaction.doc['status'] == 'rolling-back':
+        m.require(type(transaction.doc.get('rollback_deadline')) is int
+                  and transaction.doc['rollback_deadline'] >= transaction.doc['created'],
+                  'invalid rollback deadline')
     expected = {str(m.HTTP): a.file_state(unit_bytes('http', 'baseline'), 0o644),
                 str(TUNNEL): a.file_state(unit_bytes('tunnel', 'baseline'), 0o644),
                 str(m.STORE / 'current'): {'link': BASE}}

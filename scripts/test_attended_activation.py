@@ -82,7 +82,9 @@ class AttendedActivationTests(unittest.TestCase):
             self.commands.append(args)
             if args[:2] == ('enable', '--now'):
                 timer = args[2]
-                (self.units / 'timers.target.wants' / timer).symlink_to(self.units / timer)
+                link = self.units / 'timers.target.wants' / timer
+                if not link.is_symlink():
+                    link.symlink_to(self.units / timer)
             return 'active\n' if args[0] == 'is-active' else ''
         def atomic(path, data, mode):
             temp = path.with_name(path.name + '.atomic')
@@ -100,7 +102,7 @@ class AttendedActivationTests(unittest.TestCase):
             REPORTS=self.home / '.local/state/relayforge/artifacts/fixture',
             AUDIT=self.home / '.local/state/relayforge/workstation-dev-audit.jsonl',
             LOCK=self.home / '.local/state/relayforge/development.lock',
-            invariant=lambda: None, local_health=lambda sha, require_worker=False: self.events.append(('health', sha, require_worker)), candidate_operations=lambda: self.events.append('artifact-check'),
+            invariant=lambda **kwargs: None, local_health=lambda sha, require_worker=False: self.events.append(('health', sha, require_worker)), candidate_operations=lambda: self.events.append('artifact-check'),
             remote=lambda transaction: self.events.append('owner-confirmed'))
         for key, value in values.items():
             p = patch.object(t, key, value, create=True)
@@ -194,6 +196,8 @@ class AttendedActivationTests(unittest.TestCase):
         tx.doc['deadline'] = tx.doc['created'] + 1200
         tx.save()
         t.arm(tx)
+        t.stage_directory(self.store / t.CAND, t.INPUT,
+                          {'relayforge-mcp': 0o500, 'manifest.json': 0o400}, tx.doc['id'])
         for path in [t.m.HTTP, t.TUNNEL, t.CONFIG, self.store / 'previous', self.store / 'current']:
             tx.apply(path)
         tx = t.load_attempt(root.name)
@@ -236,6 +240,82 @@ class AttendedActivationTests(unittest.TestCase):
         t.rollback(tx, self.events.append)
         self.assertEqual(os.readlink(self.store / 'current'), t.CAND)
         t.rollback(tx, self.events.append, owner_requested=True)
+        self.assert_baseline()
+
+    def test_stale_committed_rollback_has_no_mutations(self):
+        for index in range(5):
+            with self.subTest(index=index):
+                case = AttendedActivationTests()
+                case.setUp()
+                try:
+                    t.activate(case.events.append)
+                    tx = case.transaction()
+                    path = Path(list(tx.doc['targets'])[index])
+                    if path.is_symlink():
+                        path.unlink()
+                        path.symlink_to('later-deployment')
+                    else:
+                        path.write_bytes(b'later deployment')
+                    before = {p: t.a.state(p) for p in tx.targets}
+                    case.commands.clear()
+                    with patch.object(t, 'arm') as arm:
+                        with self.assertRaises(RuntimeError):
+                            t.rollback(tx, case.events.append, owner_requested=True)
+                        arm.assert_not_called()
+                    self.assertEqual(case.commands, [])
+                    self.assertEqual(before, {p: t.a.state(p) for p in tx.targets})
+                finally:
+                    case.doCleanups()
+
+    def test_rollback_arm_failure_leaves_intent_before_service_stop(self):
+        t.activate(self.events.append)
+        tx = self.transaction()
+        self.commands.clear()
+        before = {p: t.a.state(p) for p in tx.targets}
+        with patch.object(t, 'arm', side_effect=OSError('timer unavailable')):
+            with self.assertRaises(OSError):
+                t.rollback(tx, self.events.append, owner_requested=True)
+        self.assertEqual(self.transaction().doc['status'], 'rolling-back')
+        self.assertEqual(self.commands, [])
+        self.assertEqual(before, {p: t.a.state(p) for p in tx.targets})
+        t.rollback(self.transaction(), self.events.append)
+        self.assert_baseline()
+
+    def test_changed_deployment_identity_refuses_rollback(self):
+        t.activate(self.events.append)
+        tx = self.transaction()
+        before = {p: t.a.state(p) for p in tx.targets}
+        self.commands.clear()
+        with patch.object(t, 'invariant', side_effect=RuntimeError('launcher changed')):
+            with self.assertRaises(RuntimeError):
+                t.rollback(tx, self.events.append, owner_requested=True)
+        self.assertEqual(self.commands, [])
+        self.assertEqual(before, {p: t.a.state(p) for p in tx.targets})
+
+    def test_explicit_rollback_interruption_resumes_committed_attempt(self):
+        t.activate(self.events.append)
+        tx = self.transaction()
+        old_deadline = tx.doc['deadline']
+        original = t.a.write
+        count = 0
+        def interrupted(path, value, temporary):
+            nonlocal count
+            original(path, value, temporary)
+            if str(path) in tx.targets:
+                count += 1
+                if count == 2:
+                    raise KeyboardInterrupt('simulated SIGKILL')
+        with patch.object(t.a, 'write', interrupted):
+            with self.assertRaises(KeyboardInterrupt):
+                t.rollback(tx, self.events.append, owner_requested=True)
+        reopened = self.transaction()
+        self.assertEqual(reopened.doc['status'], 'rolling-back')
+        self.assertLess(reopened.doc['rollback_deadline'], old_deadline)
+        timer = 'relayforge-activation-' + tx.doc['id'] + '.timer'
+        self.assertEqual((self.units / timer).read_bytes(),
+                         t.recovery_templates(tx.doc['id'], reopened.doc['rollback_deadline'])[timer])
+        self.assertTrue((self.units / ('relayforge-activation-' + tx.doc['id'] + '.timer')).exists())
+        t.rollback(reopened, self.events.append)
         self.assert_baseline()
 
     def test_retry_preserves_staged_candidate_and_reports(self):

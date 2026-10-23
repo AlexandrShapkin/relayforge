@@ -153,9 +153,14 @@ class Transaction:
                     or any(c not in '0123456789abcdef' for c in self.doc['id'])
                     or {p: v['after'] for p, v in self.doc['targets'].items()} != self.targets):
                 raise RuntimeError('journal does not match fixed activation plan')
+            guard = self.path.with_name(self.path.name + '.commit-in-progress')
+            if guard.exists() or guard.is_symlink():
+                regular(guard, limit=0)
+                if self.doc['status'] == 'committed':
+                    self.doc['status'] = 'pending'
 
-    def save(self, initial=False):
-        data = (json.dumps(self.doc, sort_keys=True, indent=2) + '\n').encode()
+    def save(self, initial=False, document=None):
+        data = (json.dumps(self.doc if document is None else document, sort_keys=True, indent=2) + '\n').encode()
         if initial:
             fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
             with os.fdopen(fd, 'wb') as stream:
@@ -181,9 +186,16 @@ class Transaction:
         if observed != row['after']:
             write(path, row['after'], self.temporary(path))
 
+    def validate_rollback(self, exact_after=False):
+        for path, row in self.doc['targets'].items():
+            allowed = (row['after'],) if exact_after else (row['before'], row['after'])
+            if state(path) not in allowed:
+                raise RuntimeError('rollback target changed')
+
     def rollback(self, force=False):
         if self.doc['status'] == 'committed' and not force:
             return
+        self.validate_rollback()
         failures = []
         for path, row in self.doc['targets'].items():
             try:
@@ -206,5 +218,12 @@ class Transaction:
         for path, row in self.doc['targets'].items():
             if state(path) != row['after']:
                 raise RuntimeError('commit target changed')
-        self.doc['status'] = 'committed'
-        self.save()
+        # A durable guard makes even a post-rename fsync failure recoverable.
+        # Recovery must not trust a committed journal while this guard exists.
+        guard = self.path.with_name(self.path.name + '.commit-in-progress')
+        private_file(guard, True)
+        committed = dict(self.doc, status='committed')
+        self.save(document=committed)
+        guard.unlink()
+        sync(guard.parent)
+        self.doc = committed
