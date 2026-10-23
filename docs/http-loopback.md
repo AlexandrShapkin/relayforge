@@ -46,44 +46,21 @@ lingering is enabled. No root service, public listener or inbound firewall
 rule is created. On ThinkPad it has been tested with systemd and the
 local authenticated HTTP MCP call.
 
-API 9 artifact read/list requires a durable audit append before accessing a
-report. The template retains `ProtectHome=read-only` and permits writes only
-to `%h/.local/state/relayforge/workstation-dev-audit.jsonl`. Before an independently
-authorized installation, that file must already exist as an owner-held,
-single-link regular file, mode 0600, in the private 0700 RelayForge state
-directory. A missing file prevents unit startup; an unavailable, insecure or
-oversized audit fails artifact operations closed. The exception does not permit
-creating sibling files or writing reports, configuration or runtime artifacts.
+API9 artifact read/list requires durable audit append. The current candidate
+service uses `ProtectHome=false` so owner-authorized operations can use real HOME;
+it has no home mask, scaffold or single-file mount prerequisite. It retains
+`ProtectSystem=full`, `PrivateTmp=true`, `NoNewPrivileges=true` and private umask.
+Application allowlists, mutation grants, strict authorization-object ownership
+and audit checks remain enforced. This is a source template change, not evidence
+that an installed service has changed.
 
-Issue #77 user-scope verification found that systemd 262 maps only UID 1000
-(`1000 1000 1`): host-root-owned `/home` appears as UID 65534. The unchanged
-artifact `home_dir()` rejects it at `m.uid() != 0 && m.uid() != uid()?`.
-The configuration-only correction supports **only `/home/<username>` homes**:
+The attended package creates missing private directories/audit files safely and
+preserves existing contents. Its read-only preflight distinguishes those creations
+from metadata, ownership, filesystem and recovery blockers. The Rust artifact
+reader anchors trust at an exact-UID-owned HOME descriptor; namespace-translated
+system ancestor ownership cannot authorize data. UID 65534 is not an ownership
+exception. See [activation and recovery](runtime-artifacts.md#self-contained-attended-activation-issue-77).
 
-```
-BindReadOnlyPaths=%h/.local/share/relayforge/http-home:/home %h:%h
-```
-
-Before any separately authorized installation, the owner must prepare the private
-0700 scaffold and its single empty 0700 `<username>` directory. All components
-must be owner-controlled, non-symlink and not writable by group/others. The
-prepared package checks these prerequisites without creating live files. Systemd
-mounts the parent first, then restores the actual home at its original path;
-both mounts are read-only. The scaffold hides unrelated homes. The unchanged
-Rust code still pins and validates actual HOME, config, roots and report files;
-UID 65534 receives no trust. The only writable home exception is the existing
-audit file. Missing mandatory mount sources fail startup. The service cannot
-create its missing audit file; a separately prepared 0600 file permits append
-and fsync. No directory-wide writable exception is used.
-
-This assumes a trusted owner: a hostile process with the same UID can replace
-owner-controlled configuration and mount sources outside the service. The
-preflight is not an atomic defense against a malicious same-UID operator.
-Symlink traversal inside artifact lookups remains descriptor-pinned and denied.
-Other home layouts require separate review; do not generalize this template.
-
-`scripts/test_http_audit_isolation.py BINARY` runs authenticated HTTP acceptance
-in disposable systemd **user** services, including the original failure,
-audit-only failure, corrected read/list, actual unmapped ownership denials,
-symlink/hardlink/mode denials, missing-audit creation failure and fail-closed
-oversized audit. It preserves installed services and binary identities.
+`scripts/test_tunnel_artifact_isolation.py BINARY` tests actual authenticated HTTP
+and readonly-stdio discovery/read/list/denials in disposable user services with
+the candidate hardening, without touching installed services or credentials.

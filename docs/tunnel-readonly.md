@@ -37,7 +37,10 @@ pass `tunnel-client doctor --profile relayforge-local --explain`.
 The authorized ThinkPad deployment has already completed these steps
 and normally runs the service.
 It uses an outbound tunnel and binds only a loopback health endpoint.
-`ProtectHome=read-only` and `NoNewPrivileges` remain enabled.
+`NoNewPrivileges`, `ProtectSystem=full` and `PrivateTmp` remain enabled.
+The current candidate template uses `ProtectHome=false` for owner-authorized
+operations, with no HOME bind scaffold; application grants/allowlists remain
+enforced. Installing it requires the separate attended activation procedure.
 
 To activate, create a restricted runtime API key in
 https://platform.openai.com/settings/organization/api-keys
@@ -52,10 +55,10 @@ After activation, inspect:
 `journalctl --user -u relayforge-tunnel.service -n 30 --no-pager`
 (without printing bearer credentials),
 and the local `/readyz` URL written into `%t/relayforge-tunnel/health.url`. The systemd unit creates that private
-runtime directory and grants write access only there while preserving
-`ProtectHome=read-only`. The user service has `RuntimeDirectory=relayforge-tunnel`
-(mode 0700) and only that runtime directory is writable for the health
-URL file. Startup checks require `tunnel-client health --require-control-plane-poll`
+runtime directory. The user service has `RuntimeDirectory=relayforge-tunnel`
+(mode 0700); the health URL is written there. The candidate permits real HOME
+access for owner-authorized operations and preserves the existing runtime/state
+path declarations. Startup checks require `tunnel-client health --require-control-plane-poll`
 to succeed; `systemctl active` alone does not imply remote connectivity.
 Finally create or connect the **private** ChatGPT MCP plugin for this tunnel
 and verify a real `relayforge_agent_query` call.

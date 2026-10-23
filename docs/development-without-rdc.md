@@ -385,8 +385,9 @@ reachable after applying each step.
 
 ### Tunnel hardening and SSH retirement
 
-The permanent MCP tunnel runs with `ProtectHome=read-only`. It cannot and
-must not write `~/.ssh` directly. A retirement action therefore starts the
+The candidate tunnel permits real HOME access for owner-authorized operations.
+SSH retirement still uses the existing bounded worker rather than an arbitrary
+write API. A retirement action starts the
 same installed RelayForge binary in a short-lived, bounded **user** systemd
 service, using `--retire-ssh-worker config|known_hosts` with no arbitrary
 path, script or host input. MCP receives only a sanitized structured result.
