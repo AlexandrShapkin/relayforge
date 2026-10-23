@@ -147,3 +147,30 @@ restart. Background jobs require a frozen versioned runtime image. The revised
 watchdog may start an inactive tunnel with verified runtime bytes, but cannot
 promote/restore binaries. Its writable paths exclude both Cargo and runtime
 artifacts. Installing these source changes remains a separate action.
+
+## Shared HTTP and tunnel home mask (Issue #77)
+
+The tunnel's independent `--readonly-stdio` child needs the same read-only home
+mask as HTTP under a systemd user namespace. Both candidate units bind the
+private `%h/.local/share/relayforge/http-home` scaffold onto `/home`, then bind
+`%h` back read-only. This supports only `/home/<username>`; the scaffold must
+be owner-held 0700 with only an empty owner-held 0700 `<username>/` child.
+The HTTP audit-only write exception and the tunnel's existing runtime/state
+write paths remain distinct and unchanged.
+
+Attended activation must pin the exact baseline and candidate bytes of **both**
+units, preflight scaffold and audit prerequisites before any installation, and
+restore both baseline configurations before restarting baseline services.
+`deploy/unit_configuration.py` supplies the tested pair update/recovery helper:
+it validates both inputs before writing, tolerates either pinned state after
+interruption, attempts each restoration independently and reloads the manager.
+Failed recovery remains an error requiring diagnosis/retry; unknown unit bytes
+are never overwritten. This helper neither restarts services nor authorizes use.
+
+Source regression: `python3 -B scripts/test_unit_configuration.py`.
+Disposable namespace acceptance (explicit local test authority required):
+`python3 -B scripts/test_tunnel_artifact_isolation.py <pinned-api9-binary>`.
+It runs the real readonly-stdio transport through baseline/candidate/baseline
+with synthetic HOME/configuration, verifies approved read/list and forbidden
+paths, and preserves the tunnel's namespace restrictions. HTTP acceptance is
+separate. This source correction does not change the installed services.

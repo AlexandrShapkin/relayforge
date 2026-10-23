@@ -16,6 +16,8 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=read-only
+# /home/%u layout only: share the reviewed private HTTP home scaffold.
+BindReadOnlyPaths=%h/.local/share/relayforge/http-home:/home %h:%h
 RuntimeDirectory=relayforge-tunnel
 RuntimeDirectoryMode=0700
 ReadWritePaths=%t/relayforge-tunnel %h/.local/state/relayforge
