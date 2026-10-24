@@ -33,7 +33,7 @@ pub fn tool() -> Value {
             "content":{"type":"string","maxLength":49152},
             "task_id":{"type":"string","maxLength":32},
             "script":{"type":"string","maxLength":2048},
-            "parameters":{"type":"object","description":"Strict server-validated job.chain payloads or development.prepare proposal; all other nested payloads denied."}
+            "parameters":{"type":"object","description":"Strict server-validated development, job.chain or artifact.root.prepare proposal; other nested payloads denied."}
         },"required":["operation"],"additionalProperties":false}})
 }
 
@@ -636,6 +636,7 @@ pub fn execute(args: &Value) -> Result<String, String> {
                 "tunnel.inspect", "tunnel.restart", "recovery.inspect",
                 "workspace.list", "workspace.read", "workspace.put",
                 "workspace.remove", "artifact.list", "artifact.read",
+                "artifact.root.prepare", "artifact.root.revoke.prepare",
                 "job.start", "job.list", "job.status", "job.output",
                 "job.stop", "job.remove",
                 "job.chain.start", "job.chain.status", "job.chain.output",
@@ -668,6 +669,36 @@ pub fn execute(args: &Value) -> Result<String, String> {
     }
     let (home, repo) = home_and_repo()?;
     match operation {
+        "artifact.root.prepare" => {
+            if obj.len() != 2 {
+                return Err("artifact approval parameters denied".into());
+            }
+            let params = obj.get("parameters").and_then(Value::as_object)
+                .ok_or("artifact approval parameters denied")?;
+            if params.len() != 2 {
+                return Err("artifact approval parameters denied".into());
+            }
+            let name = params.get("name").and_then(Value::as_str)
+                .ok_or("artifact root alias required")?;
+            let directory = params.get("directory").and_then(Value::as_str)
+                .ok_or("artifact directory required")?;
+            crate::changes::prepare(&json!({"host":"workstation","action":"artifact.root.add",
+                "name":name,"directory":directory}))
+        }
+        "artifact.root.revoke.prepare" => {
+            if obj.len() != 2 {
+                return Err("artifact approval parameters denied".into());
+            }
+            let params = obj.get("parameters").and_then(Value::as_object)
+                .ok_or("artifact approval parameters denied")?;
+            if params.len() != 1 {
+                return Err("artifact approval parameters denied".into());
+            }
+            let name = params.get("name").and_then(Value::as_str)
+                .ok_or("artifact root alias required")?;
+            crate::changes::prepare(&json!({"host":"workstation","action":"artifact.root.remove",
+                "name":name}))
+        }
         "artifact.list" | "artifact.read" => {
             audit(&home, operation)?;
             workstation_artifacts::execute(&home, args)
