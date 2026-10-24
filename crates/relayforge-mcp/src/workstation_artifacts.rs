@@ -398,7 +398,8 @@ where
     // report an unchanged authorization; the owner can inspect the live alias.
     if finalize(&grants, &config_dir).is_err() {
         return Ok(json!({"status":"durability_uncertain","root":id,
-            "effect":"added","reconcile":"artifact.root.inspect"}).to_string());
+            "effect":"added","reconcile":"artifact.root.inspect"})
+        .to_string());
     }
     Ok(json!({"status":"approved","root":id,"read_only":true}).to_string())
 }
@@ -425,7 +426,8 @@ where
     fs::remove_file(pinned(&grants, &name)).map_err(|_| "artifact revocation failed")?;
     if finalize(&grants).is_err() {
         return Ok(json!({"status":"durability_uncertain","root":id,
-            "effect":"removed","reconcile":"artifact.root.inspect"}).to_string());
+            "effect":"removed","reconcile":"artifact.root.inspect"})
+        .to_string());
     }
     Ok(json!({"status":"revoked","root":id}).to_string())
 }
@@ -435,8 +437,11 @@ pub(crate) fn inspect_root(home: &Path, id: &str) -> Result<String, String> {
         return Err("artifact root request denied".into());
     }
     // Current visibility is not evidence of power-loss durability.
-    Ok(json!({"root":id,"currently_accessible":roots(home)?.contains_key(id),
-        "durability":"not_established_by_inspection"}).to_string())
+    Ok(
+        json!({"root":id,"currently_accessible":roots(home)?.contains_key(id),
+        "durability":"not_established_by_inspection"})
+        .to_string(),
+    )
 }
 
 pub fn discovery(home: &Path) -> Value {
@@ -786,28 +791,42 @@ mod tests {
         let fail = || std::io::Error::other("fault injected after mutation");
 
         // First directory sync failure: grant exists and is remotely readable.
-        let outcome = approve_root_with(&f.home, "issue77", "issue77", |_, _| Err(fail()))
-            .unwrap();
-        assert_eq!(serde_json::from_str::<Value>(&outcome).unwrap()["status"],
-            "durability_uncertain");
-        assert_eq!(serde_json::from_str::<Value>(
-            &inspect_root(&f.home, "issue77").unwrap()).unwrap()["currently_accessible"], true);
+        let outcome = approve_root_with(&f.home, "issue77", "issue77", |_, _| Err(fail())).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&outcome).unwrap()["status"],
+            "durability_uncertain"
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&inspect_root(&f.home, "issue77").unwrap()).unwrap()
+                ["currently_accessible"],
+            true
+        );
         assert!(f.call("artifact.read", "issue77/AUTHORIZATION.md").is_ok());
         assert!(approve_root(&f.home, "issue77", "issue77").is_err());
 
         // Revocation unlink is also visible before fsync, even if that fsync fails.
         let outcome = revoke_root_with(&f.home, "issue77", |_| Err(fail())).unwrap();
-        assert_eq!(serde_json::from_str::<Value>(&outcome).unwrap()["status"],
-            "durability_uncertain");
+        assert_eq!(
+            serde_json::from_str::<Value>(&outcome).unwrap()["status"],
+            "durability_uncertain"
+        );
         assert!(f.call("artifact.read", "issue77/AUTHORIZATION.md").is_err());
-        assert_eq!(serde_json::from_str::<Value>(
-            &inspect_root(&f.home, "issue77").unwrap()).unwrap()["currently_accessible"], false);
+        assert_eq!(
+            serde_json::from_str::<Value>(&inspect_root(&f.home, "issue77").unwrap()).unwrap()
+                ["currently_accessible"],
+            false
+        );
 
         // Second directory sync failure: active grant still must not be reported failed.
-        let outcome = approve_root_with(&f.home, "issue77", "issue77",
-            |grants, _| { grants.sync_all()?; Err(fail()) }).unwrap();
-        assert_eq!(serde_json::from_str::<Value>(&outcome).unwrap()["status"],
-            "durability_uncertain");
+        let outcome = approve_root_with(&f.home, "issue77", "issue77", |grants, _| {
+            grants.sync_all()?;
+            Err(fail())
+        })
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&outcome).unwrap()["status"],
+            "durability_uncertain"
+        );
         assert!(f.call("artifact.list", "issue77").is_ok());
     }
 
@@ -832,8 +851,12 @@ mod tests {
             .env(ENV, &f.home)
             .output()
             .unwrap();
-        assert_eq!(child.status.code(), Some(83),
-            "child failed: {}", String::from_utf8_lossy(&child.stderr));
+        assert_eq!(
+            child.status.code(),
+            Some(83),
+            "child failed: {}",
+            String::from_utf8_lossy(&child.stderr)
+        );
         assert!(f.call("artifact.read", "issue77/AUTHORIZATION.md").is_ok());
         assert!(approve_root(&f.home, "issue77", "issue77").is_err());
         revoke_root(&f.home, "issue77").unwrap();
