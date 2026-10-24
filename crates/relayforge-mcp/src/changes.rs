@@ -25,11 +25,12 @@ const DONE_RETENTION_SECONDS: u64 = 7 * 86400;
 
 pub fn prepare_tool() -> Value {
     json!({"name":"relayforge_change_prepare",
-          "description":"Prepare a tightly scoped change for manual approval within five minutes. After local approval, execution has its own 180-second window. Allowed: scratch create or inert probe restart on active hosts.",
+          "description":"Prepare a tightly scoped change for manual approval within five minutes. After local approval, execution has its own 180-second window. Allowed: scratch create, inert probe restart, or narrow workstation artifact-root approval/revocation.",
         "inputSchema":{"type":"object","properties":{
-            "host":{"type":"string","enum":["ru0","srv0"]},
-            "action":{"type":"string","enum":["sandbox.create","probe.restart"]},
-            "name":{"type":"string","maxLength":64,"description":"Only for sandbox.create: flat .txt/.md/.json filename"},
+            "host":{"type":"string","enum":["ru0","srv0","workstation"]},
+            "action":{"type":"string","enum":["sandbox.create","probe.restart","artifact.root.add","artifact.root.remove"]},
+            "name":{"type":"string","maxLength":64,"description":"Scratch filename or artifact root alias"},
+            "directory":{"type":"string","maxLength":96,"description":"For artifact.root.add: one directory name under fixed RelayForge .build"},
             "content":{"type":"string","maxLength":2048,"description":"Only for sandbox.create: up to 2048 UTF-8 bytes"}
         },"required":["host","action"],"additionalProperties":false}})
 }
@@ -117,13 +118,21 @@ fn valid_file_name(name: &str) -> bool {
             .any(|ext| name.ends_with(ext))
 }
 
+fn root_component(s: &str, max: usize) -> bool {
+    !s.is_empty() && s.len() <= max && !s.starts_with('.')
+        && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        && !["secret", "credential", "token", "password", "private",
+             "id_rsa", "id_ed25519", ".env", ".pem", ".key"]
+            .iter().any(|part| s.to_ascii_lowercase().contains(part))
+}
+
 fn parse_action(args: &Value) -> Result<Value, String> {
     let obj = args.as_object().ok_or("expected object")?;
     let host = obj
         .get("host")
         .and_then(Value::as_str)
         .ok_or("missing host")?;
-    if !["ru0", "srv0"].contains(&host) {
+    if !["ru0", "srv0", "workstation"].contains(&host) {
         return Err("host denied".into());
     }
     match obj.get("action").and_then(Value::as_str) {
@@ -143,6 +152,25 @@ fn parse_action(args: &Value) -> Result<Value, String> {
         }
         Some("probe.restart") if host == "ru0" && obj.len() == 2 => {
             Ok(json!({"host":"ru0","action":"probe.restart"}))
+        }
+        Some("artifact.root.add") if host == "workstation" && obj.len() == 4 => {
+            let name = obj.get("name").and_then(Value::as_str)
+                .ok_or("artifact root name missing")?;
+            let directory = obj.get("directory").and_then(Value::as_str)
+                .ok_or("artifact directory missing")?;
+            if !root_component(name, 32) || !root_component(directory, 96) {
+                return Err("artifact root request denied".into());
+            }
+            Ok(json!({"host":host,"action":"artifact.root.add",
+                      "name":name,"directory":directory}))
+        }
+        Some("artifact.root.remove") if host == "workstation" && obj.len() == 3 => {
+            let name = obj.get("name").and_then(Value::as_str)
+                .ok_or("artifact root name missing")?;
+            if !root_component(name, 32) {
+                return Err("artifact root request denied".into());
+            }
+            Ok(json!({"host":host,"action":"artifact.root.remove","name":name}))
         }
         _ => Err("operation denied".into()),
     }
@@ -401,6 +429,16 @@ impl Store {
                 serde_json::to_string(contents).map_err(|_| "invalid content")?
             );
         }
+        if action == "artifact.root.add" {
+            println!("Read-only artifact alias: {}", prop["name"].as_str().ok_or("invalid record")?);
+            println!("Exact directory: ~/Projects/relayforge/.build/{}",
+                     prop["directory"].as_str().ok_or("invalid record")?);
+            println!("Approval exposes all policy-eligible present and future reports in this directory.");
+            println!("Existing runtime selectors, pinned root-map bytes and source grants are NOT changed.");
+        }
+        if action == "artifact.root.remove" {
+            println!("Revoke artifact alias: {}", prop["name"].as_str().ok_or("invalid record")?);
+        }
         println!(
             "Expires in: {} seconds",
             record["expires"].as_u64().unwrap_or(0) - now
@@ -596,6 +634,21 @@ pub fn commit(args: &Value) -> Result<String, String> {
                 "name":proposal["name"],"content":proposal["content"]
             })),
             Some("probe.restart") => crate::agent::restart_probe(&json!({"host":proposal["host"]})),
+            Some("artifact.root.add") => {
+                let home = env::var_os("HOME").ok_or("home unavailable")?;
+                crate::workstation_artifacts::approve_root(
+                    Path::new(&home),
+                    proposal["name"].as_str().ok_or("artifact root missing")?,
+                    proposal["directory"].as_str().ok_or("artifact directory missing")?,
+                )
+            },
+            Some("artifact.root.remove") => {
+                let home = env::var_os("HOME").ok_or("home unavailable")?;
+                crate::workstation_artifacts::revoke_root(
+                    Path::new(&home),
+                    proposal["name"].as_str().ok_or("artifact root missing")?,
+                )
+            },
             _ => Err("operation denied".into()),
         })
         .map(|value| value.to_string())
@@ -639,6 +692,26 @@ pub fn approve_local(id: &str) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn artifact_root_changes_are_exactly_scoped_to_workstation() {
+        use serde_json::json;
+        let valid = json!({"host":"workstation","action":"artifact.root.add",
+            "name":"issue77","directory":"issue77-development-activation-20261022"});
+        assert_eq!(super::parse_action(&valid).unwrap(), valid);
+        for invalid in [
+            json!({"host":"ru0","action":"artifact.root.add","name":"issue77","directory":"issue77-development-activation-20261022"}),
+            json!({"host":"workstation","action":"artifact.root.add","name":"issue77","directory":"../.ssh"}),
+            json!({"host":"workstation","action":"artifact.root.add","name":"issue77","directory":"issue77","content":"x"}),
+            json!({"host":"workstation","action":"artifact.root.add","name":"issue77"}),
+            json!({"host":"workstation","action":"artifact.root.remove","name":"../activation"}),
+            json!({"host":"ru0","action":"artifact.root.remove","name":"issue77"}),
+        ] {
+            assert!(super::parse_action(&invalid).is_err(), "{invalid}");
+        }
+        let remove = json!({"host":"workstation","action":"artifact.root.remove","name":"issue77"});
+        assert_eq!(super::parse_action(&remove).unwrap(), remove);
+    }
+
     use super::*;
     fn store() -> Store {
         let root = env::temp_dir().join(format!("rf-approvals-test-{}", random_id().unwrap()));
