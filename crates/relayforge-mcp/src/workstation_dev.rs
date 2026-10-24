@@ -637,6 +637,7 @@ pub fn execute(args: &Value) -> Result<String, String> {
                 "workspace.list", "workspace.read", "workspace.put",
                 "workspace.remove", "artifact.list", "artifact.read",
                 "artifact.root.prepare", "artifact.root.revoke.prepare",
+                "artifact.root.inspect",
                 "job.start", "job.list", "job.status", "job.output",
                 "job.stop", "job.remove",
                 "job.chain.start", "job.chain.status", "job.chain.output",
@@ -669,6 +670,20 @@ pub fn execute(args: &Value) -> Result<String, String> {
     }
     let (home, repo) = home_and_repo()?;
     match operation {
+        "artifact.root.inspect" => {
+            if obj.len() != 2 {
+                return Err("artifact inspection parameters denied".into());
+            }
+            let params = obj.get("parameters").and_then(Value::as_object)
+                .ok_or("artifact inspection parameters denied")?;
+            if params.len() != 1 {
+                return Err("artifact inspection parameters denied".into());
+            }
+            let name = params.get("name").and_then(Value::as_str)
+                .ok_or("artifact root alias required")?;
+            audit(&home, operation)?;
+            workstation_artifacts::inspect_root(&home, name)
+        }
         "artifact.root.prepare" => {
             if obj.len() != 2 {
                 return Err("artifact approval parameters denied".into());
