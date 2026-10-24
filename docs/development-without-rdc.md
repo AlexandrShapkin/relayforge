@@ -465,5 +465,36 @@ Minimum attended activation after independent exact-head review/CI:
 5. Revoke by removing the locally approved root map entry/file; confirm new
    reads fail. Any runtime rollback follows the separately approved procedure.
 
+### Physical-owner-approved artifact root actions (source only)
+
+The existing audited, single-use `relayforge_change_prepare` /
+`relayforge_change_commit` protocol can prepare `artifact.root.add` with
+`host=workstation`, `name=issue77` and the single **directory name**
+`issue77-development-activation-20261022`. No absolute path, generic HOME
+directory, credentials, or arbitrary write can be supplied. The separate
+`artifact.root.remove` action revokes an approved alias.
+
+The **local operator**, not ChatGPT or an MCP caller, must still confirm the
+exact alias and directory in a physical terminal using the existing
+`--approve-change <approval_id>` gate. After that approval, the remote caller
+can commit the one-time action. This removes manual JSON editing and individual
+read/check commands, **not** the requirement for human approval of new file
+access. Requests expire after five minutes; an approved commit window is three
+minutes. Replays are denied, and grant/revocation events are audited.
+
+New aliases are stored as owner-private `0600` records under
+`~/.config/relayforge/artifact-approved-roots/` (directory `0700`). The
+existing `artifact-roots.json` is **not** changed, preserving the exact pinned
+root-map bytes of the attended API9 activation. On every read, the runtime
+rechecks grant records, their ownership, modes, names and directory constraints;
+invalid grants fail closed. Each grant authorizes **all policy-eligible present
+and future reports** in one fixed `.build` directory, so the operator must
+review that scope before approval. Revocation affects subsequent requests.
+
+This feature remains **source only** until exact-head CI, independent security
+review, separately approved candidate installation, and an authenticated live
+test against the originally requested handoff. It is not an authority to change
+the current live runtime or local grants during source development.
+
 Offline verification (disposable HOME/config only):
 `python3 -B scripts/offline_artifact_acceptance.py <isolated-built-mcp>`.
