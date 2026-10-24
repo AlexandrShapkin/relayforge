@@ -467,8 +467,14 @@ Minimum attended activation after independent exact-head review/CI:
 
 ### Physical-owner-approved artifact root actions (source only)
 
-The existing audited, single-use `relayforge_change_prepare` /
-`relayforge_change_commit` protocol can prepare `artifact.root.add` with
+The existing audited, single-use approval protocol is reached through
+`relayforge_workstation_develop` using `operation=artifact.root.prepare`
+and `parameters={name, directory}`; it returns a pending approval ID. The
+existing `relayforge_change_commit` accepts that ID after physical-owner
+approval. `operation=artifact.root.revoke.prepare` prepares revocation through
+the same flow. Its internal change actions are `artifact.root.add` and
+`artifact.root.remove`; an unchanged, externally typed change-prepare tool
+cannot accept new host/action enums. Example parameters for addition:
 `host=workstation`, `name=issue77` and the single **directory name**
 `issue77-development-activation-20261022`. No absolute path, generic HOME
 directory, credentials, or arbitrary write can be supplied. The separate
