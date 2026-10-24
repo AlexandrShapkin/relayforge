@@ -497,6 +497,16 @@ invalid grants fail closed. Each grant authorizes **all policy-eligible present
 and future reports** in one fixed `.build` directory, so the operator must
 review that scope before approval. Revocation affects subsequent requests.
 
+**Ambiguous outcome:** an add/remove operation that changes the visible grant
+but fails a post-publication directory fsync returns `indeterminate`, never
+`failed`. A worker killed after claiming a grant leaves `outcome_unknown`,
+not a retryable request. The agent must query the read-only
+`artifact.root.inspect` operation with `parameters={name:"issue77"}`, and
+then `artifact.read` for a permitted report to reconcile current live access;
+this does **not** establish power-loss durability. Neither case permits automatic
+replay with the same approval ID. If uncertainty remains, stop and preserve
+audit records for owner review.
+
 This feature remains **source only** until exact-head CI, independent security
 review, separately approved candidate installation, and an authenticated live
 test against the originally requested handoff. It is not an authority to change
