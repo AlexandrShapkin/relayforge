@@ -2,6 +2,7 @@
 """Disposable-home read-only MCP acceptance; never reads the operator's files."""
 import json
 import os
+import pty
 import pathlib
 import subprocess
 import sys
@@ -19,6 +20,8 @@ def main():
         config.parent.mkdir(parents=True)
         audit = home / ".local/state/relayforge"
         audit.mkdir(parents=True, mode=0o700)
+        for stage in ("prepared", "approved", "claimed", "done"):
+            (audit / stage).mkdir(mode=0o700)
         report = root / "AUTHORIZATION.md"
         report.write_text("Fixture only: attended authorization report.\n")
         receipt = root / "operation-1792634926759214000.jsonl"
@@ -33,12 +36,14 @@ def main():
         env = {"HOME": tmp, "PATH": "/usr/bin:/bin", "LC_ALL": "C",
                "XDG_RUNTIME_DIR": tmp + "/run"}
 
-        def call(operation, path=None):
-            args = {"operation": operation}
+        def call(operation=None, path=None, *, parameters=None, tool="relayforge_workstation_develop", arguments=None):
+            args = {"operation": operation} if arguments is None else arguments
             if path is not None:
                 args["path"] = path
+            if parameters is not None:
+                args["parameters"] = parameters
             request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                       "params": {"name": "relayforge_workstation_develop", "arguments": args}}
+                       "params": {"name": tool, "arguments": args}}
             run = subprocess.run([binary, "--readonly-stdio"], env=env,
                                  input=json.dumps(request) + "\n", capture_output=True,
                                  text=True, check=True, timeout=10)
@@ -56,6 +61,47 @@ def main():
         assert caps["arbitrary_host_shell"] is False
         assert caps["write_grants"]["source_edit"] is False
         assert {"artifact.list", "artifact.read"} <= set(caps["operations"])
+        # New scope is not accessible before local approval, and malformed
+        # generic-MCP parameters must not create pending grants.
+        assert call("artifact.read", "issue77/AUTHORIZATION.md")["isError"]
+        assert call("artifact.root.inspect", parameters={"name":"issue77"})["isError"] is False
+        assert json.loads(call("artifact.root.inspect", parameters={"name":"issue77"})["content"][0]["text"])["currently_accessible"] is False
+        for bad in [{"name":"issue77","directory":"../.ssh"},
+                    {"name":"issue77","directory":"issue77-development-activation-20261022","unexpected":1},
+                    {"name":"issue77"}, {"name":"/etc","directory":"bad"}]:
+            assert call("artifact.root.prepare", parameters=bad)["isError"]
+        grant = call("artifact.root.prepare", parameters={
+            "name":"issue77","directory":"issue77-development-activation-20261022"})
+        assert grant["isError"] is False, grant
+        approval = json.loads(grant["content"][0]["text"])["approval_id"]
+        def commit(approval_id):
+            return call(tool="relayforge_change_commit", arguments={"approval_id":approval_id})
+        assert commit(approval)["isError"], "no remote self-approval"
+        assert call("artifact.read", "issue77/AUTHORIZATION.md")["isError"]
+        def approve_on_disposable_pty(approval_id):
+            master, slave = pty.openpty()
+            try:
+                process = subprocess.Popen(
+                    [binary, "--approve-change", approval_id], env=env,
+                    stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+                os.close(slave)
+                slave = -1
+                os.write(master, ("APPROVE " + approval_id + "\\n").encode())
+                _, errors = process.communicate(timeout=10)
+                assert process.returncode == 0, errors
+            finally:
+                os.close(master)
+                if slave >= 0:
+                    os.close(slave)
+        # Test-only PTY simulates a *real local approval*, not an MCP approval.
+        approve_on_disposable_pty(approval)
+        committed = commit(approval)
+        assert committed["isError"] is False, committed
+        assert json.loads(committed["content"][0]["text"])["status"] == "succeeded"
+        assert commit(approval)["isError"], "single-use approval replay denied"
+        assert call("artifact.read", "issue77/AUTHORIZATION.md")["isError"] is False
+        assert json.loads(call("artifact.root.inspect", parameters={"name":"issue77"})["content"][0]["text"])["currently_accessible"] is True
+
         before = report.stat(), report.read_bytes(), config.read_bytes()
         result = call("artifact.read", "activation/AUTHORIZATION.md")
         assert result["isError"] is False, result
@@ -88,6 +134,17 @@ def main():
         log = (audit / "workstation-dev-audit.jsonl").read_text()
         assert "artifact.read" in log and "artifact.list" in log
         assert "Fixture only" not in log and str(root) not in log
+        removal = call("artifact.root.revoke.prepare", parameters={"name":"issue77"})
+        assert removal["isError"] is False, removal
+        revocation_id = json.loads(removal["content"][0]["text"])["approval_id"]
+        assert call("artifact.read", "issue77/AUTHORIZATION.md")["isError"] is False
+        approve_on_disposable_pty(revocation_id)
+        revoked = commit(revocation_id)
+        assert revoked["isError"] is False, revoked
+        assert json.loads(revoked["content"][0]["text"])["status"] == "succeeded"
+        assert call("artifact.read", "issue77/AUTHORIZATION.md")["isError"]
+        assert commit(revocation_id)["isError"], "revocation replay denied"
+        assert json.loads(call("artifact.root.inspect", parameters={"name":"issue77"})["content"][0]["text"])["currently_accessible"] is False
         config.unlink()
         assert call("artifact.read", "activation/AUTHORIZATION.md")["isError"]
     print("Offline artifact MCP: approved read/list, discovery, default deny, escapes, secrets, binary, size, metadata-only audit: PASS")
