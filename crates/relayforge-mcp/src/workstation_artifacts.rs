@@ -863,6 +863,18 @@ mod tests {
         assert!(f.call("artifact.read", "issue77/AUTHORIZATION.md").is_err());
     }
 
+    fn wait_for_approval_lock(mut operation: impl FnMut() -> Result<String, String>) -> Result<String, String> {
+        for _ in 0..50 {
+            match operation() {
+                Err(message) if message == "artifact approval busy" => {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                outcome => return outcome,
+            }
+        }
+        Err("test lock remained busy".into())
+    }
+
     #[test]
     fn competing_writers_preserve_both_grants_and_concurrent_reader_is_bounded() {
         let f = Fixture::new();
@@ -872,8 +884,8 @@ mod tests {
             fs::write(folder.join("AUTHORIZATION.md"), "Approved report\n").unwrap();
         }
         std::thread::scope(|scope| {
-            let one = scope.spawn(|| approve_root(&f.home, "issue77", "issue77"));
-            let two = scope.spawn(|| approve_root(&f.home, "issue88", "issue88"));
+            let one = scope.spawn(|| wait_for_approval_lock(|| approve_root(&f.home, "issue77", "issue77")));
+            let two = scope.spawn(|| wait_for_approval_lock(|| approve_root(&f.home, "issue88", "issue88")));
             assert!(one.join().unwrap().is_ok());
             assert!(two.join().unwrap().is_ok());
         });
@@ -891,8 +903,8 @@ mod tests {
                     }
                 }
             });
-            let one = scope.spawn(|| revoke_root(&f.home, "issue77"));
-            let two = scope.spawn(|| revoke_root(&f.home, "issue88"));
+            let one = scope.spawn(|| wait_for_approval_lock(|| revoke_root(&f.home, "issue77")));
+            let two = scope.spawn(|| wait_for_approval_lock(|| revoke_root(&f.home, "issue88")));
             reader.join().unwrap();
             assert!(one.join().unwrap().is_ok());
             assert!(two.join().unwrap().is_ok());
