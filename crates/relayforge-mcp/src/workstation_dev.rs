@@ -673,14 +673,20 @@ pub fn execute(args: &Value) -> Result<String, String> {
             if obj.len() != 2 {
                 return Err("artifact approval parameters denied".into());
             }
-            let params = obj.get("parameters").and_then(Value::as_object)
+            let params = obj
+                .get("parameters")
+                .and_then(Value::as_object)
                 .ok_or("artifact approval parameters denied")?;
             if params.len() != 2 {
                 return Err("artifact approval parameters denied".into());
             }
-            let name = params.get("name").and_then(Value::as_str)
+            let name = params
+                .get("name")
+                .and_then(Value::as_str)
                 .ok_or("artifact root alias required")?;
-            let directory = params.get("directory").and_then(Value::as_str)
+            let directory = params
+                .get("directory")
+                .and_then(Value::as_str)
                 .ok_or("artifact directory required")?;
             crate::changes::prepare(&json!({"host":"workstation","action":"artifact.root.add",
                 "name":name,"directory":directory}))
@@ -689,15 +695,21 @@ pub fn execute(args: &Value) -> Result<String, String> {
             if obj.len() != 2 {
                 return Err("artifact approval parameters denied".into());
             }
-            let params = obj.get("parameters").and_then(Value::as_object)
+            let params = obj
+                .get("parameters")
+                .and_then(Value::as_object)
                 .ok_or("artifact approval parameters denied")?;
             if params.len() != 1 {
                 return Err("artifact approval parameters denied".into());
             }
-            let name = params.get("name").and_then(Value::as_str)
+            let name = params
+                .get("name")
+                .and_then(Value::as_str)
                 .ok_or("artifact root alias required")?;
-            crate::changes::prepare(&json!({"host":"workstation","action":"artifact.root.remove",
-                "name":name}))
+            crate::changes::prepare(
+                &json!({"host":"workstation","action":"artifact.root.remove",
+                "name":name}),
+            )
         }
         "artifact.list" | "artifact.read" => {
             audit(&home, operation)?;
