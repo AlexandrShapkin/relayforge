@@ -632,7 +632,15 @@ impl Store {
                 } else {
                     label
                 };
+                // A claimed artifact change may have been interrupted after the
+                // filesystem effect. Without a durable result, never assume failure.
+                let artifact_unknown = stage == "claimed"
+                    && matches!(record["proposal"]["action"].as_str(),
+                        Some("artifact.root.add" | "artifact.root.remove"));
+                let status = if artifact_unknown { "outcome_unknown" } else { status };
                 return Ok(json!({"approval_id":id,"status":status,
+                    "reconcile":if artifact_unknown { json!("artifact.root.inspect") }
+                        else { Value::Null },
                     "expires_at_unix":deadline,
                     "approval_expires_at_unix":record["expires"],
                     "execution_expires_at_unix":if stage=="prepared" {
@@ -861,6 +869,21 @@ mod tests {
         let audit = fs::read_to_string(s.dir.join("audit.jsonl")).unwrap();
         assert!(audit.contains("execution_indeterminate"));
         assert!(!audit.contains("execution_failed"));
+    }
+
+    #[test]
+    fn claimed_artifact_request_after_crash_cannot_replay_and_is_unknown() {
+        let s = store();
+        let prepared = s
+            .prepare(&json!({"host":"workstation","action":"artifact.root.remove",
+                "name":"issue77"}))
+            .unwrap();
+        let id = prepared["approval_id"].as_str().unwrap();
+        s.move_stage("prepared", "claimed", id).unwrap();
+        let state = s.status(id).unwrap();
+        assert_eq!(state["status"], "outcome_unknown");
+        assert_eq!(state["reconcile"], "artifact.root.inspect");
+        assert!(s.commit_with(id, |_| Ok("must not run".into())).is_err());
     }
 
     #[test]
