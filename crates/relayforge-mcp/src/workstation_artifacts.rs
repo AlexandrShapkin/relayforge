@@ -864,6 +864,43 @@ mod tests {
     }
 
     #[test]
+    fn competing_writers_preserve_both_grants_and_concurrent_reader_is_bounded() {
+        let f = Fixture::new();
+        for name in ["issue77", "issue88"] {
+            let folder = f.home.join("Projects/relayforge/.build").join(name);
+            fs::create_dir(&folder).unwrap();
+            fs::write(folder.join("AUTHORIZATION.md"), "Approved report\n").unwrap();
+        }
+        std::thread::scope(|scope| {
+            let one = scope.spawn(|| approve_root(&f.home, "issue77", "issue77"));
+            let two = scope.spawn(|| approve_root(&f.home, "issue88", "issue88"));
+            assert!(one.join().unwrap().is_ok());
+            assert!(two.join().unwrap().is_ok());
+        });
+        for name in ["issue77", "issue88"] {
+            assert!(f.call("artifact.read", &format!("{name}/AUTHORIZATION.md")).is_ok());
+        }
+        std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                for _ in 0..64 {
+                    let value = f.call("artifact.read", "issue77/AUTHORIZATION.md");
+                    if let Ok(output) = value {
+                        assert!(output.contains("Approved report"));
+                    }
+                }
+            });
+            let one = scope.spawn(|| revoke_root(&f.home, "issue77"));
+            let two = scope.spawn(|| revoke_root(&f.home, "issue88"));
+            reader.join().unwrap();
+            assert!(one.join().unwrap().is_ok());
+            assert!(two.join().unwrap().is_ok());
+        });
+        assert!(f.call("artifact.read", "issue77/AUTHORIZATION.md").is_err());
+        assert!(f.call("artifact.read", "issue88/AUTHORIZATION.md").is_err());
+        assert!(f.call("artifact.read", "activation/AUTHORIZATION.md").is_ok());
+    }
+
+    #[test]
     fn unsafe_additional_grants_fail_closed() {
         let f = Fixture::new();
         let config = f.home.join(".config/relayforge");
