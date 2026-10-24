@@ -211,7 +211,11 @@ fn roots(home: &Path) -> Result<serde_json::Map<String, Value>, String> {
         }
     }
     let mut all = roots.clone();
-    let config_dir = child(&child(&home_dir(home)?, ".config", true)?, "relayforge", true)?;
+    let config_dir = child(
+        &child(&home_dir(home)?, ".config", true)?,
+        "relayforge",
+        true,
+    )?;
     let grants_path = home.join(".config/relayforge").join(ADDITIONAL);
     match fs::symlink_metadata(&grants_path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -227,9 +231,14 @@ fn roots(home: &Path) -> Result<serde_json::Map<String, Value>, String> {
                 if count > 8 {
                     return Err("artifact authorization denied".into());
                 }
-                let name = entry.map_err(|_| "artifact denied")?
-                    .file_name().into_string().map_err(|_| "artifact denied")?;
-                let id = name.strip_suffix(".json").ok_or("artifact authorization denied")?;
+                let name = entry
+                    .map_err(|_| "artifact denied")?
+                    .file_name()
+                    .into_string()
+                    .map_err(|_| "artifact denied")?;
+                let id = name
+                    .strip_suffix(".json")
+                    .ok_or("artifact authorization denied")?;
                 if !name_ok(id) || id.len() > 32 || all.contains_key(id) {
                     return Err("artifact authorization denied".into());
                 }
@@ -243,13 +252,21 @@ fn roots(home: &Path) -> Result<serde_json::Map<String, Value>, String> {
                 if obj.len() != 1 {
                     return Err("artifact authorization denied".into());
                 }
-                let folder = obj.get("directory").and_then(Value::as_str)
+                let folder = obj
+                    .get("directory")
+                    .and_then(Value::as_str)
                     .ok_or("artifact authorization denied")?;
                 if !name_ok(folder) || folder.len() > 96 {
                     return Err("artifact authorization denied".into());
                 }
-                all.insert(id.to_string(), json!(home.join("Projects/relayforge/.build")
-                    .join(folder).to_str().ok_or("artifact authorization denied")?));
+                all.insert(
+                    id.to_string(),
+                    json!(home
+                        .join("Projects/relayforge/.build")
+                        .join(folder)
+                        .to_str()
+                        .ok_or("artifact authorization denied")?),
+                );
             }
         }
     }
@@ -260,7 +277,11 @@ fn roots(home: &Path) -> Result<serde_json::Map<String, Value>, String> {
 }
 
 fn config_directory(home: &Path) -> Result<File, String> {
-    child(&child(&home_dir(home)?, ".config", true)?, "relayforge", true)
+    child(
+        &child(&home_dir(home)?, ".config", true)?,
+        "relayforge",
+        true,
+    )
 }
 
 fn approved_directory(home: &Path) -> Result<File, String> {
@@ -269,10 +290,13 @@ fn approved_directory(home: &Path) -> Result<File, String> {
     match fs::symlink_metadata(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             use std::os::unix::fs::DirBuilderExt;
-            fs::DirBuilder::new().mode(0o700)
+            fs::DirBuilder::new()
+                .mode(0o700)
                 .create(pinned(&parent, ADDITIONAL))
                 .map_err(|_| "artifact approval directory unavailable")?;
-            parent.sync_all().map_err(|_| "artifact approval sync failed")?;
+            parent
+                .sync_all()
+                .map_err(|_| "artifact approval sync failed")?;
         }
         Err(_) => return Err("artifact approval directory unavailable".into()),
         Ok(_) => {}
@@ -301,11 +325,16 @@ pub(crate) fn approve_root(home: &Path, id: &str, folder: &str) -> Result<String
     text(child(&dir, "AUTHORIZATION.md", false)?, MAX_BYTES)?;
     let grants = approved_directory(home)?;
     let name = format!("{id}.json");
-    let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600)
-        .custom_flags(NOFOLLOW).open(pinned(&grants, &name))
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(NOFOLLOW)
+        .open(pinned(&grants, &name))
         .map_err(|_| "artifact root already approved or unavailable")?;
     let data = json!({"directory":folder}).to_string();
-    file.write_all(data.as_bytes()).and_then(|_| file.sync_all())
+    file.write_all(data.as_bytes())
+        .and_then(|_| file.sync_all())
         .and_then(|_| grants.sync_all())
         .map_err(|_| "artifact approval not durable")?;
     Ok(json!({"status":"approved","root":id,"read_only":true}).to_string())
@@ -322,7 +351,9 @@ pub(crate) fn revoke_root(home: &Path, id: &str) -> Result<String, String> {
         return Err("artifact authorization denied".into());
     }
     fs::remove_file(pinned(&grants, &name)).map_err(|_| "artifact revocation failed")?;
-    grants.sync_all().map_err(|_| "artifact revocation sync failed")?;
+    grants
+        .sync_all()
+        .map_err(|_| "artifact revocation sync failed")?;
     Ok(json!({"status":"revoked","root":id}).to_string())
 }
 
