@@ -86,7 +86,7 @@ def main():
                     stdin=slave, stdout=slave, stderr=subprocess.PIPE)
                 os.close(slave)
                 slave = -1
-                os.write(master, ("APPROVE " + approval_id + "\\n").encode())
+                os.write(master, ("APPROVE " + approval_id + "\n").encode())
                 _, errors = process.communicate(timeout=10)
                 assert process.returncode == 0, errors
             finally:
