@@ -324,7 +324,9 @@ fn approval_lock(parent: &File) -> Result<File, String> {
         .custom_flags(NOFOLLOW)
         .open(pinned(parent, ".artifact-root-approval.lock"))
         .map_err(|_| "artifact approval lock unavailable")?;
-    let metadata = file.metadata().map_err(|_| "artifact approval lock unavailable")?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| "artifact approval lock unavailable")?;
     if !metadata.is_file()
         || metadata.uid() != uid()?
         || metadata.nlink() != 1
@@ -363,8 +365,10 @@ pub(crate) fn approve_root(home: &Path, id: &str, folder: &str) -> Result<String
     }
     // Stage complete, fsynced bytes *outside* the active grant directory.
     // Interrupted writes cannot poison unrelated artifact reads.
-    let stamp = SystemTime::now().duration_since(UNIX_EPOCH)
-        .map_err(|_| "artifact approval clock unavailable")?.as_nanos();
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "artifact approval clock unavailable")?
+        .as_nanos();
     let temporary = format!(".artifact-root-stage-{id}-{}-{stamp}", std::process::id());
     let mut file = OpenOptions::new()
         .write(true)
@@ -380,8 +384,12 @@ pub(crate) fn approve_root(home: &Path, id: &str, folder: &str) -> Result<String
         .map_err(|_| "artifact approval staging not durable")?;
     fs::rename(pinned(&config_dir, &temporary), pinned(&grants, &name))
         .map_err(|_| "artifact approval publication failed")?;
-    grants.sync_all().map_err(|_| "artifact approval sync failed")?;
-    config_dir.sync_all().map_err(|_| "artifact approval sync failed")?;
+    grants
+        .sync_all()
+        .map_err(|_| "artifact approval sync failed")?;
+    config_dir
+        .sync_all()
+        .map_err(|_| "artifact approval sync failed")?;
     Ok(json!({"status":"approved","root":id,"read_only":true}).to_string())
 }
 
@@ -722,8 +730,12 @@ mod tests {
         let lock = approval_lock(&config_dir).unwrap();
         assert!(approve_root(&f.home, "issue77", "issue77").is_err());
         drop(lock);
-        fs::write(f.home.join(".config/relayforge/.artifact-root-stage-interrupted"),
-            "{incomplete").unwrap();
+        fs::write(
+            f.home
+                .join(".config/relayforge/.artifact-root-stage-interrupted"),
+            "{incomplete",
+        )
+        .unwrap();
         assert!(f.call("artifact.list", "activation").is_ok());
         approve_root(&f.home, "issue77", "issue77").unwrap();
         assert_eq!(fs::read(&config).unwrap(), before);
