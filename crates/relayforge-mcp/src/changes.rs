@@ -150,7 +150,7 @@ fn parse_action(args: &Value) -> Result<Value, String> {
         return Err("host denied".into());
     }
     match obj.get("action").and_then(Value::as_str) {
-        Some("sandbox.create") if obj.len() == 4 => {
+        Some("sandbox.create") if matches!(host, "ru0" | "srv0") && obj.len() == 4 => {
             let name = obj
                 .get("name")
                 .and_then(Value::as_str)
@@ -575,6 +575,14 @@ impl Store {
             .map_err(|_| "audit unavailable")?;
         let outcome = execute(prop);
         let (status, message, event) = match outcome {
+            Ok(message) if matches!(action, "artifact.root.add" | "artifact.root.remove")
+                && serde_json::from_str::<Value>(&message).ok()
+                    .and_then(|v| v.get("status").and_then(Value::as_str).map(str::to_owned))
+                    .as_deref() == Some("durability_uncertain") =>
+            {
+                // The authorization already changed. Never log it as failed or replay it.
+                ("indeterminate", message, "execution_indeterminate")
+            }
             Ok(message) => ("succeeded", message, "execution_succeeded"),
             Err(message) => ("failed", message, "execution_failed"),
         };
@@ -734,6 +742,7 @@ mod tests {
             json!({"host":"workstation","action":"artifact.root.add","name":"issue77","directory":"issue77","content":"x"}),
             json!({"host":"workstation","action":"artifact.root.add","name":"issue77"}),
             json!({"host":"workstation","action":"artifact.root.remove","name":"../activation"}),
+            json!({"host":"workstation","action":"sandbox.create","name":"x.txt","content":"x"}),
             json!({"host":"ru0","action":"artifact.root.remove","name":"issue77"}),
         ] {
             assert!(super::parse_action(&invalid).is_err(), "{invalid}");
@@ -832,6 +841,28 @@ mod tests {
         assert!(audit.contains("execution_succeeded"));
         assert!(!audit.contains("mock"));
     }
+    #[test]
+    fn artifact_publish_uncertain_consumes_approval_without_reporting_failure() {
+        let s = store();
+        let prepared = s
+            .prepare(&json!({"host":"workstation","action":"artifact.root.add",
+                "name":"issue77","directory":"issue77-development-activation-20261022"}))
+            .unwrap();
+        let id = prepared["approval_id"].as_str().unwrap();
+        let original = s.load("prepared", id).unwrap();
+        let time = original["created"].as_u64().unwrap() + 1;
+        s.approve_confirmed(id, &original, time).unwrap();
+        let outcome = s.commit_with_at(id, time + 1, |_| {
+            Ok(json!({"status":"durability_uncertain","root":"issue77"}).to_string())
+        }).unwrap();
+        assert_eq!(outcome["status"], "indeterminate");
+        assert_eq!(s.status(id).unwrap()["result"]["status"], "indeterminate");
+        assert!(s.commit_with_at(id, time + 1, |_| Ok("replay".into())).is_err());
+        let audit = fs::read_to_string(s.dir.join("audit.jsonl")).unwrap();
+        assert!(audit.contains("execution_indeterminate"));
+        assert!(!audit.contains("execution_failed"));
+    }
+
     #[test]
     fn expiry_pruning_releases_queue_slots() {
         let s = store();
