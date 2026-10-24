@@ -8,6 +8,7 @@ use std::{
         unix::fs::{MetadataExt, OpenOptionsExt},
     },
     path::{Component, Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 const MAX_BYTES: usize = 48 * 1024;
@@ -308,11 +309,42 @@ fn approved_directory(home: &Path) -> Result<File, String> {
     Ok(dir)
 }
 
+// Linux advisory lock serializes approval commits across HTTP and tunnel processes.
+// Lock file persists to keep a stable inode; a process crash releases the kernel lock.
+unsafe extern "C" {
+    fn flock(fd: std::os::raw::c_int, operation: std::os::raw::c_int) -> std::os::raw::c_int;
+}
+
+fn approval_lock(parent: &File) -> Result<File, String> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(NOFOLLOW)
+        .open(pinned(parent, ".artifact-root-approval.lock"))
+        .map_err(|_| "artifact approval lock unavailable")?;
+    let metadata = file.metadata().map_err(|_| "artifact approval lock unavailable")?;
+    if !metadata.is_file()
+        || metadata.uid() != uid()?
+        || metadata.nlink() != 1
+        || metadata.mode() & 0o777 != 0o600
+    {
+        return Err("artifact approval lock unsafe".into());
+    }
+    if unsafe { flock(file.as_raw_fd(), 2 | 4) } != 0 {
+        return Err("artifact approval busy".into());
+    }
+    Ok(file)
+}
+
 // Called only by the existing one-time, physical-owner-approved change executor.
 pub(crate) fn approve_root(home: &Path, id: &str, folder: &str) -> Result<String, String> {
     if !name_ok(id) || id.len() > 32 || !name_ok(folder) || folder.len() > 96 {
         return Err("artifact root request denied".into());
     }
+    let config_dir = config_directory(home)?;
+    let _lock = approval_lock(&config_dir)?;
     let configured = roots(home)?;
     if configured.contains_key(id) || configured.len() >= 8 {
         return Err("artifact root collision or capacity reached".into());
@@ -325,18 +357,31 @@ pub(crate) fn approve_root(home: &Path, id: &str, folder: &str) -> Result<String
     text(child(&dir, "AUTHORIZATION.md", false)?, MAX_BYTES)?;
     let grants = approved_directory(home)?;
     let name = format!("{id}.json");
+    match fs::symlink_metadata(pinned(&grants, &name)) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        _ => return Err("artifact root already approved or unavailable".into()),
+    }
+    // Stage complete, fsynced bytes *outside* the active grant directory.
+    // Interrupted writes cannot poison unrelated artifact reads.
+    let stamp = SystemTime::now().duration_since(UNIX_EPOCH)
+        .map_err(|_| "artifact approval clock unavailable")?.as_nanos();
+    let temporary = format!(".artifact-root-stage-{id}-{}-{stamp}", std::process::id());
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .custom_flags(NOFOLLOW)
-        .open(pinned(&grants, &name))
-        .map_err(|_| "artifact root already approved or unavailable")?;
+        .open(pinned(&config_dir, &temporary))
+        .map_err(|_| "artifact approval staging unavailable")?;
     let data = json!({"directory":folder}).to_string();
     file.write_all(data.as_bytes())
         .and_then(|_| file.sync_all())
-        .and_then(|_| grants.sync_all())
-        .map_err(|_| "artifact approval not durable")?;
+        .and_then(|_| config_dir.sync_all())
+        .map_err(|_| "artifact approval staging not durable")?;
+    fs::rename(pinned(&config_dir, &temporary), pinned(&grants, &name))
+        .map_err(|_| "artifact approval publication failed")?;
+    grants.sync_all().map_err(|_| "artifact approval sync failed")?;
+    config_dir.sync_all().map_err(|_| "artifact approval sync failed")?;
     Ok(json!({"status":"approved","root":id,"read_only":true}).to_string())
 }
 
@@ -344,6 +389,8 @@ pub(crate) fn revoke_root(home: &Path, id: &str) -> Result<String, String> {
     if !name_ok(id) || id.len() > 32 {
         return Err("artifact root request denied".into());
     }
+    let config_dir = config_directory(home)?;
+    let _lock = approval_lock(&config_dir)?;
     let grants = approved_directory(home)?;
     let name = format!("{id}.json");
     let file = child(&grants, &name, false)?;
@@ -671,6 +718,13 @@ mod tests {
         let config = f.home.join(CONFIG);
         let before = fs::read(&config).unwrap();
         assert!(f.call("artifact.read", "issue77/AUTHORIZATION.md").is_err());
+        let config_dir = config_directory(&f.home).unwrap();
+        let lock = approval_lock(&config_dir).unwrap();
+        assert!(approve_root(&f.home, "issue77", "issue77").is_err());
+        drop(lock);
+        fs::write(f.home.join(".config/relayforge/.artifact-root-stage-interrupted"),
+            "{incomplete").unwrap();
+        assert!(f.call("artifact.list", "activation").is_ok());
         approve_root(&f.home, "issue77", "issue77").unwrap();
         assert_eq!(fs::read(&config).unwrap(), before);
         assert!(f.call("artifact.read", "issue77/AUTHORIZATION.md").is_ok());
