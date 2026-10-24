@@ -119,11 +119,25 @@ fn valid_file_name(name: &str) -> bool {
 }
 
 fn root_component(s: &str, max: usize) -> bool {
-    !s.is_empty() && s.len() <= max && !s.starts_with('.')
-        && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
-        && !["secret", "credential", "token", "password", "private",
-             "id_rsa", "id_ed25519", ".env", ".pem", ".key"]
-            .iter().any(|part| s.to_ascii_lowercase().contains(part))
+    !s.is_empty()
+        && s.len() <= max
+        && !s.starts_with('.')
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        && ![
+            "secret",
+            "credential",
+            "token",
+            "password",
+            "private",
+            "id_rsa",
+            "id_ed25519",
+            ".env",
+            ".pem",
+            ".key",
+        ]
+        .iter()
+        .any(|part| s.to_ascii_lowercase().contains(part))
 }
 
 fn parse_action(args: &Value) -> Result<Value, String> {
@@ -154,9 +168,13 @@ fn parse_action(args: &Value) -> Result<Value, String> {
             Ok(json!({"host":"ru0","action":"probe.restart"}))
         }
         Some("artifact.root.add") if host == "workstation" && obj.len() == 4 => {
-            let name = obj.get("name").and_then(Value::as_str)
+            let name = obj
+                .get("name")
+                .and_then(Value::as_str)
                 .ok_or("artifact root name missing")?;
-            let directory = obj.get("directory").and_then(Value::as_str)
+            let directory = obj
+                .get("directory")
+                .and_then(Value::as_str)
                 .ok_or("artifact directory missing")?;
             if !root_component(name, 32) || !root_component(directory, 96) {
                 return Err("artifact root request denied".into());
@@ -165,7 +183,9 @@ fn parse_action(args: &Value) -> Result<Value, String> {
                       "name":name,"directory":directory}))
         }
         Some("artifact.root.remove") if host == "workstation" && obj.len() == 3 => {
-            let name = obj.get("name").and_then(Value::as_str)
+            let name = obj
+                .get("name")
+                .and_then(Value::as_str)
                 .ok_or("artifact root name missing")?;
             if !root_component(name, 32) {
                 return Err("artifact root request denied".into());
@@ -430,14 +450,22 @@ impl Store {
             );
         }
         if action == "artifact.root.add" {
-            println!("Read-only artifact alias: {}", prop["name"].as_str().ok_or("invalid record")?);
-            println!("Exact directory: ~/Projects/relayforge/.build/{}",
-                     prop["directory"].as_str().ok_or("invalid record")?);
+            println!(
+                "Read-only artifact alias: {}",
+                prop["name"].as_str().ok_or("invalid record")?
+            );
+            println!(
+                "Exact directory: ~/Projects/relayforge/.build/{}",
+                prop["directory"].as_str().ok_or("invalid record")?
+            );
             println!("Approval exposes all policy-eligible present and future reports in this directory.");
             println!("Existing runtime selectors, pinned root-map bytes and source grants are NOT changed.");
         }
         if action == "artifact.root.remove" {
-            println!("Revoke artifact alias: {}", prop["name"].as_str().ok_or("invalid record")?);
+            println!(
+                "Revoke artifact alias: {}",
+                prop["name"].as_str().ok_or("invalid record")?
+            );
         }
         println!(
             "Expires in: {} seconds",
@@ -639,16 +667,18 @@ pub fn commit(args: &Value) -> Result<String, String> {
                 crate::workstation_artifacts::approve_root(
                     Path::new(&home),
                     proposal["name"].as_str().ok_or("artifact root missing")?,
-                    proposal["directory"].as_str().ok_or("artifact directory missing")?,
+                    proposal["directory"]
+                        .as_str()
+                        .ok_or("artifact directory missing")?,
                 )
-            },
+            }
             Some("artifact.root.remove") => {
                 let home = env::var_os("HOME").ok_or("home unavailable")?;
                 crate::workstation_artifacts::revoke_root(
                     Path::new(&home),
                     proposal["name"].as_str().ok_or("artifact root missing")?,
                 )
-            },
+            }
             _ => Err("operation denied".into()),
         })
         .map(|value| value.to_string())
