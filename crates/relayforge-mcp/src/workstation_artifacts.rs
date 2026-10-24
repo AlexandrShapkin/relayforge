@@ -812,6 +812,35 @@ mod tests {
     }
 
     #[test]
+    fn process_exit_after_publication_preserves_visible_grant_and_unlocks() {
+        const ENV: &str = "RELAYFORGE_TEST_KILL_AFTER_GRANT_PUBLISH";
+        if let Some(home) = std::env::var_os(ENV) {
+            let home = PathBuf::from(home);
+            let _ = approve_root_with(&home, "issue77", "issue77", |_, _| {
+                // Emulate SIGKILL's absence of destructors and post-rename fsync.
+                std::process::exit(83);
+            });
+            panic!("publication should not return");
+        }
+        let f = Fixture::new();
+        let folder = f.home.join("Projects/relayforge/.build/issue77");
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("AUTHORIZATION.md"), "Approved\n").unwrap();
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("workstation_artifacts::tests::process_exit_after_publication_preserves_visible_grant_and_unlocks")
+            .env(ENV, &f.home)
+            .output()
+            .unwrap();
+        assert_eq!(child.status.code(), Some(83),
+            "child failed: {}", String::from_utf8_lossy(&child.stderr));
+        assert!(f.call("artifact.read", "issue77/AUTHORIZATION.md").is_ok());
+        assert!(approve_root(&f.home, "issue77", "issue77").is_err());
+        revoke_root(&f.home, "issue77").unwrap();
+        assert!(f.call("artifact.read", "issue77/AUTHORIZATION.md").is_err());
+    }
+
+    #[test]
     fn unsafe_additional_grants_fail_closed() {
         let f = Fixture::new();
         let config = f.home.join(".config/relayforge");
