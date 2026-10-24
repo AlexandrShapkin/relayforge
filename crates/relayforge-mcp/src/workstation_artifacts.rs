@@ -66,7 +66,11 @@ fn home_dir(home: &Path) -> Result<File, String> {
         let Component::Normal(part) = part else {
             return Err("artifact denied".into());
         };
-        // System-owned ancestors are permitted, but must not be writable by others.
+        // Ancestors locate HOME; they do not authorize a report. In a systemd
+        // user mount namespace their owners may be unmapped. Pin each component
+        // without following links and reject unsafe permissions, then require
+        // the HOME descriptor and every descendant to belong to our exact UID.
+        // No unmapped UID is accepted as an owner of an authorization object.
         let next = OpenOptions::new()
             .read(true)
             .custom_flags(NOFOLLOW | DIRECTORY)
@@ -74,9 +78,7 @@ fn home_dir(home: &Path) -> Result<File, String> {
             .map_err(|_| "artifact denied")?;
         let m = next.metadata().map_err(|_| "artifact denied")?;
         // /tmp is used only by disposable offline fixtures (sticky root-owned).
-        if (m.uid() != 0 && m.uid() != uid()?)
-            || (m.mode() & 0o022 != 0 && !(m.uid() == 0 && m.mode() & 0o1000 != 0))
-        {
+        if m.mode() & 0o022 != 0 && !(m.uid() == 0 && m.mode() & 0o1000 != 0) {
             return Err("artifact denied".into());
         }
         dir = next;
@@ -324,6 +326,22 @@ mod tests {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.home).unwrap();
         }
+    }
+
+    #[test]
+    fn home_boundary_is_owned_nonwritable_and_not_a_symlink() {
+        let f = Fixture::new();
+        assert!(home_dir(&f.home).is_ok());
+        fs::set_permissions(&f.home, fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(home_dir(&f.home).is_err());
+        fs::set_permissions(&f.home, fs::Permissions::from_mode(0o700)).unwrap();
+        let alias = f.home.join("alias");
+        symlink(&f.home, &alias).unwrap();
+        assert!(home_dir(&alias).is_err());
+        // A pinned owner-held HOME remains valid after an ancestor name changes;
+        // authority is conferred by HOME/config ownership, never ancestor UIDs.
+        let pinned = home_dir(&f.home).unwrap();
+        assert_eq!(pinned.metadata().unwrap().uid(), uid().unwrap());
     }
 
     #[test]

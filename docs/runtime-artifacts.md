@@ -147,3 +147,64 @@ restart. Background jobs require a frozen versioned runtime image. The revised
 watchdog may start an inactive tunnel with verified runtime bytes, but cannot
 promote/restore binaries. Its writable paths exclude both Cargo and runtime
 artifacts. Installing these source changes remains a separate action.
+
+## Self-contained attended activation (Issue #77)
+
+The HTTP and tunnel templates use `ProtectHome=false`, without home bind mounts
+or a scaffold. `ProtectSystem=full`, `PrivateTmp`, `NoNewPrivileges`, the tunnel
+address-family restrictions, polling and credentials remain unchanged. Real HOME
+access enables locally authorized operations; remote allowlists, per-operation
+grants and durable auditing still decide what MCP may do. A compromised service
+process has its ordinary user's HOME access; filesystem restrictions are not a
+replacement for the application authorization boundary.
+
+Artifact authorization begins at a pinned HOME descriptor owned by the exact
+process UID. Ancestors are traversed without symlinks and with safe permissions;
+their namespace-translated UIDs convey no authorization. HOME and every config,
+root and report descriptor retain strict ownership checks. UID 65534 is never
+an ownership exception. The old immutable candidate cannot implement this source
+correction; retain its bytes/pin and baseline alongside a new source-built pin.
+
+`deploy/attended_activation.py` is the reviewed source of the ignored package's
+`transition.py`; `deploy/activation_transaction.py` provides its durable journal.
+They are package templates, not an instruction to install or run them. After
+physical owner approval, the transition safely bootstraps the private lock,
+rechecks under that lock, creates missing 0700 directories and 0600 audit state
+without truncating existing files, stages immutable artifacts/reports, installs
+both pinned units and merges the approved artifact root without replacing other
+entries. It then selects/restarts the candidate and checks local health/artifacts.
+No development/source-edit grant is created or changed.
+
+`check` performs no installation. It lists safely creatable objects and rejects
+unsafe metadata/links, root collisions/capacity, busy existing locks, pending
+transactions, changed pins/configuration, unavailable tools/manager, insufficient
+space and read-only/unwritable destinations. Existing unsafe permissions are
+blockers, never silently repaired. Lingering must already be enabled for the
+ordinary user: changing host login policy requires its own authority.
+
+Before configuration or selector changes, a private fsynced journal records exact
+unit/root-map bytes, modes and both selectors, and a persistent calendar recovery
+timer is enabled and verified. The foreground acceptance budget is 20 minutes,
+with a 90-second recovery margin and attempt-specific physical-owner confirmation
+of fresh independent tunnel checks. HTTP success cannot confirm the tunnel.
+EOF, rejection, timeout or a crash restores the baseline. The independently
+scheduled recovery service uses the same lock, checks fixed pins/journal state,
+stops the pair, restores exact configuration/root-map/selectors, restarts and
+checks baseline health. It has a 180-second service limit and at most three
+starts per ten minutes. Failed recovery retains its journal and needs physical
+diagnosis; a powered-off host cannot recover until its user manager runs again.
+
+Partial writes and abandoned temporaries are preserved as evidence; only known
+before/after target states may be restored. Audit data, staged immutable images,
+historical receipts, and unrelated user files remain intact. Owner acceptance is
+fsynced before recovery is disarmed. An accepted attempt is never automatically
+rolled back. Explicit rollback names the exact attempt and requires fresh physical-owner
+approval. It may restore a committed attempt only while its recorded after-state
+is unchanged; it never guesses or overwrites a later deployment.
+
+Verification: `python3 -B -m unittest discover -s scripts -p 'test_*.py'` covers
+clean/preserved installs, partial failures, SIGKILL recovery and owner gates.
+`python3 -B scripts/test_tunnel_artifact_isolation.py <new-pinned-api9-binary>`
+exercises HTTP and readonly-stdio in disposable user services, including unmapped
+HOME/config/root/report denial and independent scheduled filesystem recovery.
+These checks grant no installation, activation, merge or deployment authority.

@@ -31,4 +31,6 @@ The MCP SSH wrappers explicitly read the local private
 `~/.ssh/config` file (`ssh -F`) to avoid distribution-generated system
 SSH config symlinks being rejected inside systemd mount namespaces.
 This preserves strict host-key validation and permits systemd hardening
-(`ProtectHome=read-only`, `ProtectSystem=full`, `NoNewPrivileges=true`).
+(`ProtectSystem=full`, `PrivateTmp=true`, `NoNewPrivileges=true`). The candidate
+permits real HOME access; remote file allowlists and mutation authorization remain
+the security boundary.
