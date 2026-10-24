@@ -674,12 +674,16 @@ pub fn execute(args: &Value) -> Result<String, String> {
             if obj.len() != 2 {
                 return Err("artifact inspection parameters denied".into());
             }
-            let params = obj.get("parameters").and_then(Value::as_object)
+            let params = obj
+                .get("parameters")
+                .and_then(Value::as_object)
                 .ok_or("artifact inspection parameters denied")?;
             if params.len() != 1 {
                 return Err("artifact inspection parameters denied".into());
             }
-            let name = params.get("name").and_then(Value::as_str)
+            let name = params
+                .get("name")
+                .and_then(Value::as_str)
                 .ok_or("artifact root alias required")?;
             audit(&home, operation)?;
             workstation_artifacts::inspect_root(&home, name)
