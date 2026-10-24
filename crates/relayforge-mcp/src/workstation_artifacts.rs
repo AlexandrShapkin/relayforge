@@ -342,6 +342,16 @@ fn approval_lock(parent: &File) -> Result<File, String> {
 
 // Called only by the existing one-time, physical-owner-approved change executor.
 pub(crate) fn approve_root(home: &Path, id: &str, folder: &str) -> Result<String, String> {
+    approve_root_with(home, id, folder, |grants, config| {
+        grants.sync_all()?;
+        config.sync_all()
+    })
+}
+
+fn approve_root_with<F>(home: &Path, id: &str, folder: &str, finalize: F) -> Result<String, String>
+where
+    F: FnOnce(&File, &File) -> std::io::Result<()>,
+{
     if !name_ok(id) || id.len() > 32 || !name_ok(folder) || folder.len() > 96 {
         return Err("artifact root request denied".into());
     }
@@ -384,16 +394,23 @@ pub(crate) fn approve_root(home: &Path, id: &str, folder: &str) -> Result<String
         .map_err(|_| "artifact approval staging not durable")?;
     fs::rename(pinned(&config_dir, &temporary), pinned(&grants, &name))
         .map_err(|_| "artifact approval publication failed")?;
-    grants
-        .sync_all()
-        .map_err(|_| "artifact approval sync failed")?;
-    config_dir
-        .sync_all()
-        .map_err(|_| "artifact approval sync failed")?;
+    // The rename is already observable. A subsequent fsync failure MUST NOT
+    // report an unchanged authorization; the owner can inspect the live alias.
+    if finalize(&grants, &config_dir).is_err() {
+        return Ok(json!({"status":"durability_uncertain","root":id,
+            "effect":"added","reconcile":"artifact.root.inspect"}).to_string());
+    }
     Ok(json!({"status":"approved","root":id,"read_only":true}).to_string())
 }
 
 pub(crate) fn revoke_root(home: &Path, id: &str) -> Result<String, String> {
+    revoke_root_with(home, id, File::sync_all)
+}
+
+fn revoke_root_with<F>(home: &Path, id: &str, finalize: F) -> Result<String, String>
+where
+    F: FnOnce(&File) -> std::io::Result<()>,
+{
     if !name_ok(id) || id.len() > 32 {
         return Err("artifact root request denied".into());
     }
@@ -406,10 +423,20 @@ pub(crate) fn revoke_root(home: &Path, id: &str) -> Result<String, String> {
         return Err("artifact authorization denied".into());
     }
     fs::remove_file(pinned(&grants, &name)).map_err(|_| "artifact revocation failed")?;
-    grants
-        .sync_all()
-        .map_err(|_| "artifact revocation sync failed")?;
+    if finalize(&grants).is_err() {
+        return Ok(json!({"status":"durability_uncertain","root":id,
+            "effect":"removed","reconcile":"artifact.root.inspect"}).to_string());
+    }
     Ok(json!({"status":"revoked","root":id}).to_string())
+}
+
+pub(crate) fn inspect_root(home: &Path, id: &str) -> Result<String, String> {
+    if !name_ok(id) || id.len() > 32 {
+        return Err("artifact root request denied".into());
+    }
+    // Current visibility is not evidence of power-loss durability.
+    Ok(json!({"root":id,"currently_accessible":roots(home)?.contains_key(id),
+        "durability":"not_established_by_inspection"}).to_string())
 }
 
 pub fn discovery(home: &Path) -> Value {
@@ -748,6 +775,40 @@ mod tests {
         assert_eq!(fs::read(&config).unwrap(), before);
         assert!(f.call("artifact.read", "issue77/AUTHORIZATION.md").is_err());
         assert!(revoke_root(&f.home, "issue77").is_err());
+    }
+
+    #[test]
+    fn post_publication_sync_failures_are_indeterminate_and_reconcilable() {
+        let f = Fixture::new();
+        let folder = f.home.join("Projects/relayforge/.build/issue77");
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("AUTHORIZATION.md"), "Reviewed report\n").unwrap();
+        let fail = || std::io::Error::other("fault injected after mutation");
+
+        // First directory sync failure: grant exists and is remotely readable.
+        let outcome = approve_root_with(&f.home, "issue77", "issue77", |_, _| Err(fail()))
+            .unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&outcome).unwrap()["status"],
+            "durability_uncertain");
+        assert_eq!(serde_json::from_str::<Value>(
+            &inspect_root(&f.home, "issue77").unwrap()).unwrap()["currently_accessible"], true);
+        assert!(f.call("artifact.read", "issue77/AUTHORIZATION.md").is_ok());
+        assert!(approve_root(&f.home, "issue77", "issue77").is_err());
+
+        // Revocation unlink is also visible before fsync, even if that fsync fails.
+        let outcome = revoke_root_with(&f.home, "issue77", |_| Err(fail())).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&outcome).unwrap()["status"],
+            "durability_uncertain");
+        assert!(f.call("artifact.read", "issue77/AUTHORIZATION.md").is_err());
+        assert_eq!(serde_json::from_str::<Value>(
+            &inspect_root(&f.home, "issue77").unwrap()).unwrap()["currently_accessible"], false);
+
+        // Second directory sync failure: active grant still must not be reported failed.
+        let outcome = approve_root_with(&f.home, "issue77", "issue77",
+            |grants, _| { grants.sync_all()?; Err(fail()) }).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&outcome).unwrap()["status"],
+            "durability_uncertain");
+        assert!(f.call("artifact.list", "issue77").is_ok());
     }
 
     #[test]
