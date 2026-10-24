@@ -575,10 +575,13 @@ impl Store {
             .map_err(|_| "audit unavailable")?;
         let outcome = execute(prop);
         let (status, message, event) = match outcome {
-            Ok(message) if matches!(action, "artifact.root.add" | "artifact.root.remove")
-                && serde_json::from_str::<Value>(&message).ok()
-                    .and_then(|v| v.get("status").and_then(Value::as_str).map(str::to_owned))
-                    .as_deref() == Some("durability_uncertain") =>
+            Ok(message)
+                if matches!(action, "artifact.root.add" | "artifact.root.remove")
+                    && serde_json::from_str::<Value>(&message)
+                        .ok()
+                        .and_then(|v| v.get("status").and_then(Value::as_str).map(str::to_owned))
+                        .as_deref()
+                        == Some("durability_uncertain") =>
             {
                 // The authorization already changed. Never log it as failed or replay it.
                 ("indeterminate", message, "execution_indeterminate")
@@ -635,9 +638,15 @@ impl Store {
                 // A claimed artifact change may have been interrupted after the
                 // filesystem effect. Without a durable result, never assume failure.
                 let artifact_unknown = stage == "claimed"
-                    && matches!(record["proposal"]["action"].as_str(),
-                        Some("artifact.root.add" | "artifact.root.remove"));
-                let status = if artifact_unknown { "outcome_unknown" } else { status };
+                    && matches!(
+                        record["proposal"]["action"].as_str(),
+                        Some("artifact.root.add" | "artifact.root.remove")
+                    );
+                let status = if artifact_unknown {
+                    "outcome_unknown"
+                } else {
+                    status
+                };
                 return Ok(json!({"approval_id":id,"status":status,
                     "reconcile":if artifact_unknown { json!("artifact.root.inspect") }
                         else { Value::Null },
@@ -860,12 +869,16 @@ mod tests {
         let original = s.load("prepared", id).unwrap();
         let time = original["created"].as_u64().unwrap() + 1;
         s.approve_confirmed(id, &original, time).unwrap();
-        let outcome = s.commit_with_at(id, time + 1, |_| {
-            Ok(json!({"status":"durability_uncertain","root":"issue77"}).to_string())
-        }).unwrap();
+        let outcome = s
+            .commit_with_at(id, time + 1, |_| {
+                Ok(json!({"status":"durability_uncertain","root":"issue77"}).to_string())
+            })
+            .unwrap();
         assert_eq!(outcome["status"], "indeterminate");
         assert_eq!(s.status(id).unwrap()["result"]["status"], "indeterminate");
-        assert!(s.commit_with_at(id, time + 1, |_| Ok("replay".into())).is_err());
+        assert!(s
+            .commit_with_at(id, time + 1, |_| Ok("replay".into()))
+            .is_err());
         let audit = fs::read_to_string(s.dir.join("audit.jsonl")).unwrap();
         assert!(audit.contains("execution_indeterminate"));
         assert!(!audit.contains("execution_failed"));
@@ -875,8 +888,10 @@ mod tests {
     fn claimed_artifact_request_after_crash_cannot_replay_and_is_unknown() {
         let s = store();
         let prepared = s
-            .prepare(&json!({"host":"workstation","action":"artifact.root.remove",
-                "name":"issue77"}))
+            .prepare(
+                &json!({"host":"workstation","action":"artifact.root.remove",
+                "name":"issue77"}),
+            )
             .unwrap();
         let id = prepared["approval_id"].as_str().unwrap();
         s.move_stage("prepared", "claimed", id).unwrap();
