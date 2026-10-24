@@ -863,7 +863,9 @@ mod tests {
         assert!(f.call("artifact.read", "issue77/AUTHORIZATION.md").is_err());
     }
 
-    fn wait_for_approval_lock(mut operation: impl FnMut() -> Result<String, String>) -> Result<String, String> {
+    fn wait_for_approval_lock(
+        mut operation: impl FnMut() -> Result<String, String>,
+    ) -> Result<String, String> {
         for _ in 0..50 {
             match operation() {
                 Err(message) if message == "artifact approval busy" => {
@@ -884,8 +886,10 @@ mod tests {
             fs::write(folder.join("AUTHORIZATION.md"), "Approved report\n").unwrap();
         }
         std::thread::scope(|scope| {
-            let one = scope.spawn(|| wait_for_approval_lock(|| approve_root(&f.home, "issue77", "issue77")));
-            let two = scope.spawn(|| wait_for_approval_lock(|| approve_root(&f.home, "issue88", "issue88")));
+            let one = scope
+                .spawn(|| wait_for_approval_lock(|| approve_root(&f.home, "issue77", "issue77")));
+            let two = scope
+                .spawn(|| wait_for_approval_lock(|| approve_root(&f.home, "issue88", "issue88")));
             assert!(one.join().unwrap().is_ok());
             assert!(two.join().unwrap().is_ok());
         });
