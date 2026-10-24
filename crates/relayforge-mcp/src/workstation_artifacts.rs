@@ -878,7 +878,9 @@ mod tests {
             assert!(two.join().unwrap().is_ok());
         });
         for name in ["issue77", "issue88"] {
-            assert!(f.call("artifact.read", &format!("{name}/AUTHORIZATION.md")).is_ok());
+            assert!(f
+                .call("artifact.read", &format!("{name}/AUTHORIZATION.md"))
+                .is_ok());
         }
         std::thread::scope(|scope| {
             let reader = scope.spawn(|| {
@@ -897,7 +899,9 @@ mod tests {
         });
         assert!(f.call("artifact.read", "issue77/AUTHORIZATION.md").is_err());
         assert!(f.call("artifact.read", "issue88/AUTHORIZATION.md").is_err());
-        assert!(f.call("artifact.read", "activation/AUTHORIZATION.md").is_ok());
+        assert!(f
+            .call("artifact.read", "activation/AUTHORIZATION.md")
+            .is_ok());
     }
 
     #[test]
