@@ -1,10 +1,12 @@
 """Disposable selector-only upgrades; real journals and attended recovery units."""
+import contextlib
 import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
 import signal
+import sys
 import tempfile
 import time
 from types import SimpleNamespace
@@ -86,7 +88,7 @@ class UpgradeTests(unittest.TestCase):
         b.ATTEMPTS = self.attempts
         b.COMMIT, b.SHA = self.cand
         b.BASE, b.CAND = self.base_link, self.cand_link
-        b.m = SimpleNamespace(STORE=self.store, M={'commit': self.base[0], 'baseline': self.base[1]},
+        b.m = SimpleNamespace(STORE=self.store, M={'commit': self.base[0], 'baseline': self.base[1], 'files': {}},
                               artifact=r, systemctl=systemctl, require=u.require, command=lambda args: 'yes\n', SERVICES=['http', 'tunnel'])
         b.sealed = lambda: None
         b.invariant = invariant
@@ -146,6 +148,11 @@ class UpgradeTests(unittest.TestCase):
         before = sorted(str(p) for p in self.root.rglob('*'))
         self.assertEqual(self.engine.check()['actions_performed'], [])
         self.assertEqual(before, sorted(str(p) for p in self.root.rglob('*')))
+        document = json.loads(self.proof.read_text())
+        document['observed'] -= 7200
+        self.proof.write_text(json.dumps(document))
+        with self.assertRaises(RuntimeError):
+            self.engine.check()
         self.receipt.unlink()
         with self.assertRaises(Exception):
             self.engine.check()
@@ -171,6 +178,16 @@ class UpgradeTests(unittest.TestCase):
             self.engine.activate(approve)
         self.assertFalse(list(self.attempts.iterdir()))
 
+    def test_approval_expiration_blocks_journal_creation(self):
+        now = time.time()
+        def approve(auth):
+            clock.return_value = now + 61
+            return True
+        with patch.object(u.time, 'time', return_value=now) as clock:
+            with self.assertRaises(RuntimeError):
+                self.engine.activate(approve)
+        self.assertFalse(list(self.attempts.iterdir()))
+
     def test_recovery_armed_before_selector_and_failed_arm_does_not_mutate(self):
         def arm(t):
             self.assertEqual(a.state(self.store / 'current'), {'link': self.base_link})
@@ -178,6 +195,7 @@ class UpgradeTests(unittest.TestCase):
         with patch.object(self.b, 'arm', arm), self.assertRaises(RuntimeError):
             self.activate()
         self.assertEqual(a.state(self.store / 'current'), {'link': self.base_link})
+        self.assertFalse(any(event[0] == 'restart' for event in self.events))
 
     def test_timeout_rolls_back_and_failed_restart_retains_recovery(self):
         self.b.remote = lambda t: (_ for _ in ()).throw(TimeoutError())
@@ -203,6 +221,43 @@ class UpgradeTests(unittest.TestCase):
         committed = [p.name for p in self.attempts.iterdir() if self.engine.load(p.name).doc['status'] == 'committed'][0]
         self.engine.recover(committed)
         self.assertEqual(a.state(self.store / 'current'), {'link': self.cand_link})
+
+    def test_foreign_selector_blocks_pending_recovery_without_restart(self):
+        attempt = 'f' * 32
+        directory = self.attempts / attempt
+        directory.mkdir(mode=0o700)
+        now = int(time.time())
+        transaction = self.b.a.Transaction(directory / 'journal.json', self.engine.targets(), True,
+            metadata={'id': attempt, 'created': now, 'deadline': now + u.WINDOW,
+                      'physical_owner_approved': True})
+        self.b.arm(transaction)
+        transaction.apply(self.store / 'current')
+        (self.store / 'current').unlink()
+        (self.store / 'current').symlink_to('foreign')
+        with self.assertRaises(RuntimeError):
+            self.engine.recover(attempt, early=True)
+        self.assertEqual(os.readlink(self.store / 'current'), 'foreign')
+        self.assertTrue(self.armed)
+        self.assertFalse(any(event[0] == 'restart' for event in self.events))
+
+    def test_package_entrypoint_requires_terminal_and_readonly_check_lock(self):
+        self.b.m.M['uid'] = os.getuid()
+        locks = []
+        @contextlib.contextmanager
+        def locked(**kwargs):
+            locks.append(kwargs)
+            yield
+        self.b.locked = locked
+        with patch.object(sys, 'argv', ['transition.py', 'activate']), \
+                patch.object(sys.stdin, 'isatty', return_value=False):
+            with self.assertRaises(RuntimeError):
+                u.run(self.b, self.receipt, self.proof)
+        self.assertFalse(list(self.attempts.iterdir()))
+        # Check dispatch uses the shared lock without bootstrapping files.
+        with patch.object(sys, 'argv', ['transition.py', 'check']), \
+                patch.object(u.Upgrade, 'check', return_value={'actions_performed': []}):
+            u.run(self.b, self.receipt, self.proof)
+        self.assertEqual(locks[-1], {'readonly': True, 'wait': False})
 
     def test_sigkill_after_selector_independent_recovery_and_stale_state(self):
         pid = os.fork()
