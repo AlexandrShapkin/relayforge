@@ -71,6 +71,57 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
+  arch-source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    container:
+      # Official base-20260924.0.599135, verified against registry manifest.
+      image: archlinux/archlinux@sha256:676f4d5b2cacc259ab30b1e871a272bd4a2e023a901f725fb1b12c84dc355f10
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.build/ci-arch
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Install snapshot toolchain in disposable container
+        run: |
+          echo 'Server = https://archive.archlinux.org/repos/2026/09/25/$repo/os/$arch' > /etc/pacman.d/mirrorlist
+          pacman -Syu --noconfirm --needed base-devel rust python git
+          useradd --create-home builder
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Build and verify as unprivileged user
+        shell: bash
+        run: |
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          runuser -u builder -- env CARGO_TARGET_DIR="$CARGO_TARGET_DIR" SOURCE_SHA="$SOURCE_SHA" bash ci/arch-source.sh
+      - name: Retain exact-source binaries and operational source package
+        uses: actions/upload-artifact@v4
+        with:
+          name: relayforge-arch-source-${{ github.event.pull_request.head.sha || github.sha }}
+          path: .build/arch-dist/*
+          retention-days: 7
+          if-no-files-found: error
+
+  attest-arch:
+    needs: arch-source
+    # PRs (including forks) receive no write/OIDC permissions. Public trusted
+    # main dispatch supports GitHub attestations; unsupported repositories skip.
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.event.repository.private == false
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: relayforge-arch-source-${{ github.sha }}
+          path: dist
+      - uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: 'dist/*.tar.gz'
+
   sandbox-integration:
     # Noble's restricted userns policy denies bwrap's loopback RTM_NEWADDR.
     # Do not relax AppArmor or networking. Build the exact source on Jammy
