@@ -17,5 +17,7 @@ python3 -B scripts/offline_artifact_acceptance.py "$CARGO_TARGET_DIR/release/rel
 python3 -B scripts/source_package.py build --binary "$CARGO_TARGET_DIR/release/relayforge-mcp" --output .build/arch-package
 cp .build/arch-package/* .build/arch-dist/
 sha=$(git rev-parse HEAD)
+# Validate the actual produced artifact, then run its packaged portable suites.
+python3 -B ci/verify_extracted_bundle.py ".build/arch-dist/relayforge-arch-source-v1-$sha.tar.gz" "$sha"
 tar -C "$CARGO_TARGET_DIR/release" -czf ".build/arch-dist/relayforge-arch-binaries-$sha.tar.gz" relayforge-mcp relayforge-agent
 (cd .build/arch-dist && sha256sum ./*.tar.gz > SHA256SUMS)

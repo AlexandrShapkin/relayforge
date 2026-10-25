@@ -145,3 +145,11 @@ jobs:
         run: python3 -B scripts/offline_development_workflow.py .build/ci-sandbox/release/relayforge-mcp
       - name: Exercise expiring task authorization and editable sandbox workspace
         run: python3 -B scripts/offline_authorized_development.py .build/ci-sandbox/release/relayforge-mcp
+      - name: Exercise hardened HTTP and stdio and scheduled rollback
+        # System manager on this disposable hosted runner supports namespace
+        # hardening that the hosted user manager rejects (EXIT_NAMESPACE 226).
+        # The fixture still executes as the unprivileged runner UID.
+        timeout-minutes: 9
+        env:
+          RELAYFORGE_CI_SYSTEMD_SYSTEM: "1"
+        run: python3 -B scripts/test_tunnel_artifact_isolation.py .build/ci-sandbox/release/relayforge-mcp

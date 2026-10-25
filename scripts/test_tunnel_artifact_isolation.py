@@ -17,8 +17,32 @@ import time
 import urllib.error
 import urllib.request
 
+# The CI-only system manager is used because hosted user managers cannot
+# provide BindReadOnlyPaths mount namespaces. The fixture runs as the runner's
+# unprivileged UID with all original hardening properties intact.
+SYSTEM_CI = os.environ.get('RELAYFORGE_CI_SYSTEMD_SYSTEM') == '1'
+if SYSTEM_CI and os.environ.get('GITHUB_ACTIONS') != 'true':
+    raise RuntimeError('system-level disposable fixture requires GitHub Actions')
 
-def inside(home, binary, transport, port, negative):
+
+def run_systemd():
+    return ['sudo', 'systemd-run'] if SYSTEM_CI else ['systemd-run', '--user']
+
+
+def systemctl():
+    return ['sudo', 'systemctl'] if SYSTEM_CI else ['systemctl', '--user']
+
+
+def runner_user():
+    return ['-p', f'User={os.getuid()}'] if SYSTEM_CI else []
+
+
+def inside(home, binary, transport, port, negative, evidence_mode):
+    # The parent passes its tested systemd scope explicitly; systemd-run
+    # does not forward the parent's CI environment to this child.
+    if evidence_mode not in ('foreign-owner', 'unmapped-owner'):
+        raise RuntimeError('invalid ownership evidence mode')
+    foreign_owner = evidence_mode == 'foreign-owner'
     env = {'HOME': str(home), 'PATH': '/usr/bin:/bin', 'LC_ALL': 'C',
            'XDG_RUNTIME_DIR': str(home / 'run'), 'RELAYFORGE_HTTP_PORT': str(port),
            'RELAYFORGE_HTTP_TOKEN_FILE': str(home.parent / 'fixture-token')}
@@ -28,7 +52,7 @@ def inside(home, binary, transport, port, negative):
         target = {'home': home, 'config': home / '.config/relayforge/artifact-roots.json',
                   'root': home / '.local/state/relayforge/artifacts/fixture',
                   'file': home / '.local/state/relayforge/artifacts/fixture/AUTHORIZATION.md'}[negative]
-        assert target.stat().st_uid == 65534
+        assert target.stat().st_uid != os.getuid()
     if transport == 'http':
         child = subprocess.Popen([binary, '--http'], env=env, stdout=subprocess.DEVNULL,
                                  stderr=subprocess.DEVNULL)
@@ -98,8 +122,12 @@ def inside(home, binary, transport, port, negative):
             config.unlink()
             assert not json.loads(call('capabilities')['content'][0]['text'])['artifacts']['configured']
             assert call('artifact.read', 'activation/AUTHORIZATION.md')['isError']
-        print(json.dumps({'transport': transport, 'configured': caps['artifacts']['configured'], 'unmapped_object': negative or None,
-                          'discovery_read_list_denials': 'PASS', 'revocation': 'PASS' if not negative else 'unmapped-owner denied',
+        print(json.dumps({'transport': transport, 'configured': caps['artifacts']['configured'],
+                          'unmapped_object': (negative or None) if not foreign_owner else None,
+                          'foreign_owner_object': (negative or None) if foreign_owner else None,
+                          'discovery_read_list_denials': 'PASS',
+                          'revocation': 'PASS' if not negative else
+                            ('foreign-owner denied' if foreign_owner else 'unmapped-owner denied'),
                           'uid_map': Path('/proc/self/uid_map').read_text().strip()}))
     finally:
         if child:
@@ -133,10 +161,10 @@ root=Path(sys.argv[2]);t=a.Transaction(root/'journal.json',json.loads((root/'tar
 """)
         name = 'relayforge-77-recovery-' + str(time.time_ns())
         when = time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime(time.time() + 4))
-        command = ['systemd-run', '--user', '--collect', '--unit=' + name,
+        command = run_systemd() + ['--collect', '--unit=' + name,
                    '--on-calendar=' + when, '--timer-property=Persistent=true',
                    '--timer-property=AccuracySec=1s', '-p', 'NoNewPrivileges=true',
-                   '/usr/bin/python3', '-B', str(callback), a.__file__, str(root)]
+                   *runner_user(), '/usr/bin/python3', '-B', str(callback), a.__file__, str(root)]
         try:
             subprocess.run(command, check=True, timeout=10)
             for path in targets:
@@ -150,15 +178,18 @@ root=Path(sys.argv[2]);t=a.Transaction(root/'journal.json',json.loads((root/'tar
             print(json.dumps({'independent_calendar_recovery': 'PASS',
                               'persistent_timer': True, 'restored_exact_baselines': True}))
         finally:
-            subprocess.run(['systemctl', '--user', 'stop', name + '.timer', name + '.service'],
+            subprocess.run(systemctl() + ['stop', name + '.timer', name + '.service'],
                            capture_output=True, timeout=10)
-            subprocess.run(['systemctl', '--user', 'clean', '--what=state', name + '.timer'],
+            subprocess.run(systemctl() + ['clean', '--what=state', name + '.timer'],
                            capture_output=True, timeout=10)
 
 
 def main():
     if sys.argv[1] == '--inside':
-        inside(Path(sys.argv[2]), sys.argv[3], sys.argv[4], int(sys.argv[5]), sys.argv[6])
+        if len(sys.argv) != 8:
+            raise RuntimeError('ownership evidence mode argument required')
+        inside(Path(sys.argv[2]), sys.argv[3], sys.argv[4], int(sys.argv[5]),
+               sys.argv[6], sys.argv[7])
         return
     binary = str(Path(sys.argv[1]).resolve())
     repo = Path(__file__).resolve().parents[1]
@@ -190,8 +221,9 @@ def main():
                 with socket.socket() as sock:
                     sock.bind(('127.0.0.1', 0))
                     port = sock.getsockname()[1]
-                command = ['systemd-run', '--user', '--wait', '--pipe', '--collect',
-                           '--unit=relayforge-77-home-' + str(time.time_ns()), '-p', 'RuntimeMaxSec=25']
+                command = run_systemd() + ['--wait', '--pipe', '--collect',
+                           '--unit=relayforge-77-home-' + str(time.time_ns()),
+                           '-p', 'RuntimeMaxSec=25', *runner_user()]
                 for prop in hardening:
                     command += ['-p', prop]
                 if negative:
@@ -199,11 +231,21 @@ def main():
                     source = '/etc' if negative in ('home', 'root') else '/etc/hostname'
                     command += ['-p', f'BindReadOnlyPaths={source}:{target}']
                 command += ['/usr/bin/python3', str(Path(__file__).resolve()), '--inside',
-                            str(home), binary, transport, str(port), negative]
+                            str(home), binary, transport, str(port), negative,
+                            'foreign-owner' if SYSTEM_CI else 'unmapped-owner']
                 run = subprocess.run(command, capture_output=True, text=True, timeout=35)
                 print(run.stdout, end='', flush=True)
                 print(run.stderr, end='', flush=True)
                 run.check_returncode()
+                reports = [json.loads(line) for line in run.stdout.splitlines()
+                           if line.startswith('{"transport":')]
+                assert len(reports) == 1, 'missing transport evidence'
+                report = reports[0]
+                assert report['transport'] == transport
+                assert report['foreign_owner_object'] == ((negative or None) if SYSTEM_CI else None)
+                assert report['unmapped_object'] == ((negative or None) if not SYSTEM_CI else None)
+                expected_denial = ('foreign-owner denied' if SYSTEM_CI else 'unmapped-owner denied')
+                assert report['revocation'] == ('PASS' if not negative else expected_denial)
     recovery_fixture(repo)
     print(json.dumps({'binary_sha256': hashlib.sha256(Path(binary).read_bytes()).hexdigest(), 'live_mutations': []}))
 
