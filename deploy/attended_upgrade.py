@@ -61,11 +61,17 @@ class Upgrade:
     def targets(self):
         return {self.previous: self.previous_state, self.current: self.after}
 
-    def invariant(self):
+    def invariant(self, recovery=False):
+        """Protect rollback inputs without depending on the rejected candidate.
+
+        Only activation may require candidate integrity. Recovery independently
+        pins the sealed engine, baseline image, configuration, and other images.
+        """
         self.b.sealed()
-        self.preserved()
+        self.preserved(recovery=recovery)
         self.b.artifact(self.b.BASE, *BASELINE)
-        self.b.artifact(self.b.CAND, *CANDIDATE)
+        if not recovery:
+            self.b.artifact(self.b.CAND, *CANDIDATE)
         # The sealed maintenance manifest also pins launchers and transport
         # executables outside the configuration/artifact inventory roots.
         for name, item in self.b.m.M['files'].items():
@@ -73,8 +79,13 @@ class Upgrade:
             self.a.regular(path, item['mode'])
             require(self.b.m.digest(path) == item['sha256'], 'installed entrypoint changed')
 
-    def preserved(self):
-        """Verify a sealed hash/inventory snapshot; never store credential bodies."""
+    def preserved(self, recovery=False):
+        """Validate protected state; only the rejected candidate can be damaged.
+
+        A failed candidate is never followed, read, repaired or deleted during
+        recovery. The sealed original inventory must still match every other
+        artifact and all effective configuration.
+        """
         self.a.regular(self.b.P / 'upgrade-preserved.json', limit=1024 * 1024)
         record = json.loads((self.b.P / 'upgrade-preserved.json').read_text())
         require(set(record) == {'roots', 'objects'}, 'preservation schema mismatch')
@@ -93,8 +104,21 @@ class Upgrade:
             timer = 'relayforge-activation-' + directory.name + '.timer'
             recovery[str(self.b.UNITS / 'timers.target.wants' / timer)] = {
                 'link': str(self.b.UNITS / timer)}
+        candidate_root = self.b.m.STORE / self.b.CAND
+
+        def rejected_candidate(path):
+            return path == candidate_root or candidate_root in path.parents
+
+        expected = record['objects']
+        require(isinstance(expected, dict), 'invalid preservation objects')
+        if recovery:
+            expected = {name: item for name, item in expected.items()
+                        if not rejected_candidate(Path(name))}
+
         observed = {}
         def visit(path):
+            if recovery and rejected_candidate(path):
+                return
             self.a.ancestors(path.parent)
             meta = path.lstat()
             require(meta.st_uid == os.getuid(), 'preserved owner changed')
@@ -107,7 +131,28 @@ class Upgrade:
                 for child in path.iterdir():
                     visit(child)
             elif stat.S_ISLNK(meta.st_mode):
-                observed[str(path)] = {'link': os.readlink(path)}
+                # No symlink in credentials/grants, transport configuration or
+                # artifact trees. Only systemd .wants links to sealed unit files
+                # directly under the protected unit directory are supported.
+                require(path.parent.parent == self.b.UNITS
+                        and path.parent.name.endswith('.wants')
+                        and path.name.endswith(('.service', '.timer', '.socket', '.target', '.path')),
+                        'unapproved preservation symlink')
+                literal = os.readlink(path)
+                target = Path(os.path.normpath(
+                    os.path.join(str(path.parent), literal)))
+                require(target.parent == self.b.UNITS and target.name == path.name,
+                        'systemd enablement link escapes inventory')
+                target_meta = target.lstat()
+                require(stat.S_ISREG(target_meta.st_mode)
+                        and target_meta.st_uid == os.getuid()
+                        and target_meta.st_nlink == 1
+                        and not target_meta.st_mode & 0o022,
+                        'systemd enablement target unsafe')
+                require(str(target) in expected
+                        and set(expected[str(target)]) == {'mode', 'sha256'},
+                        'systemd enablement target not sealed')
+                observed[str(path)] = {'link': literal}
             else:
                 require(stat.S_ISREG(meta.st_mode) and meta.st_nlink == 1
                         and not meta.st_mode & 0o022, 'unsafe preserved file')
@@ -123,7 +168,7 @@ class Upgrade:
                                        'mode': stat.S_IMODE(meta.st_mode)}
         for root in roots:
             visit(root)
-        require(observed == record['objects'], 'installed inventory changed')
+        require(observed == expected, 'installed inventory changed')
         guard = self.b.UNITS / 'relayforge-local-recover.service.d/issue77-maintenance.conf'
         require(str(guard) in observed and b'ExecStart=/usr/bin/false' in guard.read_bytes(),
                 'intentional legacy guard changed')
@@ -255,7 +300,7 @@ class Upgrade:
             self.b.disarm(transaction)
             return
         require(early or time.time() >= transaction.doc['deadline'], 'recovery not due')
-        self.invariant()
+        self.invariant(recovery=True)
         transaction.validate_rollback()
         if transaction.doc['status'] == 'pending' and self.a.state(self.current) == self.before:
             # Arm may have failed or the process died before selecting. Never
@@ -273,7 +318,7 @@ class Upgrade:
         transaction.rollback()
         self.b.m.systemctl('restart', *self.b.m.SERVICES)
         self.b.wait_health(BASELINE[1], require_worker=True)
-        self.invariant()
+        self.invariant(recovery=True)
         require(self.a.state(self.current) == self.before, 'rollback selector mismatch')
         transaction.doc['status'] = 'rolled-back'
         transaction.save()
