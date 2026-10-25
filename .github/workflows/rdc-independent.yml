@@ -145,16 +145,11 @@ jobs:
         run: python3 -B scripts/offline_development_workflow.py .build/ci-sandbox/release/relayforge-mcp
       - name: Exercise expiring task authorization and editable sandbox workspace
         run: python3 -B scripts/offline_authorized_development.py .build/ci-sandbox/release/relayforge-mcp
-      - name: Start isolated user systemd on disposable runner
-        run: |
-          # Enable only the short-lived GitHub runner's own user manager.
-          uid="$(id -u)"
-          sudo loginctl enable-linger "$(id -un)"
-          sudo systemctl start "user@$uid.service"
-          echo "XDG_RUNTIME_DIR=/run/user/$uid" >> "$GITHUB_ENV"
-          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" >> "$GITHUB_ENV"
-          XDG_RUNTIME_DIR="/run/user/$uid" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
-            systemctl --user is-active default.target
       - name: Exercise hardened HTTP and stdio and scheduled rollback
+        # System manager on this disposable hosted runner supports namespace
+        # hardening that the hosted user manager rejects (EXIT_NAMESPACE 226).
+        # The fixture still executes as the unprivileged runner UID.
         timeout-minutes: 9
+        env:
+          RELAYFORGE_CI_SYSTEMD_SYSTEM: "1"
         run: python3 -B scripts/test_tunnel_artifact_isolation.py .build/ci-sandbox/release/relayforge-mcp
