@@ -308,12 +308,26 @@ impl Store {
     }
 
     fn move_stage(&self, from: &str, to: &str, id: &str) -> io::Result<()> {
-        // hard_link is atomic and refuses an existing destination, unlike
-        // rename() which can overwrite a raced-in destination. After linking,
-        // a second contender always fails closed. A crash between link and
-        // unlink leaves a locked destination, not a reusable approval.
+        self.move_stage_with_sync(from, to, id, |stage| {
+            File::open(self.dir.join(stage))?.sync_all()
+        })
+    }
+
+    fn move_stage_with_sync(
+        &self,
+        from: &str,
+        to: &str,
+        id: &str,
+        mut sync_stage: impl FnMut(&str) -> io::Result<()>,
+    ) -> io::Result<()> {
+        // Never perform the authorized operation until both directory updates
+        // are durable. Persist the claimed hard link FIRST: if removal of the
+        // approved entry is lost in a crash, the durable claimed entry blocks
+        // any replay. On any sync failure, do not execute the operation.
         fs::hard_link(self.file(from, id), self.file(to, id))?;
-        fs::remove_file(self.file(from, id))
+        sync_stage(to)?;
+        fs::remove_file(self.file(from, id))?;
+        sync_stage(from)
     }
 
     fn prune_expired(&self, now: u64) -> io::Result<()> {
@@ -882,6 +896,82 @@ mod tests {
         let audit = fs::read_to_string(s.dir.join("audit.jsonl")).unwrap();
         assert!(audit.contains("execution_indeterminate"));
         assert!(!audit.contains("execution_failed"));
+    }
+
+    #[test]
+    fn claim_is_durable_before_any_artifact_effect_and_replay_is_denied() {
+        // Simulated crash checkpoints: the injected sync error prevents
+        // execution. After claimed has been durably synced, simulate losing
+        // the unsynced approved unlink by restoring the approved hard link.
+        for failed_sync in ["claimed", "approved"] {
+            let s = store();
+            let prepared = s
+                .prepare(&json!({"host":"workstation","action":"artifact.root.add",
+                    "name":"issue77","directory":"issue77-development-activation-20261022"}))
+                .unwrap();
+            let id = prepared["approval_id"].as_str().unwrap();
+            let original = s.load("prepared", id).unwrap();
+            let approved_at = original["created"].as_u64().unwrap() + 1;
+            s.approve_confirmed(id, &original, approved_at).unwrap();
+            // Establish the pre-crash approved state before fault injection.
+            File::open(s.dir.join("approved")).unwrap().sync_all().unwrap();
+
+            let mut sync_order = Vec::new();
+            let failure = s.move_stage_with_sync("approved", "claimed", id, |stage| {
+                sync_order.push(stage.to_owned());
+                if stage == failed_sync {
+                    Err(io::Error::other("simulated directory fsync failure"))
+                } else {
+                    File::open(s.dir.join(stage))?.sync_all()
+                }
+            });
+            assert!(failure.is_err());
+            assert_eq!(sync_order, if failed_sync == "claimed" {
+                vec!["claimed"]
+            } else {
+                vec!["claimed", "approved"]
+            });
+
+            // Simulate a lost unsynced unlink, not merely a process restart.
+            if failed_sync == "approved" {
+                fs::hard_link(s.file("claimed", id), s.file("approved", id)).unwrap();
+            }
+            // A non-durable claimed link could disappear after power loss,
+            // but no effect occurred before that sync returned success.
+            if failed_sync == "claimed" {
+                fs::remove_file(s.file("claimed", id)).unwrap();
+                assert!(s.file("approved", id).exists());
+            } else {
+                let restarted = Store::at(s.dir.clone()).unwrap();
+                assert!(restarted.file("claimed", id).exists());
+                let mut executed = false;
+                assert!(restarted.commit_with_at(id, approved_at + 2, |_| {
+                    executed = true;
+                    Ok("forbidden replay".into())
+                }).is_err());
+                assert!(!executed);
+                assert_eq!(restarted.status(id).unwrap()["status"], "outcome_unknown");
+            }
+        }
+    }
+
+    #[test]
+    fn claim_directory_sync_completes_before_executor_runs() {
+        let s = store();
+        let prepared = s
+            .prepare(&json!({"host":"workstation","action":"artifact.root.remove",
+                "name":"issue77"}))
+            .unwrap();
+        let id = prepared["approval_id"].as_str().unwrap();
+        let original = s.load("prepared", id).unwrap();
+        let approved_at = original["created"].as_u64().unwrap() + 1;
+        s.approve_confirmed(id, &original, approved_at).unwrap();
+        let result = s.commit_with_at(id, approved_at + 1, |_| {
+            assert!(s.file("claimed", id).exists());
+            assert!(!s.file("approved", id).exists());
+            Ok("mock executor".into())
+        }).unwrap();
+        assert_eq!(result["status"], "succeeded");
     }
 
     #[test]
