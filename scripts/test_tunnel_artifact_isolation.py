@@ -117,8 +117,12 @@ def inside(home, binary, transport, port, negative):
             config.unlink()
             assert not json.loads(call('capabilities')['content'][0]['text'])['artifacts']['configured']
             assert call('artifact.read', 'activation/AUTHORIZATION.md')['isError']
-        print(json.dumps({'transport': transport, 'configured': caps['artifacts']['configured'], 'unmapped_object': negative or None,
-                          'discovery_read_list_denials': 'PASS', 'revocation': 'PASS' if not negative else 'unmapped-owner denied',
+        print(json.dumps({'transport': transport, 'configured': caps['artifacts']['configured'],
+                          'unmapped_object': (negative or None) if not SYSTEM_CI else None,
+                          'foreign_owner_object': (negative or None) if SYSTEM_CI else None,
+                          'discovery_read_list_denials': 'PASS',
+                          'revocation': 'PASS' if not negative else
+                            ('foreign-owner denied' if SYSTEM_CI else 'unmapped-owner denied'),
                           'uid_map': Path('/proc/self/uid_map').read_text().strip()}))
     finally:
         if child:
