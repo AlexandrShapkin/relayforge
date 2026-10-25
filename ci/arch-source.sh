@@ -9,7 +9,7 @@ rustc -Vv > .build/arch-dist/rustc.txt
 cargo build --release --locked -p relayforge-mcp -p relayforge-agent
 # Full workspace/systemd gates stay on Ubuntu; do not skip/relax them there.
 cargo test --locked -p relayforge-mcp
-for suite in runtime_artifact activation_transaction attended_activation attended_upgrade source_package; do
+for suite in process_roles runtime_artifact activation_transaction attended_activation attended_upgrade source_package; do
     python3 -B -m unittest discover -s scripts -p "test_${suite}.py"
 done
 python3 -B scripts/offline_mcp_smoke.py "$CARGO_TARGET_DIR/release/relayforge-mcp"
