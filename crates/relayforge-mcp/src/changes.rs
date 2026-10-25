@@ -25,11 +25,12 @@ const DONE_RETENTION_SECONDS: u64 = 7 * 86400;
 
 pub fn prepare_tool() -> Value {
     json!({"name":"relayforge_change_prepare",
-          "description":"Prepare a tightly scoped change for manual approval within five minutes. After local approval, execution has its own 180-second window. Allowed: scratch create or inert probe restart on active hosts.",
+          "description":"Prepare a tightly scoped change for manual approval within five minutes. After local approval, execution has its own 180-second window. Allowed: scratch create, inert probe restart, or narrow workstation artifact-root approval/revocation.",
         "inputSchema":{"type":"object","properties":{
-            "host":{"type":"string","enum":["ru0","srv0"]},
-            "action":{"type":"string","enum":["sandbox.create","probe.restart"]},
-            "name":{"type":"string","maxLength":64,"description":"Only for sandbox.create: flat .txt/.md/.json filename"},
+            "host":{"type":"string","enum":["ru0","srv0","workstation"]},
+            "action":{"type":"string","enum":["sandbox.create","probe.restart","artifact.root.add","artifact.root.remove"]},
+            "name":{"type":"string","maxLength":64,"description":"Scratch filename or artifact root alias"},
+            "directory":{"type":"string","maxLength":96,"description":"For artifact.root.add: one directory name under fixed RelayForge .build"},
             "content":{"type":"string","maxLength":2048,"description":"Only for sandbox.create: up to 2048 UTF-8 bytes"}
         },"required":["host","action"],"additionalProperties":false}})
 }
@@ -117,17 +118,39 @@ fn valid_file_name(name: &str) -> bool {
             .any(|ext| name.ends_with(ext))
 }
 
+fn root_component(s: &str, max: usize) -> bool {
+    !s.is_empty()
+        && s.len() <= max
+        && !s.starts_with('.')
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+        && ![
+            "secret",
+            "credential",
+            "token",
+            "password",
+            "private",
+            "id_rsa",
+            "id_ed25519",
+            ".env",
+            ".pem",
+            ".key",
+        ]
+        .iter()
+        .any(|part| s.to_ascii_lowercase().contains(part))
+}
+
 fn parse_action(args: &Value) -> Result<Value, String> {
     let obj = args.as_object().ok_or("expected object")?;
     let host = obj
         .get("host")
         .and_then(Value::as_str)
         .ok_or("missing host")?;
-    if !["ru0", "srv0"].contains(&host) {
+    if !["ru0", "srv0", "workstation"].contains(&host) {
         return Err("host denied".into());
     }
     match obj.get("action").and_then(Value::as_str) {
-        Some("sandbox.create") if obj.len() == 4 => {
+        Some("sandbox.create") if matches!(host, "ru0" | "srv0") && obj.len() == 4 => {
             let name = obj
                 .get("name")
                 .and_then(Value::as_str)
@@ -143,6 +166,31 @@ fn parse_action(args: &Value) -> Result<Value, String> {
         }
         Some("probe.restart") if host == "ru0" && obj.len() == 2 => {
             Ok(json!({"host":"ru0","action":"probe.restart"}))
+        }
+        Some("artifact.root.add") if host == "workstation" && obj.len() == 4 => {
+            let name = obj
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or("artifact root name missing")?;
+            let directory = obj
+                .get("directory")
+                .and_then(Value::as_str)
+                .ok_or("artifact directory missing")?;
+            if !root_component(name, 32) || !root_component(directory, 96) {
+                return Err("artifact root request denied".into());
+            }
+            Ok(json!({"host":host,"action":"artifact.root.add",
+                      "name":name,"directory":directory}))
+        }
+        Some("artifact.root.remove") if host == "workstation" && obj.len() == 3 => {
+            let name = obj
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or("artifact root name missing")?;
+            if !root_component(name, 32) {
+                return Err("artifact root request denied".into());
+            }
+            Ok(json!({"host":host,"action":"artifact.root.remove","name":name}))
         }
         _ => Err("operation denied".into()),
     }
@@ -260,12 +308,26 @@ impl Store {
     }
 
     fn move_stage(&self, from: &str, to: &str, id: &str) -> io::Result<()> {
-        // hard_link is atomic and refuses an existing destination, unlike
-        // rename() which can overwrite a raced-in destination. After linking,
-        // a second contender always fails closed. A crash between link and
-        // unlink leaves a locked destination, not a reusable approval.
+        self.move_stage_with_sync(from, to, id, |stage| {
+            File::open(self.dir.join(stage))?.sync_all()
+        })
+    }
+
+    fn move_stage_with_sync(
+        &self,
+        from: &str,
+        to: &str,
+        id: &str,
+        mut sync_stage: impl FnMut(&str) -> io::Result<()>,
+    ) -> io::Result<()> {
+        // Never perform the authorized operation until both directory updates
+        // are durable. Persist the claimed hard link FIRST: if removal of the
+        // approved entry is lost in a crash, the durable claimed entry blocks
+        // any replay. On any sync failure, do not execute the operation.
         fs::hard_link(self.file(from, id), self.file(to, id))?;
-        fs::remove_file(self.file(from, id))
+        sync_stage(to)?;
+        fs::remove_file(self.file(from, id))?;
+        sync_stage(from)
     }
 
     fn prune_expired(&self, now: u64) -> io::Result<()> {
@@ -401,6 +463,24 @@ impl Store {
                 serde_json::to_string(contents).map_err(|_| "invalid content")?
             );
         }
+        if action == "artifact.root.add" {
+            println!(
+                "Read-only artifact alias: {}",
+                prop["name"].as_str().ok_or("invalid record")?
+            );
+            println!(
+                "Exact directory: ~/Projects/relayforge/.build/{}",
+                prop["directory"].as_str().ok_or("invalid record")?
+            );
+            println!("Approval exposes all policy-eligible present and future reports in this directory.");
+            println!("Existing runtime selectors, pinned root-map bytes and source grants are NOT changed.");
+        }
+        if action == "artifact.root.remove" {
+            println!(
+                "Revoke artifact alias: {}",
+                prop["name"].as_str().ok_or("invalid record")?
+            );
+        }
         println!(
             "Expires in: {} seconds",
             record["expires"].as_u64().unwrap_or(0) - now
@@ -509,6 +589,17 @@ impl Store {
             .map_err(|_| "audit unavailable")?;
         let outcome = execute(prop);
         let (status, message, event) = match outcome {
+            Ok(message)
+                if matches!(action, "artifact.root.add" | "artifact.root.remove")
+                    && serde_json::from_str::<Value>(&message)
+                        .ok()
+                        .and_then(|v| v.get("status").and_then(Value::as_str).map(str::to_owned))
+                        .as_deref()
+                        == Some("durability_uncertain") =>
+            {
+                // The authorization already changed. Never log it as failed or replay it.
+                ("indeterminate", message, "execution_indeterminate")
+            }
             Ok(message) => ("succeeded", message, "execution_succeeded"),
             Err(message) => ("failed", message, "execution_failed"),
         };
@@ -558,7 +649,21 @@ impl Store {
                 } else {
                     label
                 };
+                // A claimed artifact change may have been interrupted after the
+                // filesystem effect. Without a durable result, never assume failure.
+                let artifact_unknown = stage == "claimed"
+                    && matches!(
+                        record["proposal"]["action"].as_str(),
+                        Some("artifact.root.add" | "artifact.root.remove")
+                    );
+                let status = if artifact_unknown {
+                    "outcome_unknown"
+                } else {
+                    status
+                };
                 return Ok(json!({"approval_id":id,"status":status,
+                    "reconcile":if artifact_unknown { json!("artifact.root.inspect") }
+                        else { Value::Null },
                     "expires_at_unix":deadline,
                     "approval_expires_at_unix":record["expires"],
                     "execution_expires_at_unix":if stage=="prepared" {
@@ -596,6 +701,23 @@ pub fn commit(args: &Value) -> Result<String, String> {
                 "name":proposal["name"],"content":proposal["content"]
             })),
             Some("probe.restart") => crate::agent::restart_probe(&json!({"host":proposal["host"]})),
+            Some("artifact.root.add") => {
+                let home = env::var_os("HOME").ok_or("home unavailable")?;
+                crate::workstation_artifacts::approve_root(
+                    Path::new(&home),
+                    proposal["name"].as_str().ok_or("artifact root missing")?,
+                    proposal["directory"]
+                        .as_str()
+                        .ok_or("artifact directory missing")?,
+                )
+            }
+            Some("artifact.root.remove") => {
+                let home = env::var_os("HOME").ok_or("home unavailable")?;
+                crate::workstation_artifacts::revoke_root(
+                    Path::new(&home),
+                    proposal["name"].as_str().ok_or("artifact root missing")?,
+                )
+            }
             _ => Err("operation denied".into()),
         })
         .map(|value| value.to_string())
@@ -639,6 +761,27 @@ pub fn approve_local(id: &str) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn artifact_root_changes_are_exactly_scoped_to_workstation() {
+        use serde_json::json;
+        let valid = json!({"host":"workstation","action":"artifact.root.add",
+            "name":"issue77","directory":"issue77-development-activation-20261022"});
+        assert_eq!(super::parse_action(&valid).unwrap(), valid);
+        for invalid in [
+            json!({"host":"ru0","action":"artifact.root.add","name":"issue77","directory":"issue77-development-activation-20261022"}),
+            json!({"host":"workstation","action":"artifact.root.add","name":"issue77","directory":"../.ssh"}),
+            json!({"host":"workstation","action":"artifact.root.add","name":"issue77","directory":"issue77","content":"x"}),
+            json!({"host":"workstation","action":"artifact.root.add","name":"issue77"}),
+            json!({"host":"workstation","action":"artifact.root.remove","name":"../activation"}),
+            json!({"host":"workstation","action":"sandbox.create","name":"x.txt","content":"x"}),
+            json!({"host":"ru0","action":"artifact.root.remove","name":"issue77"}),
+        ] {
+            assert!(super::parse_action(&invalid).is_err(), "{invalid}");
+        }
+        let remove = json!({"host":"workstation","action":"artifact.root.remove","name":"issue77"});
+        assert_eq!(super::parse_action(&remove).unwrap(), remove);
+    }
+
     use super::*;
     fn store() -> Store {
         let root = env::temp_dir().join(format!("rf-approvals-test-{}", random_id().unwrap()));
@@ -729,6 +872,137 @@ mod tests {
         assert!(audit.contains("execution_succeeded"));
         assert!(!audit.contains("mock"));
     }
+    #[test]
+    fn artifact_publish_uncertain_consumes_approval_without_reporting_failure() {
+        let s = store();
+        let prepared = s
+            .prepare(&json!({"host":"workstation","action":"artifact.root.add",
+                "name":"issue77","directory":"issue77-development-activation-20261022"}))
+            .unwrap();
+        let id = prepared["approval_id"].as_str().unwrap();
+        let original = s.load("prepared", id).unwrap();
+        let time = original["created"].as_u64().unwrap() + 1;
+        s.approve_confirmed(id, &original, time).unwrap();
+        let outcome = s
+            .commit_with_at(id, time + 1, |_| {
+                Ok(json!({"status":"durability_uncertain","root":"issue77"}).to_string())
+            })
+            .unwrap();
+        assert_eq!(outcome["status"], "indeterminate");
+        assert_eq!(s.status(id).unwrap()["result"]["status"], "indeterminate");
+        assert!(s
+            .commit_with_at(id, time + 1, |_| Ok("replay".into()))
+            .is_err());
+        let audit = fs::read_to_string(s.dir.join("audit.jsonl")).unwrap();
+        assert!(audit.contains("execution_indeterminate"));
+        assert!(!audit.contains("execution_failed"));
+    }
+
+    #[test]
+    fn claim_is_durable_before_any_artifact_effect_and_replay_is_denied() {
+        // Simulated crash checkpoints: the injected sync error prevents
+        // execution. After claimed has been durably synced, simulate losing
+        // the unsynced approved unlink by restoring the approved hard link.
+        for failed_sync in ["claimed", "approved"] {
+            let s = store();
+            let prepared = s
+                .prepare(&json!({"host":"workstation","action":"artifact.root.add",
+                    "name":"issue77","directory":"issue77-development-activation-20261022"}))
+                .unwrap();
+            let id = prepared["approval_id"].as_str().unwrap();
+            let original = s.load("prepared", id).unwrap();
+            let approved_at = original["created"].as_u64().unwrap() + 1;
+            s.approve_confirmed(id, &original, approved_at).unwrap();
+            // Establish the pre-crash approved state before fault injection.
+            File::open(s.dir.join("approved"))
+                .unwrap()
+                .sync_all()
+                .unwrap();
+
+            let mut sync_order = Vec::new();
+            let failure = s.move_stage_with_sync("approved", "claimed", id, |stage| {
+                sync_order.push(stage.to_owned());
+                if stage == failed_sync {
+                    Err(io::Error::other("simulated directory fsync failure"))
+                } else {
+                    File::open(s.dir.join(stage))?.sync_all()
+                }
+            });
+            assert!(failure.is_err());
+            assert_eq!(
+                sync_order,
+                if failed_sync == "claimed" {
+                    vec!["claimed"]
+                } else {
+                    vec!["claimed", "approved"]
+                }
+            );
+
+            // Simulate a lost unsynced unlink, not merely a process restart.
+            if failed_sync == "approved" {
+                fs::hard_link(s.file("claimed", id), s.file("approved", id)).unwrap();
+            }
+            // A non-durable claimed link could disappear after power loss,
+            // but no effect occurred before that sync returned success.
+            if failed_sync == "claimed" {
+                fs::remove_file(s.file("claimed", id)).unwrap();
+                assert!(s.file("approved", id).exists());
+            } else {
+                let restarted = Store::at(s.dir.clone()).unwrap();
+                assert!(restarted.file("claimed", id).exists());
+                let mut executed = false;
+                assert!(restarted
+                    .commit_with_at(id, approved_at + 2, |_| {
+                        executed = true;
+                        Ok("forbidden replay".into())
+                    })
+                    .is_err());
+                assert!(!executed);
+                assert_eq!(restarted.status(id).unwrap()["status"], "outcome_unknown");
+            }
+        }
+    }
+
+    #[test]
+    fn claim_directory_sync_completes_before_executor_runs() {
+        let s = store();
+        let prepared = s
+            .prepare(
+                &json!({"host":"workstation","action":"artifact.root.remove",
+                "name":"issue77"}),
+            )
+            .unwrap();
+        let id = prepared["approval_id"].as_str().unwrap();
+        let original = s.load("prepared", id).unwrap();
+        let approved_at = original["created"].as_u64().unwrap() + 1;
+        s.approve_confirmed(id, &original, approved_at).unwrap();
+        let result = s
+            .commit_with_at(id, approved_at + 1, |_| {
+                assert!(s.file("claimed", id).exists());
+                assert!(!s.file("approved", id).exists());
+                Ok("mock executor".into())
+            })
+            .unwrap();
+        assert_eq!(result["status"], "succeeded");
+    }
+
+    #[test]
+    fn claimed_artifact_request_after_crash_cannot_replay_and_is_unknown() {
+        let s = store();
+        let prepared = s
+            .prepare(
+                &json!({"host":"workstation","action":"artifact.root.remove",
+                "name":"issue77"}),
+            )
+            .unwrap();
+        let id = prepared["approval_id"].as_str().unwrap();
+        s.move_stage("prepared", "claimed", id).unwrap();
+        let state = s.status(id).unwrap();
+        assert_eq!(state["status"], "outcome_unknown");
+        assert_eq!(state["reconcile"], "artifact.root.inspect");
+        assert!(s.commit_with(id, |_| Ok("must not run".into())).is_err());
+    }
+
     #[test]
     fn expiry_pruning_releases_queue_slots() {
         let s = store();
