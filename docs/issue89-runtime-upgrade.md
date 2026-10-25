@@ -69,9 +69,23 @@ directories as `{"directory":MODE}`, regular files as `{"mode":MODE,"sha256":HAS
 links as `{"link":LITERAL_TARGET}`. No credential bodies enter the snapshot.
 Missing/extra objects, ownership, bytes, modes or loaded unit/drop-in changes
 block the transaction. Only exact journal-bound per-attempt scheduler files and
-enablement links may temporarily extend that inventory. All existing artifacts
-are hashed and preserved, including unselected versions. The fixed installed
-unit inventory remains in the backend's sealed maintenance manifest.
+enablement links may temporarily extend that inventory. Activation checks every
+artifact, including the candidate. **Recovery excludes only the exact rejected
+candidate directory and its descendants from inventory comparison**, and
+never reads or requires that candidate's image/manifest. It still validates
+sealed recovery code, a healthy frozen baseline, all other artifacts, the
+protected configuration, launchers, loaded units and allowed selector states.
+Corrupted candidate bytes are retained as evidence, never repaired or deleted.
+
+Symlinks are **not** authorized inside credential/grant/transport configuration
+or any artifact tree, even if they appear in the sealed snapshot. The only
+static inventory symlinks allowed are systemd enablement links directly in
+one-level `.wants` directories under the protected unit directory, whose
+lexically resolved targets must be same-named, owner-safe ordinary unit files
+directly in the protected unit directory and included as hashed objects in the
+sealed snapshot. Per-attempt recovery links remain separately bound to exact
+scheduler templates and journals. The fixed installed unit inventory remains
+in the backend's sealed maintenance manifest.
 
 The bounded implementation/verification plan is:
 
@@ -106,8 +120,11 @@ is retained and may require attended diagnosis; it is never silently deleted.
 ## Verification and remaining gates
 
 Disposable tests cover approval rejection, stale selectors, immutable inventory
-and guard, missing receipts, exact baseline restoration, failed arm/restart,
-timeout, SIGKILL with independently reopened recovery, and commit/disarm failures.
+and guard, missing receipts, exact baseline restoration **after the rejected
+candidate has disappeared**, failed arm/restart, timeout, SIGKILL with
+independently reopened recovery despite candidate damage, restricted systemd
+enablement symlinks and denied sealed symlinks escaping credential/grant roots,
+and commit/disarm failures.
 The existing transaction suite additionally tests every commit durability failure
 and crash between write, rename and fsync. Hosted native/security checks remain
 mandatory; fixture success is not platform or live-health evidence.
