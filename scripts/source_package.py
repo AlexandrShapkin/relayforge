@@ -11,6 +11,7 @@ import tarfile
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCES = (
+    'deploy/process_roles.py', 'scripts/test_process_roles.py',
     'deploy/activation_transaction.py', 'deploy/attended_activation.py',
     'deploy/attended_upgrade.py', 'deploy/runtime_artifact.py',
     'deploy/systemd/relayforge-mcp-http.service',
