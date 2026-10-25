@@ -43,6 +43,18 @@ class SourcePackageTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 p.verify(self.archive, commit)
 
+    def test_verify_bounds_unpacked_bytes(self):
+        # A low test-only limit exercises the cumulative bound without a
+        # large allocation or a compressed-bomb fixture.
+        with patch.object(p, 'MAX_UNPACKED_BYTES', 1):
+            with self.assertRaisesRegex(ValueError, 'unpacked size'):
+                p.verify(self.archive, self.commit)
+
+    def test_verify_does_not_enumerate_unbounded_headers(self):
+        with patch.object(tarfile.TarFile, 'getmembers',
+                          side_effect=AssertionError('unbounded header enumeration')):
+            p.verify(self.archive, self.commit)
+
     def test_changed_bytes_fail_seal(self):
         self.rewrite(lambda e: e['bin/relayforge-mcp'].__setitem__(1, b'changed'))
         with self.assertRaisesRegex(ValueError, 'seal'):
