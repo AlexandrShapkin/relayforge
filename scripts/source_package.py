@@ -1,5 +1,6 @@
 """Build/verify an offline operational-source bundle; never installs or activates."""
 import argparse
+import gzip
 import hashlib
 import io
 import json
@@ -61,43 +62,81 @@ def build(binary, output):
 def verify(archive, commit):
     if not re.fullmatch('[0-9a-f]{40}', commit):
         raise ValueError('full commit required')
-    with tarfile.open(archive) as tar:
-        expected = set(SOURCES) | {'bin/relayforge-mcp', 'manifest.json', 'package.json', 'seal.json'}
-        members = []
-        total_size = 0
-        # Inspect headers incrementally: getmembers() can exhaust memory before
-        # the inventory check on an archive containing many small entries.
-        for member in tar:
-            if (len(members) >= len(expected) or member.name not in expected
-                    or any(existing.name == member.name for existing in members)):
+    expected = set(SOURCES) | {'bin/relayforge-mcp', 'manifest.json', 'package.json', 'seal.json'}
+    members, files = [], {}
+    total_size = 0
+    # Read raw gzip/TAR records, never tarfile.open(): that parser processes
+    # PAX/GNU extension payloads BEFORE yielding a member to the caller.
+    # The producer needs only fixed-format regular-file headers. All TAR
+    # extensions, links, unknown paths and repeated members fail closed.
+    max_raw = MAX_UNPACKED_BYTES + 1024 * 1024
+    consumed = 0
+    with gzip.open(archive, 'rb') as stream:
+        def take(length):
+            nonlocal consumed
+            if length < 0 or consumed + length > max_raw:
+                raise ValueError('package decompressed size exceeds limit')
+            data = stream.read(length)
+            consumed += len(data)
+            if len(data) != length:
+                raise ValueError('truncated package archive')
+            return data
+
+        while True:
+            header = take(tarfile.BLOCKSIZE)
+            if header == bytes(tarfile.BLOCKSIZE):
+                if take(tarfile.BLOCKSIZE) != bytes(tarfile.BLOCKSIZE):
+                    raise ValueError('invalid TAR end markers')
+                # Fully consume the gzip stream to validate its CRC, rejecting
+                # nonzero trailing records and oversized zero padding.
+                while True:
+                    tail = stream.read(min(65536, max_raw - consumed + 1))
+                    if not tail:
+                        break
+                    consumed += len(tail)
+                    if consumed > max_raw or any(tail):
+                        raise ValueError('unsafe TAR trailing data')
+                break
+            if len(members) >= len(expected):
                 raise ValueError('unexpected package inventory')
+            try:
+                member = tarfile.TarInfo.frombuf(header, 'utf-8', 'strict')
+            except (tarfile.TarError, UnicodeError, ValueError) as exc:
+                raise ValueError('invalid TAR header') from exc
+            if member.name not in expected or member.name in files:
+                raise ValueError('unexpected package inventory')
+            # In particular, PAX and GNU long-name headers are not regular
+            # files; reject them BEFORE accessing their attacker-sized body.
             if not member.isfile() or member.size < 0 or member.size > 128 * 1024 * 1024:
                 raise ValueError('unsafe package member')
             total_size += member.size
             if total_size > MAX_UNPACKED_BYTES:
                 raise ValueError('package unpacked size exceeds limit')
-            members.append(member)
-        if len(members) != len(expected):
-            raise ValueError('unexpected package inventory')
-        files = {m.name: tar.extractfile(m).read() for m in members}
-        seal = json.loads(files['seal.json'])
-        if set(seal) != expected - {'seal.json'}:
-            raise ValueError('invalid seal inventory')
-        for member in members:
             mode = 0o500 if member.name.startswith('bin/') else 0o400
             if member.mode != mode:
                 raise ValueError('unsafe package mode')
-            if member.name != 'seal.json' and seal[member.name] != {
-                    'sha256': digest(files[member.name]), 'mode': mode}:
-                raise ValueError('package seal mismatch')
-        if encoded(json.loads(files['manifest.json'])) != encoded({'schema_version': 1, 'commit': commit,
-                'sha256': digest(files['bin/relayforge-mcp']), 'binary': 'relayforge-mcp'}):
-            raise ValueError('invalid binary manifest')
-        if encoded(json.loads(files['package.json'])) != encoded({'schema_version': 1, 'commit': commit,
-                'kind': 'operational-source-fixture', 'activation_allowed': False,
-                'roles': ROLES, 'baseline_receipt': None, 'owner_approval': None}):
-            raise ValueError('invalid package manifest/roles/authority')
-
+            files[member.name] = take(member.size)
+            padding = (-member.size) % tarfile.BLOCKSIZE
+            if any(take(padding)):
+                raise ValueError('invalid TAR padding')
+            members.append(member)
+    if set(files) != expected:
+        raise ValueError('unexpected package inventory')
+    seal = json.loads(files['seal.json'])
+    if set(seal) != expected - {'seal.json'}:
+        raise ValueError('invalid seal inventory')
+    for member in members:
+        mode = 0o500 if member.name.startswith('bin/') else 0o400
+        if member.name != 'seal.json' and seal[member.name] != {
+                'sha256': digest(files[member.name]), 'mode': mode}:
+            raise ValueError('package seal mismatch')
+    if encoded(json.loads(files['manifest.json'])) != encoded({'schema_version': 1, 'commit': commit,
+            'sha256': digest(files['bin/relayforge-mcp']), 'binary': 'relayforge-mcp'}):
+        raise ValueError('invalid binary manifest')
+    if encoded(json.loads(files['package.json'])) != encoded({'schema_version': 1, 'commit': commit,
+            'kind': 'operational-source-fixture', 'activation_allowed': False,
+            'roles': ROLES, 'baseline_receipt': None, 'owner_approval': None}):
+        raise ValueError('invalid package manifest/roles/authority')
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
