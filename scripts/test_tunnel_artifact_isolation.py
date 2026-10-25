@@ -37,7 +37,12 @@ def runner_user():
     return ['-p', f'User={os.getuid()}'] if SYSTEM_CI else []
 
 
-def inside(home, binary, transport, port, negative):
+def inside(home, binary, transport, port, negative, evidence_mode):
+    # The parent passes its tested systemd scope explicitly; systemd-run
+    # does not forward the parent's CI environment to this child.
+    if evidence_mode not in ('foreign-owner', 'unmapped-owner'):
+        raise RuntimeError('invalid ownership evidence mode')
+    foreign_owner = evidence_mode == 'foreign-owner'
     env = {'HOME': str(home), 'PATH': '/usr/bin:/bin', 'LC_ALL': 'C',
            'XDG_RUNTIME_DIR': str(home / 'run'), 'RELAYFORGE_HTTP_PORT': str(port),
            'RELAYFORGE_HTTP_TOKEN_FILE': str(home.parent / 'fixture-token')}
@@ -118,11 +123,11 @@ def inside(home, binary, transport, port, negative):
             assert not json.loads(call('capabilities')['content'][0]['text'])['artifacts']['configured']
             assert call('artifact.read', 'activation/AUTHORIZATION.md')['isError']
         print(json.dumps({'transport': transport, 'configured': caps['artifacts']['configured'],
-                          'unmapped_object': (negative or None) if not SYSTEM_CI else None,
-                          'foreign_owner_object': (negative or None) if SYSTEM_CI else None,
+                          'unmapped_object': (negative or None) if not foreign_owner else None,
+                          'foreign_owner_object': (negative or None) if foreign_owner else None,
                           'discovery_read_list_denials': 'PASS',
                           'revocation': 'PASS' if not negative else
-                            ('foreign-owner denied' if SYSTEM_CI else 'unmapped-owner denied'),
+                            ('foreign-owner denied' if foreign_owner else 'unmapped-owner denied'),
                           'uid_map': Path('/proc/self/uid_map').read_text().strip()}))
     finally:
         if child:
@@ -181,7 +186,10 @@ root=Path(sys.argv[2]);t=a.Transaction(root/'journal.json',json.loads((root/'tar
 
 def main():
     if sys.argv[1] == '--inside':
-        inside(Path(sys.argv[2]), sys.argv[3], sys.argv[4], int(sys.argv[5]), sys.argv[6])
+        if len(sys.argv) != 8:
+            raise RuntimeError('ownership evidence mode argument required')
+        inside(Path(sys.argv[2]), sys.argv[3], sys.argv[4], int(sys.argv[5]),
+               sys.argv[6], sys.argv[7])
         return
     binary = str(Path(sys.argv[1]).resolve())
     repo = Path(__file__).resolve().parents[1]
@@ -223,11 +231,21 @@ def main():
                     source = '/etc' if negative in ('home', 'root') else '/etc/hostname'
                     command += ['-p', f'BindReadOnlyPaths={source}:{target}']
                 command += ['/usr/bin/python3', str(Path(__file__).resolve()), '--inside',
-                            str(home), binary, transport, str(port), negative]
+                            str(home), binary, transport, str(port), negative,
+                            'foreign-owner' if SYSTEM_CI else 'unmapped-owner']
                 run = subprocess.run(command, capture_output=True, text=True, timeout=35)
                 print(run.stdout, end='', flush=True)
                 print(run.stderr, end='', flush=True)
                 run.check_returncode()
+                reports = [json.loads(line) for line in run.stdout.splitlines()
+                           if line.startswith('{"transport":')]
+                assert len(reports) == 1, 'missing transport evidence'
+                report = reports[0]
+                assert report['transport'] == transport
+                assert report['foreign_owner_object'] == ((negative or None) if SYSTEM_CI else None)
+                assert report['unmapped_object'] == ((negative or None) if not SYSTEM_CI else None)
+                expected_denial = ('foreign-owner denied' if SYSTEM_CI else 'unmapped-owner denied')
+                assert report['revocation'] == ('PASS' if not negative else expected_denial)
     recovery_fixture(repo)
     print(json.dumps({'binary_sha256': hashlib.sha256(Path(binary).read_bytes()).hexdigest(), 'live_mutations': []}))
 
