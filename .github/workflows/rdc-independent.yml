@@ -3,6 +3,8 @@ name: RDC-independent development verification
 # All commands execute on a disposable GitHub-hosted runner.
 # No ThinkPad, VPS, RouterOS or Android connection is required.
 on:
+  push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
