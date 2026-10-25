@@ -19,6 +19,7 @@ SOURCES = (
     'scripts/source_package.py', 'scripts/test_source_package.py',
     'ci/arch-source.sh', '.github/workflows/rdc-independent.yml', 'docs/arch-source-ci.md',
 )
+MAX_UNPACKED_BYTES = 160 * 1024 * 1024
 ROLES = {'parent': {'binary': 'bin/relayforge-mcp', 'argv': ['--readonly-stdio']},
          'worker': {'binary': 'bin/relayforge-mcp', 'argv': ['--readonly-worker']}}
 
@@ -61,12 +62,23 @@ def verify(archive, commit):
     if not re.fullmatch('[0-9a-f]{40}', commit):
         raise ValueError('full commit required')
     with tarfile.open(archive) as tar:
-        members = tar.getmembers()
         expected = set(SOURCES) | {'bin/relayforge-mcp', 'manifest.json', 'package.json', 'seal.json'}
-        if len(members) != len(expected) or {m.name for m in members} != expected:
+        members = []
+        total_size = 0
+        # Inspect headers incrementally: getmembers() can exhaust memory before
+        # the inventory check on an archive containing many small entries.
+        for member in tar:
+            if (len(members) >= len(expected) or member.name not in expected
+                    or any(existing.name == member.name for existing in members)):
+                raise ValueError('unexpected package inventory')
+            if not member.isfile() or member.size < 0 or member.size > 128 * 1024 * 1024:
+                raise ValueError('unsafe package member')
+            total_size += member.size
+            if total_size > MAX_UNPACKED_BYTES:
+                raise ValueError('package unpacked size exceeds limit')
+            members.append(member)
+        if len(members) != len(expected):
             raise ValueError('unexpected package inventory')
-        if any(not m.isfile() or m.size > 128 * 1024 * 1024 for m in members):
-            raise ValueError('unsafe package member')
         files = {m.name: tar.extractfile(m).read() for m in members}
         seal = json.loads(files['seal.json'])
         if set(seal) != expected - {'seal.json'}:
