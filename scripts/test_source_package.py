@@ -1,4 +1,5 @@
 """Package trust-boundary regressions with synthetic executable bytes only."""
+import gzip
 import io
 import json
 from pathlib import Path
@@ -54,6 +55,30 @@ class SourcePackageTests(unittest.TestCase):
         with patch.object(tarfile.TarFile, 'getmembers',
                           side_effect=AssertionError('unbounded header enumeration')):
             p.verify(self.archive, self.commit)
+
+    def test_rejects_oversized_extension_headers_before_reading_body(self):
+        # No large allocation: a declared 1 GiB extension has no payload.
+        # tarfile's ordinary iterator would try to read that payload first.
+        for kind in (tarfile.XHDTYPE, tarfile.XGLTYPE, tarfile.GNUTYPE_LONGNAME):
+            with self.subTest(kind=kind):
+                header = tarfile.TarInfo('extension')
+                header.type = kind
+                header.size = 1 << 30
+                with gzip.open(self.archive, 'wb') as stream:
+                    stream.write(header.tobuf())
+                with self.assertRaisesRegex(ValueError, 'unsafe package member'):
+                    p.verify(self.archive, self.commit)
+
+    def test_rejects_repeated_extension_headers(self):
+        for kind in (tarfile.XHDTYPE, tarfile.XGLTYPE, tarfile.GNUTYPE_LONGNAME):
+            with self.subTest(kind=kind):
+                header = tarfile.TarInfo('extension')
+                header.type = kind
+                header.size = 0
+                with gzip.open(self.archive, 'wb') as stream:
+                    stream.write(header.tobuf() * 64 + bytes(1024))
+                with self.assertRaisesRegex(ValueError, 'unsafe package member'):
+                    p.verify(self.archive, self.commit)
 
     def test_changed_bytes_fail_seal(self):
         self.rewrite(lambda e: e['bin/relayforge-mcp'].__setitem__(1, b'changed'))
