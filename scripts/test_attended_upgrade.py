@@ -101,7 +101,7 @@ class UpgradeTests(unittest.TestCase):
         self.proof = self.root / 'proof.json'
         self.proof.write_text(json.dumps(dict(artifact_id=u.ARTIFACT, candidate=list(self.cand), baseline=list(self.base), observed=int(time.time()), expires=int(time.time()) + 3600, independent_review=True, recovery_test=True)))
         self.engine = u.Upgrade(b, self.receipt, self.proof)
-        self.engine.preserved = invariant
+        self.engine.preserved = lambda recovery=False: invariant()
 
     def activate(self):
         return self.engine.activate(lambda auth: True)
@@ -109,17 +109,25 @@ class UpgradeTests(unittest.TestCase):
     def attempt(self):
         return next(self.attempts.iterdir()).name
 
-    def test_preservation_inventory_blocks_configuration_and_legacy_guard_changes(self):
+    def setup_real_preservation(self):
         self.b.m.H = self.root
         self.b.m.M['units'] = []
-        self.b.m.props = lambda unit: {'ExecStart': '/usr/bin/false'}
+        self.b.m.props = lambda unit: {'NeedDaemonReload': 'no',
+            'FragmentPath': str(self.units / unit),
+            'DropInPaths': str(self.units /
+                'relayforge-local-recover.service.d/issue77-maintenance.conf')
+                if unit == 'relayforge-local-recover.service' else '',
+            'ExecStart': '/usr/bin/false'}
         for path in [self.root / '.config', self.root / '.config/relayforge',
                      self.root / '.config/tunnel-client',
                      self.units / 'relayforge-local-recover.service.d']:
             path.mkdir(mode=0o700)
         guard = self.units / 'relayforge-local-recover.service.d/issue77-maintenance.conf'
-        guard.write_bytes(b'[Service]\nExecStart=\nExecStart=/usr/bin/false\n')
+        guard.write_bytes(b'[Service]\\nExecStart=\\nExecStart=/usr/bin/false\\n')
         guard.chmod(0o600)
+        return guard
+
+    def seal_inventory(self):
         roots = [self.root / '.config/relayforge', self.root / '.config/tunnel-client',
                  self.units, self.store / 'artifacts']
         objects = {}
@@ -135,14 +143,98 @@ class UpgradeTests(unittest.TestCase):
         snapshot = self.root / 'upgrade-preserved.json'
         snapshot.write_text(json.dumps({'roots': [str(p) for p in roots], 'objects': objects}))
         snapshot.chmod(0o600)
-        self.engine.preserved = lambda: u.Upgrade.preserved(self.engine)
+        self.engine.preserved = lambda recovery=False: u.Upgrade.preserved(
+            self.engine, recovery=recovery)
+
+    def test_preservation_inventory_blocks_configuration_and_legacy_guard_changes(self):
+        guard = self.setup_real_preservation()
+        self.seal_inventory()
         self.engine.check()
         self.activate()
-        # The snapshot still matches after scheduler objects were retired.
         self.engine.invariant()
         guard.write_bytes(b'changed guard')
         with self.assertRaises(RuntimeError):
             self.engine.invariant()
+
+    def test_candidate_missing_after_selection_does_not_block_recovery(self):
+        self.setup_real_preservation()
+        self.seal_inventory()
+        self.engine.check()
+        damaged = self.store / self.cand_link / 'relayforge-mcp'
+        self.assertTrue(damaged.exists())
+        def corrupt_after_selector(_transaction):
+            self.assertEqual(a.state(self.store / 'current'), {'link': self.cand_link})
+            damaged.unlink()
+            raise RuntimeError('candidate disappeared')
+        self.b.remote = corrupt_after_selector
+        with self.assertRaisesRegex(RuntimeError, 'candidate disappeared'):
+            self.activate()
+        attempt = self.attempt()
+        self.assertEqual(self.engine.load(attempt).doc['status'], 'rolled-back')
+        self.assertEqual(a.state(self.store / 'current'), {'link': self.base_link})
+        self.assertTrue((self.store / self.base_link / 'relayforge-mcp').exists())
+        self.assertFalse(damaged.exists(), 'damaged candidate preserved as evidence')
+        self.assertFalse(self.armed)
+        self.engine.invariant(recovery=True)
+        with self.assertRaises(Exception):
+            self.engine.invariant()
+
+    def test_scheduled_recovery_after_sigkill_ignores_missing_candidate(self):
+        self.setup_real_preservation()
+        self.seal_inventory()
+        pid = os.fork()
+        if pid == 0:
+            def crash_after_selection(_):
+                (self.store / self.cand_link / 'relayforge-mcp').unlink()
+                os.kill(os.getpid(), signal.SIGKILL)
+            self.b.remote = crash_after_selection
+            self.activate()
+            os._exit(3)
+        _, status = os.waitpid(pid, 0)
+        self.assertEqual(os.waitstatus_to_exitcode(status), -signal.SIGKILL)
+        attempt = self.attempt()
+        self.assertEqual(a.state(self.store / 'current'), {'link': self.cand_link})
+        with patch.object(u.time, 'time', return_value=time.time() + u.WINDOW + 1):
+            self.engine.recover(attempt)
+        self.assertEqual(a.state(self.store / 'current'), {'link': self.base_link})
+        self.assertEqual(self.engine.load(attempt).doc['status'], 'rolled-back')
+        self.assertFalse((self.store / self.cand_link / 'relayforge-mcp').exists())
+
+    def test_sealed_external_configuration_symlink_is_rejected(self):
+        self.setup_real_preservation()
+        outside = self.root / 'external-grant.json'
+        outside.write_text('{"read_only":true}')
+        grant = self.root / '.config/relayforge/artifact-roots.json'
+        grant.symlink_to(outside)
+        self.seal_inventory()
+        with self.assertRaisesRegex(RuntimeError, 'unapproved preservation symlink'):
+            self.engine.check()
+        outside.write_text('{"read_only":false}')
+        with self.assertRaisesRegex(RuntimeError, 'unapproved preservation symlink'):
+            self.engine.check()
+
+    def test_sealed_systemd_enablement_symlink_is_narrow_and_target_hashed(self):
+        self.setup_real_preservation()
+        unit = self.units / 'relayforge-tunnel.service'
+        unit.write_text('[Unit]\\nDescription=Test\\n')
+        unit.chmod(0o600)
+        wants = self.units / 'default.target.wants'
+        wants.mkdir(mode=0o700)
+        link = wants / unit.name
+        link.symlink_to('../' + unit.name)
+        self.seal_inventory()
+        self.engine.check()
+        unit.write_text('[Unit]\\nDescription=Modified\\n')
+        with self.assertRaisesRegex(RuntimeError, 'installed inventory changed'):
+            self.engine.check()
+        unit.write_text('[Unit]\\nDescription=Test\\n')
+        link.unlink()
+        outside = self.root / 'outside-unit.service'
+        outside.write_text('[Unit]\\nDescription=External\\n')
+        link.symlink_to(outside)
+        self.seal_inventory()
+        with self.assertRaisesRegex(RuntimeError, 'systemd enablement link escapes inventory'):
+            self.engine.check()
 
     def test_readonly_preflight_missing_receipt_and_stale_evidence(self):
         before = sorted(str(p) for p in self.root.rglob('*'))
