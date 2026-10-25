@@ -200,6 +200,45 @@ class UpgradeTests(unittest.TestCase):
         self.assertEqual(self.engine.load(attempt).doc['status'], 'rolled-back')
         self.assertFalse((self.store / self.cand_link / 'relayforge-mcp').exists())
 
+    def test_candidate_inventory_drift_after_arming_rejects_commit_but_rollback_succeeds(self):
+        self.setup_real_preservation()
+        self.seal_inventory()
+        self.engine.check()
+        extra = self.store / self.cand_link / 'unsealed-report.txt'
+        def drift_during_confirmation(_transaction):
+            self.assertEqual(a.state(self.store / 'current'), {'link': self.cand_link})
+            self.assertTrue(self.armed)
+            extra.write_text('not in sealed inventory')
+            # Remote confirmation would otherwise succeed.
+        self.b.remote = drift_during_confirmation
+        with self.assertRaisesRegex(RuntimeError, 'installed inventory changed'):
+            self.activate()
+        attempt = self.attempt()
+        self.assertEqual(self.engine.load(attempt).doc['status'], 'rolled-back')
+        self.assertEqual(a.state(self.store / 'current'), {'link': self.base_link})
+        self.assertTrue(extra.exists(), 'candidate drift retained as evidence')
+        self.assertFalse(self.armed)
+        self.engine.invariant(recovery=True)
+        with self.assertRaisesRegex(RuntimeError, 'installed inventory changed'):
+            self.engine.invariant()
+
+    def test_completed_attempt_does_not_disable_candidate_preflight_inventory(self):
+        self.setup_real_preservation()
+        self.seal_inventory()
+        self.b.remote = lambda _: (_ for _ in ()).throw(RuntimeError('reject candidate'))
+        with self.assertRaisesRegex(RuntimeError, 'reject candidate'):
+            self.activate()
+        self.assertEqual(self.engine.load(self.attempt()).doc['status'], 'rolled-back')
+        extra = self.store / self.cand_link / 'unexpected-link'
+        target = self.root / 'unsealed-target'
+        target.write_text('external')
+        extra.symlink_to(target)
+        # A retained journal must not silently switch later read-only checks
+        # into recovery mode.
+        with self.assertRaisesRegex(RuntimeError, 'unapproved preservation symlink'):
+            self.engine.check()
+        self.engine.invariant(recovery=True)
+
     def test_sealed_external_configuration_symlink_is_rejected(self):
         self.setup_real_preservation()
         outside = self.root / 'external-grant.json'
