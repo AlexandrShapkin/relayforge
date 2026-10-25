@@ -914,7 +914,10 @@ mod tests {
             let approved_at = original["created"].as_u64().unwrap() + 1;
             s.approve_confirmed(id, &original, approved_at).unwrap();
             // Establish the pre-crash approved state before fault injection.
-            File::open(s.dir.join("approved")).unwrap().sync_all().unwrap();
+            File::open(s.dir.join("approved"))
+                .unwrap()
+                .sync_all()
+                .unwrap();
 
             let mut sync_order = Vec::new();
             let failure = s.move_stage_with_sync("approved", "claimed", id, |stage| {
@@ -926,11 +929,14 @@ mod tests {
                 }
             });
             assert!(failure.is_err());
-            assert_eq!(sync_order, if failed_sync == "claimed" {
-                vec!["claimed"]
-            } else {
-                vec!["claimed", "approved"]
-            });
+            assert_eq!(
+                sync_order,
+                if failed_sync == "claimed" {
+                    vec!["claimed"]
+                } else {
+                    vec!["claimed", "approved"]
+                }
+            );
 
             // Simulate a lost unsynced unlink, not merely a process restart.
             if failed_sync == "approved" {
@@ -945,10 +951,12 @@ mod tests {
                 let restarted = Store::at(s.dir.clone()).unwrap();
                 assert!(restarted.file("claimed", id).exists());
                 let mut executed = false;
-                assert!(restarted.commit_with_at(id, approved_at + 2, |_| {
-                    executed = true;
-                    Ok("forbidden replay".into())
-                }).is_err());
+                assert!(restarted
+                    .commit_with_at(id, approved_at + 2, |_| {
+                        executed = true;
+                        Ok("forbidden replay".into())
+                    })
+                    .is_err());
                 assert!(!executed);
                 assert_eq!(restarted.status(id).unwrap()["status"], "outcome_unknown");
             }
@@ -959,18 +967,22 @@ mod tests {
     fn claim_directory_sync_completes_before_executor_runs() {
         let s = store();
         let prepared = s
-            .prepare(&json!({"host":"workstation","action":"artifact.root.remove",
-                "name":"issue77"}))
+            .prepare(
+                &json!({"host":"workstation","action":"artifact.root.remove",
+                "name":"issue77"}),
+            )
             .unwrap();
         let id = prepared["approval_id"].as_str().unwrap();
         let original = s.load("prepared", id).unwrap();
         let approved_at = original["created"].as_u64().unwrap() + 1;
         s.approve_confirmed(id, &original, approved_at).unwrap();
-        let result = s.commit_with_at(id, approved_at + 1, |_| {
-            assert!(s.file("claimed", id).exists());
-            assert!(!s.file("approved", id).exists());
-            Ok("mock executor".into())
-        }).unwrap();
+        let result = s
+            .commit_with_at(id, approved_at + 1, |_| {
+                assert!(s.file("claimed", id).exists());
+                assert!(!s.file("approved", id).exists());
+                Ok("mock executor".into())
+            })
+            .unwrap();
         assert_eq!(result["status"], "succeeded");
     }
 
