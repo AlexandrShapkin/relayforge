@@ -103,12 +103,12 @@ def verify(archive, commit):
                 member = tarfile.TarInfo.frombuf(header, 'utf-8', 'strict')
             except (tarfile.TarError, UnicodeError, ValueError) as exc:
                 raise ValueError('invalid TAR header') from exc
-            if member.name not in expected or member.name in files:
-                raise ValueError('unexpected package inventory')
             # In particular, PAX and GNU long-name headers are not regular
             # files; reject them BEFORE accessing their attacker-sized body.
             if not member.isfile() or member.size < 0 or member.size > 128 * 1024 * 1024:
                 raise ValueError('unsafe package member')
+            if member.name not in expected or member.name in files:
+                raise ValueError('unexpected package inventory')
             total_size += member.size
             if total_size > MAX_UNPACKED_BYTES:
                 raise ValueError('package unpacked size exceeds limit')
