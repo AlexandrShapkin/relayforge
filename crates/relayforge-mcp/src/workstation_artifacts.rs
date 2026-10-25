@@ -863,18 +863,21 @@ mod tests {
         assert!(f.call("artifact.read", "issue77/AUTHORIZATION.md").is_err());
     }
 
-    fn wait_for_approval_lock(
-        mut operation: impl FnMut() -> Result<String, String>,
-    ) -> Result<String, String> {
-        for _ in 0..50 {
-            match operation() {
-                Err(message) if message == "artifact approval busy" => {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
-                outcome => return outcome,
+    fn settle_competing_result(
+        result: Result<String, String>,
+        finish_after_contenders: impl FnOnce() -> Result<String, String>,
+    ) {
+        match result {
+            Ok(_) => {}
+            Err(message) if message == "artifact approval busy" => {
+                // The public contract is fail-fast under lock contention, not
+                // completion within a fixed number of scheduling milliseconds.
+                // Both competing threads have finished before this retry.
+                let retry = finish_after_contenders();
+                assert!(retry.is_ok(), "retry after contention failed: {retry:?}");
             }
+            Err(message) => panic!("unexpected concurrent operation error: {message}"),
         }
-        Err("test lock remained busy".into())
     }
 
     #[test]
@@ -885,20 +888,20 @@ mod tests {
             fs::create_dir(&folder).unwrap();
             fs::write(folder.join("AUTHORIZATION.md"), "Approved report\n").unwrap();
         }
-        std::thread::scope(|scope| {
-            let one = scope
-                .spawn(|| wait_for_approval_lock(|| approve_root(&f.home, "issue77", "issue77")));
-            let two = scope
-                .spawn(|| wait_for_approval_lock(|| approve_root(&f.home, "issue88", "issue88")));
-            assert!(one.join().unwrap().is_ok());
-            assert!(two.join().unwrap().is_ok());
+        let (first, second) = std::thread::scope(|scope| {
+            let one = scope.spawn(|| approve_root(&f.home, "issue77", "issue77"));
+            let two = scope.spawn(|| approve_root(&f.home, "issue88", "issue88"));
+            (one.join().unwrap(), two.join().unwrap())
         });
+        settle_competing_result(first, || approve_root(&f.home, "issue77", "issue77"));
+        settle_competing_result(second, || approve_root(&f.home, "issue88", "issue88"));
+
         for name in ["issue77", "issue88"] {
             assert!(f
                 .call("artifact.read", &format!("{name}/AUTHORIZATION.md"))
                 .is_ok());
         }
-        std::thread::scope(|scope| {
+        let (first, second) = std::thread::scope(|scope| {
             let reader = scope.spawn(|| {
                 for _ in 0..64 {
                     let value = f.call("artifact.read", "issue77/AUTHORIZATION.md");
@@ -907,12 +910,14 @@ mod tests {
                     }
                 }
             });
-            let one = scope.spawn(|| wait_for_approval_lock(|| revoke_root(&f.home, "issue77")));
-            let two = scope.spawn(|| wait_for_approval_lock(|| revoke_root(&f.home, "issue88")));
+            let one = scope.spawn(|| revoke_root(&f.home, "issue77"));
+            let two = scope.spawn(|| revoke_root(&f.home, "issue88"));
             reader.join().unwrap();
-            assert!(one.join().unwrap().is_ok());
-            assert!(two.join().unwrap().is_ok());
+            (one.join().unwrap(), two.join().unwrap())
         });
+        settle_competing_result(first, || revoke_root(&f.home, "issue77"));
+        settle_competing_result(second, || revoke_root(&f.home, "issue88"));
+
         assert!(f.call("artifact.read", "issue77/AUTHORIZATION.md").is_err());
         assert!(f.call("artifact.read", "issue88/AUTHORIZATION.md").is_err());
         assert!(f
