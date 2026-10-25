@@ -95,14 +95,14 @@ class Upgrade:
         require(record['roots'] == [str(p) for p in roots], 'preservation roots mismatch')
         # Generated attempt recovery objects are the sole inventory exception.
         # They must match our exact scheduler templates and durable journals.
-        recovery = {}
+        scheduled_objects = {}
         for directory in self.b.ATTEMPTS.iterdir():
             transaction = self.load(directory.name)
             for name, data in self.b.recovery_templates(
                     directory.name, transaction.doc['deadline']).items():
-                recovery[str(self.b.UNITS / name)] = self.a.file_state(data, 0o600)
+                scheduled_objects[str(self.b.UNITS / name)] = self.a.file_state(data, 0o600)
             timer = 'relayforge-activation-' + directory.name + '.timer'
-            recovery[str(self.b.UNITS / 'timers.target.wants' / timer)] = {
+            scheduled_objects[str(self.b.UNITS / 'timers.target.wants' / timer)] = {
                 'link': str(self.b.UNITS / timer)}
         candidate_root = self.b.m.STORE / self.b.CAND
 
@@ -122,8 +122,9 @@ class Upgrade:
             self.a.ancestors(path.parent)
             meta = path.lstat()
             require(meta.st_uid == os.getuid(), 'preserved owner changed')
-            if str(path) in recovery:
-                require(self.a.state(path) == recovery[str(path)], 'recovery object changed')
+            if str(path) in scheduled_objects:
+                require(self.a.state(path) == scheduled_objects[str(path)],
+                        'recovery object changed')
                 return
             if stat.S_ISDIR(meta.st_mode):
                 require(not meta.st_mode & 0o022, 'unsafe preserved directory')
