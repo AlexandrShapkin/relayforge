@@ -26,6 +26,8 @@ def identity():
 
 def prepare(directory):
     record = identity()
+    tunnel = json.loads(Path('packaging/arch/tunnel-client/upstream.json').read_text())
+    record['tunnel_package'] = f"tunnel-client-{tunnel['version']}-{tunnel['pkgrel']}-x86_64.pkg.tar.zst"
     archive = directory / 'relayforge-source.tar'
     # Add generated public identity, not arbitrary workspace files.
     data = (json.dumps(record, sort_keys=True) + '\n').encode()

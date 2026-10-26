@@ -1,0 +1,27 @@
+[Unit]
+Description=RelayForge restricted Secure MCP Tunnel (explicit opt-in)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/usr/bin/tunnel-client
+ConditionPathExists=%h/.config/relayforge/managed-tunnel/profile.json
+ConditionPathExists=%h/.config/relayforge/managed-tunnel/runtime-key
+
+[Service]
+Type=simple
+# '+' skips the client namespace for validation only; a user manager cannot
+# elevate this ordinary-user condition to root. No integrity gate is skipped.
+LoadCredential=profile:%h/.config/relayforge/managed-tunnel/profile.json
+LoadCredential=runtime-key:%h/.config/relayforge/managed-tunnel/runtime-key
+ExecCondition=+/usr/bin/relayforge-tunnel service-check --credentials-dir=%d
+ExecStart=/usr/bin/env -i HOME=%h PATH=/usr/bin LANG=C.UTF-8 /usr/bin/tunnel-client run --config %d/profile --control-plane.api-key file:%d/runtime-key --mcp.command "command=/usr/bin/relayforge-mcp --readonly-stdio,channel=main"
+Environment=HOME=%h
+Restart=no
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+UMask=0077
+TimeoutStopSec=5
+
+[Install]
+WantedBy=default.target

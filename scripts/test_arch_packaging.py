@@ -25,6 +25,9 @@ purge = module('user_data', 'packaging/user_data.py')
 
 class GateTests(unittest.TestCase):
     def setUp(self):
+        extras = patch.object(release, 'tunnel_assets', return_value=set())
+        extras.start()
+        self.addCleanup(extras.stop)
         self.sha = 'a' * 40
         self.tag = 'v0.1.10'
         self.package = f'relayforge-0.1.0.r10.g{self.sha[:12]}-1-x86_64.pkg.tar.zst'

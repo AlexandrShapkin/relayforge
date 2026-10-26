@@ -1,6 +1,11 @@
 # Arch Linux package lifecycle (Issue #110)
 
-The canonical distribution is one `relayforge` x86_64 pacman package. MCP and
+Optional independently versioned Secure MCP Tunnel packaging and guarded migration:
+[managed tunnel](managed-tunnel.md). New releases include both pacman packages;
+historical releases retain their original immutable asset inventory.
+
+The core distribution is one `relayforge` x86_64 pacman package, with a separate
+optional `tunnel-client` dependency. MCP and
 agent share a source/protocol revision and coordinated security gates; splitting
 these two small binaries would add version coordination without a separately
 supported installation lifecycle. Ubuntu/Debian packaging is future-only. Ubuntu

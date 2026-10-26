@@ -93,7 +93,7 @@ jobs:
           docker cp . arch-build:/workspace
           docker start arch-build
           docker exec arch-build chown -R builder:builder /workspace
-          docker exec -u builder -w /workspace -e SOURCE_SHA="$SOURCE_SHA" -e CARGO_TARGET_DIR=/workspace/.build/ci-arch arch-build bash ci/arch-source.sh
+          docker exec -u builder -w /workspace -e XDG_CACHE_HOME=/workspace/.build/gh-cache -e SOURCE_SHA="$SOURCE_SHA" -e CARGO_TARGET_DIR=/workspace/.build/ci-arch arch-build bash ci/arch-source.sh
       - name: Test actual installed package with disposable systemd and bubblewrap
         run: |
           docker commit arch-build relayforge-arch-tested
@@ -103,6 +103,7 @@ jobs:
             sleep 1
           done
           docker exec arch-installed systemctl is-active --quiet multi-user.target
+          docker network disconnect bridge arch-installed
           docker exec arch-installed touch /run/relayforge-disposable-ci
           docker exec -w /workspace -e GITHUB_ACTIONS=true arch-installed python3 -B ci/arch-lifecycle.py
       - name: Export verified bytes and lifecycle evidence

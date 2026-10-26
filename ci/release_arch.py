@@ -139,6 +139,32 @@ def source_names(sha):
             f'relayforge-{version}.r{revision}.g{sha[:12]}-1-x86_64.pkg.tar.zst')
 
 
+def tunnel_assets(sha):
+    """Read historical package contract from committed source, not Release claims."""
+    path = 'packaging/arch/tunnel-client/upstream.json'
+    if not command('git', 'ls-tree', sha, '--', path):
+        return set()
+    lock = json.loads(command('git', 'show', f'{sha}:{path}'))
+    version, revision = lock['version'], lock['pkgrel']
+    if not re.fullmatch(r'\d+\.\d+\.\d+', version) or type(revision) is not int or revision < 1:
+        raise ValueError('invalid independent tunnel package identity')
+    return {f'tunnel-client-{version}-{revision}-x86_64.pkg.tar.zst'}
+
+
+def verify_tunnel(directory, sha, identity, lifecycle, sums):
+    extra = tunnel_assets(sha)
+    if extra:
+        name, = extra
+        if (identity.get('tunnel_package') != name or lifecycle.get('tunnel_package') != name
+                or lifecycle.get('tunnel_lifecycle') != 'PASS'
+                or lifecycle.get('tunnel_sha256') != sums.get(name)
+                or hashlib.sha256((directory / name).read_bytes()).hexdigest() != sums.get(name)):
+            raise ValueError('tested tunnel package/lifecycle mismatch')
+    elif identity.get('tunnel_package') or lifecycle.get('tunnel_package'):
+        raise ValueError('unexpected tunnel package contract')
+    return extra
+
+
 def verify_provenance(directory):
     # Authenticate the entire digest inventory, including release/source/lifecycle
     # records. A package-only attestation cannot authenticate those records.
@@ -151,7 +177,7 @@ def verify_provenance(directory):
 
 def verify_published(release, sha, tag, package, get=api):
     """Durable authenticated evidence; never consult ephemeral Actions artifacts."""
-    names = ASSETS | {package}
+    names = ASSETS | {package} | tunnel_assets(sha)
     if release['tag_name'] != tag or release['target_commitish'] != sha:
         raise ValueError('existing release source conflict')
     assets = release['assets']
@@ -183,6 +209,7 @@ def verify_published(release, sha, tag, package, get=api):
             raise ValueError('authenticated release identity mismatch')
         identity = json.loads((directory / 'source.json').read_text())
         lifecycle = json.loads((directory / 'lifecycle.json').read_text())
+        verify_tunnel(directory, sha, identity, lifecycle, sums)
         # Validate historical records without regenerating them using today's
         # build environment defaults or requiring the old run/artifact APIs.
         if (identity['source_sha'] != sha or identity['tag'] != tag
@@ -235,13 +262,14 @@ def release_files(directory, sha, runs):
     lifecycle = json.loads((directory / 'lifecycle.json').read_text())
     if lifecycle['source_sha'] != sha or lifecycle['package'] != expected or lifecycle['sha256'] != sums[expected] or lifecycle['lifecycle'] != 'PASS':
         raise ValueError('installed lifecycle evidence mismatch')
+    extra = verify_tunnel(directory, sha, identity, lifecycle, sums)
     record = {'schema_version': 1, 'source_sha': sha, 'build_sha': sha,
               'package': expected, 'package_sha256': sums[expected], 'required_runs': runs,
               'run_urls': [f'https://github.com/{REPO}/actions/runs/{r}' for r in runs.values()],
               'arch_image': 'archlinux/archlinux@sha256:676f4d5b2cacc259ab30b1e871a272bd4a2e023a901f725fb1b12c84dc355f10',
               'arch_snapshot': '2026/09/25', 'live_acceptance': False}
     (directory / 'release.json').write_text(json.dumps(record, sort_keys=True, indent=2) + '\n')
-    names = (ASSETS - {'SHA256SUMS'}) | {expected}
+    names = (ASSETS - {'SHA256SUMS'}) | {expected} | extra
     # Output only distributable files; operational source TARs stay CI evidence.
     checksums = ''.join(f'{hashlib.sha256((directory / n).read_bytes()).hexdigest()}  {n}\n' for n in sorted(names))
     (directory / 'SHA256SUMS').write_text(checksums)
@@ -313,7 +341,7 @@ def publish(directory, sha, runs):
     identity, names = release_files(directory, sha, runs)
     tag = identity['tag']
     expected_tag, package = source_names(sha)
-    if tag != expected_tag or names != ASSETS | {package}:
+    if tag != expected_tag or names != ASSETS | {package} | tunnel_assets(sha):
         raise ValueError('tested artifact source naming mismatch')
     verify_provenance(directory)
     # A source SHA must be in protected-by-process main history, even if newer main exists.
@@ -358,7 +386,8 @@ def publish(directory, sha, runs):
 {narrative}
 
 Installation and operator action: pacman owns the binaries and inactive HTTP
-user-unit template. Install/update/remove does not authorize service activation
+and restricted tunnel user-unit templates. The optional tunnel-client package has
+its own upstream version and verified provenance. Install/update/remove does not authorize service activation
 or erase user credentials.
 
 Source/build: `{sha}`. Exact-head required CI: {record_urls(runs)}.
