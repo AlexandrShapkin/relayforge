@@ -147,6 +147,149 @@ class GateTests(unittest.TestCase):
                 # A repeated completion validates the durable release, too.
                 self.assertEqual(release.pending_main(commits[0], commits[:1], published, self.api), [])
 
+
+    def test_partial_draft_still_requires_exact_head_ci_and_accept(self):
+        draft = {'tag_name': self.tag, 'target_commitish': self.sha, 'draft': True, 'id': 321}
+        for state in ('pending', 'failed'):
+            with self.subTest(state=state), patch.object(release, 'inspect_runs', return_value=(state, None)):
+                self.assertEqual(release.pending_main(self.sha, [self.sha], [draft], self.api), [])
+        runs = {'tests.yml': 1, 'rdc-independent.yml': 2}
+        with patch.object(release, 'inspect_runs', return_value=('success', runs)):
+            with patch.object(release, 'accepted_merge', return_value=False):
+                with self.assertRaisesRegex(ValueError, 'review handoff'):
+                    release.pending_main(self.sha, [self.sha], [draft], self.api)
+            with patch.object(release, 'accepted_merge', return_value=True):
+                self.assertEqual(release.pending_main(self.sha, [self.sha], [draft], self.api),
+                                 [{'sha': self.sha, 'run_id': 2}])
+        with patch.object(release, 'inspect_runs', return_value=('success', runs)):
+            conflicting = dict(draft, tag_name='v9.9.9')
+            with self.assertRaisesRegex(ValueError, 'source conflict'):
+                release.pending_main(self.sha, [self.sha], [conflicting], self.api)
+
+    def test_draft_remote_digest_inventory_and_tag_required(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            data = {'package': b'package bytes', 'SHA256SUMS': b'trusted manifest bytes'}
+            for name, content in data.items():
+                (directory / name).write_bytes(content)
+            def assets(mapping):
+                return [{'id': i + 1, 'name': name, 'size': len(content),
+                         'digest': 'sha256:' + hashlib.sha256(content).hexdigest()}
+                        for i, (name, content) in enumerate(mapping.items())]
+            draft = {'id': 321, 'draft': True, 'tag_name': self.tag,
+                     'target_commitish': self.sha, 'assets': assets(data)}
+            release.verify_draft_uploaded(directory, set(data), draft, self.sha, self.tag, self.durable_api)
+            for invalid in (dict(draft, draft=False),
+                            dict(draft, target_commitish='b' * 40),
+                            dict(draft, tag_name='v9.9.9'),
+                            dict(draft, assets=draft['assets'][:1]),
+                            dict(draft, assets=draft['assets'] + draft['assets'][:1]),
+                            dict(draft, assets=[dict(draft['assets'][0], digest='sha256:' + '0' * 64),
+                                                draft['assets'][1]]),
+                            dict(draft, assets=[dict(draft['assets'][0], size=999),
+                                                draft['assets'][1]])):
+                with self.subTest(invalid=str(invalid)[:80]), self.assertRaises(ValueError):
+                    release.verify_draft_uploaded(directory, set(data), invalid,
+                                                  self.sha, self.tag, self.durable_api)
+            with self.assertRaisesRegex(ValueError, 'tag target'):
+                release.verify_draft_uploaded(directory, set(data), draft, self.sha, self.tag,
+                                              lambda _: {'ref': f'refs/tags/{self.tag}',
+                                                         'object': {'type': 'commit', 'sha': 'b' * 40}})
+
+    def test_publish_resumes_exact_draft_by_release_id_only(self):
+        draft = {'id': 321, 'draft': True, 'tag_name': self.tag,
+                 'target_commitish': self.sha, 'assets': []}
+        calls = []
+        def api(path, *args):
+            calls.append((path, args))
+            if path.startswith('compare/'):
+                return {'status': 'identical', 'merge_base_commit': {'sha': self.sha}}
+            if path == 'releases/321':
+                return dict(draft, draft=False) if args == ('-X', 'PATCH', '-F', 'draft=false') else draft
+            self.fail(f'unexpected API path or mutation: {path} {args}')
+        runs = {'tests.yml': 1, 'rdc-independent.yml': 2}
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            with patch.object(release, 'accepted_runs', return_value=runs), \
+                 patch.object(release, 'accepted_merge', return_value=True), \
+                 patch.object(release, 'merge_narrative', return_value='reviewed'), \
+                 patch.object(release, 'release_files', return_value=({'tag': self.tag},
+                                  release.ASSETS | {self.package})), \
+                 patch.object(release, 'verify_provenance'), \
+                 patch.object(release, 'all_releases', return_value=[draft]), \
+                 patch.object(release, 'api', side_effect=api), \
+                 patch.object(release, 'verify_draft_uploaded') as verified, \
+                 patch.object(release, 'verify_existing') as published, \
+                 patch.object(release.subprocess, 'run') as gh:
+                release.publish(directory, self.sha, runs)
+                verified.assert_called_once()
+                published.assert_called_once()
+                gh.assert_not_called()
+        self.assertEqual([x[0] for x in calls],
+                         [f'compare/{self.sha}...main', 'releases/321', 'releases/321'])
+
+    def test_publication_rejects_unverified_partial_draft_before_patch(self):
+        draft = {'id': 321, 'draft': True, 'tag_name': self.tag,
+                 'target_commitish': self.sha, 'assets': []}
+        calls = []
+        def api(path, *args):
+            calls.append((path, args))
+            if path.startswith('compare/'):
+                return {'status': 'identical', 'merge_base_commit': {'sha': self.sha}}
+            if path == 'releases/321' and not args:
+                return draft
+            self.fail('unsafe mutation before verification')
+        runs = {'tests.yml': 1, 'rdc-independent.yml': 2}
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(release, 'accepted_runs', return_value=runs), \
+             patch.object(release, 'accepted_merge', return_value=True), \
+             patch.object(release, 'merge_narrative', return_value='reviewed'), \
+             patch.object(release, 'release_files', return_value=({'tag': self.tag},
+                                  release.ASSETS | {self.package})), \
+             patch.object(release, 'verify_provenance'), \
+             patch.object(release, 'all_releases', return_value=[draft]), \
+             patch.object(release, 'api', side_effect=api), \
+             patch.object(release, 'verify_draft_uploaded', side_effect=ValueError('asset digest mismatch')):
+            with self.assertRaisesRegex(ValueError, 'asset digest mismatch'):
+                release.publish(Path(tmp), self.sha, runs)
+        self.assertEqual([x[0] for x in calls],
+                         [f'compare/{self.sha}...main', 'releases/321'])
+
+    def test_new_draft_is_looked_up_by_id_not_by_tag(self):
+        draft = {'id': 321, 'draft': True, 'tag_name': self.tag,
+                 'target_commitish': self.sha, 'assets': []}
+        calls = []
+        def api(path, *args):
+            calls.append((path, args))
+            if path.startswith('compare/'):
+                return {'status': 'identical', 'merge_base_commit': {'sha': self.sha}}
+            if path == 'git/tags':
+                return {'sha': 'c' * 40}
+            if path == 'git/refs':
+                return {'ref': f'refs/tags/{self.tag}'}
+            if path == 'releases/321':
+                return dict(draft, draft=False) if args == ('-X', 'PATCH', '-F', 'draft=false') else draft
+            self.fail(f'unexpected API: {path} {args}')
+        runs = {'tests.yml': 1, 'rdc-independent.yml': 2}
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(release, 'accepted_runs', return_value=runs), \
+             patch.object(release, 'accepted_merge', return_value=True), \
+             patch.object(release, 'merge_narrative', return_value='reviewed'), \
+             patch.object(release, 'release_files', return_value=({'tag': self.tag},
+                                  release.ASSETS | {self.package})), \
+             patch.object(release, 'verify_provenance'), \
+             patch.object(release, 'all_releases', side_effect=[[], [draft]]), \
+             patch.object(release, 'api', side_effect=api), \
+             patch.object(release, 'verify_draft_uploaded') as validated, \
+             patch.object(release, 'verify_existing') as published, \
+             patch.object(release.subprocess, 'run') as gh:
+            release.publish(Path(tmp), self.sha, runs)
+            validated.assert_called_once()
+            published.assert_called_once()
+            gh.assert_called_once()
+            self.assertEqual(gh.call_args.args[0][:3], ['gh', 'release', 'create'])
+        self.assertFalse(any(path.startswith('releases/tags/') for path, _ in calls))
+
     def test_remote_tag_peels_lightweight_and_nested_annotated_tags(self):
         tag = 'v0.1.10'
         for depth in (0, 1, 2):
@@ -255,7 +398,6 @@ class GateTests(unittest.TestCase):
         existing, files = self.durable_fixture()
         cases = [([dict(existing, tag_name='v9.9.9')], 'source conflict'),
                  ([dict(existing, target_commitish='b' * 40)], 'source conflict'),
-                 ([dict(existing, draft=True)], 'incomplete release history'),
                  ([existing, existing], 'incomplete release history'),
                  ([dict(existing, assets=[])], 'inventory differs'),
                  ([dict(existing, assets=existing['assets'] + existing['assets'][:1])], 'inventory differs')]
