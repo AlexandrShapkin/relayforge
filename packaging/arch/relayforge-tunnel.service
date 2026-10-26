@@ -1,0 +1,21 @@
+[Unit]
+Description=RelayForge restricted Secure MCP Tunnel (explicit opt-in)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/usr/bin/tunnel-client
+ConditionPathExists=%h/.config/relayforge/managed-tunnel/profile.json
+ConditionPathExists=%h/.config/relayforge/managed-tunnel/runtime-key
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/relayforge-tunnel run
+Restart=no
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+UMask=0077
+TimeoutStopSec=5
+
+[Install]
+WantedBy=default.target

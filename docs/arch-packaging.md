@@ -1,5 +1,9 @@
 # Arch Linux package lifecycle (Issue #110)
 
+Optional independently versioned Secure MCP Tunnel packaging and guarded migration:
+[managed tunnel](managed-tunnel.md). New releases include both pacman packages;
+historical releases retain their original immutable asset inventory.
+
 The canonical distribution is one `relayforge` x86_64 pacman package. MCP and
 agent share a source/protocol revision and coordinated security gates; splitting
 these two small binaries would add version coordination without a separately

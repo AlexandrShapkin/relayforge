@@ -18,9 +18,10 @@ def run(*args, ok=True, **kwargs):
 def main():
     if os.getuid() != 0 or not Path('/run/relayforge-disposable-ci').is_file():
         raise SystemExit('disposable root container required')
-    packages = list(Path('.build/arch-dist').glob('*.pkg.tar.zst'))
+    packages = list(Path('.build/arch-dist').glob('relayforge-*.pkg.tar.zst'))
     assert len(packages) == 1
     package = packages[0].resolve()
+    tunnel = Path('.build/arch-dist/tunnel-client-0.0.18-1-x86_64.pkg.tar.zst').resolve()
     identity = json.loads(Path('.build/arch-dist/source.json').read_text())
     version = identity['pkgver']
     assert package.name == f'relayforge-{version}-1-x86_64.pkg.tar.zst'
@@ -29,7 +30,9 @@ def main():
     expected = {'usr/bin/relayforge-mcp', 'usr/bin/relayforge-agent',
                 'usr/bin/relayforge-user-data', 'usr/lib/systemd/user/relayforge-mcp-http.service',
                 'usr/share/relayforge/source.json', 'usr/share/doc/relayforge/arch-packaging.md',
-                'usr/share/licenses/relayforge/LICENSE'}
+                'usr/share/licenses/relayforge/LICENSE', 'usr/bin/relayforge-tunnel',
+                'usr/lib/systemd/user/relayforge-tunnel.service',
+                'usr/share/doc/relayforge/managed-tunnel.md'}
     assert {name for name in inventory if not name.endswith('/') and not name.startswith('.')} == expected
     assert not {'.INSTALL', '.CHANGELOG'} & set(inventory)
     # Reject special files/links and surprising permissions in the assembled package.
@@ -38,6 +41,18 @@ def main():
     assert all('rws' not in line[:10] and 'rwxrwx' not in line[:10] for line in listing)
     for name in expected:
         assert subprocess.check_output(['bsdtar', '-xOf', str(package), name])  # no empty placeholders
+    client_files = {name for name in run('bsdtar', '-tf', str(tunnel)).splitlines()
+                    if not name.endswith('/') and not name.startswith('.')}
+    client_expected = {'usr/bin/tunnel-client', 'usr/lib/tunnel-client/tunnel-client',
+        'usr/lib/tunnel-client/cloudflared', 'usr/share/licenses/tunnel-client/LICENSE',
+        'usr/share/licenses/tunnel-client/NOTICE',
+        'usr/share/licenses/tunnel-client/tunnel-client-v0.0.18-linux-amd64-licenses.txt',
+        'usr/share/tunnel-client/cloudflared-manifest.json',
+        'usr/share/tunnel-client/tunnel-client-v0.0.18-linux-amd64.spdx.json',
+        'usr/share/tunnel-client/upstream.json', 'usr/share/tunnel-client/SHA256SUMS.txt',
+        'usr/share/tunnel-client/tunnel-client-v0.0.18-provenance.sigstore.json'}
+    assert client_files == client_expected
+    assert '.INSTALL' not in run('bsdtar', '-tf', str(tunnel)).splitlines()
     home = Path('/home/builder')
     sentinel = home / 'unrelated-evidence'
     sentinel.write_text('retained')
@@ -55,6 +70,7 @@ def main():
         assert not list(home.glob('.config/systemd/user/*.wants/relayforge*'))
         # Inspect all running processes: package installation must spawn no daemon.
         assert not run('pgrep', '-x', 'relayforge-mcp', ok=False)
+        assert not run('pgrep', '-x', 'tunnel-client', ok=False)
 
     def smoke():
         inactive()
@@ -93,6 +109,8 @@ def main():
     run('pacman', '-U', '--noconfirm', '/tmp/conflict.pkg.tar.zst')
     run('pacman', '-U', '--noconfirm', str(package), ok=False)
     run('pacman', '-R', '--noconfirm', 'conflict-fixture')
+    run('pacman', '-U', '--noconfirm', str(tunnel))
+    run('pacman', '-Qkk', 'tunnel-client')
     run('pacman', '-U', '--noconfirm', str(package))
     smoke()
     installed_hash = hashlib.sha256(Path('/usr/bin/relayforge-mcp').read_bytes()).hexdigest()
@@ -128,6 +146,42 @@ def main():
     run('runuser', '-u', 'builder', '--', 'env', 'XDG_RUNTIME_DIR=/run/user/1000',
         'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus',
         'python3', '-B', 'ci/installed-unit.py')
+    run('runuser', '-u', 'builder', '--', 'env', 'XDG_RUNTIME_DIR=/run/user/1000',
+        'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus',
+        'python3', '-B', 'ci/installed-tunnel.py')
+    inactive()
+    # Independently reinstall/update/downgrade the client without replacing RelayForge.
+    legacy = home / '.config/tunnel-client/relayforge-local.yaml'
+    profile = home / '.config/relayforge/managed-tunnel/profile.json'
+    key = profile.with_name('runtime-key')
+    protected = {p: p.read_bytes() for p in (legacy, profile, key, token, sentinel)}
+    run('pacman', '-U', '--noconfirm', str(tunnel))
+    recipe = Path('.build/tunnel-makepkg/PKGBUILD')
+    original = recipe.read_text()
+    recipe.write_text(original.replace('pkgrel=1\n', 'pkgrel=2\n'))
+    try:
+        run('runuser', '-u', 'builder', '--', 'bash', '-c',
+            'cd .build/tunnel-makepkg && makepkg --repackage --noconfirm')
+    finally:
+        recipe.write_text(original)
+    newer_client = Path('.build/tunnel-makepkg/tunnel-client-0.0.18-2-x86_64.pkg.tar.zst').resolve()
+    run('pacman', '-U', '--noconfirm', str(newer_client))
+    run('pacman', '-Qkk', 'tunnel-client')
+    # A packaging-only update of the verified upstream version remains compatible.
+    run('runuser', '-u', 'builder', '--', '/usr/bin/relayforge-tunnel', 'check')
+    inactive()
+    run('pacman', '-U', '--noconfirm', str(tunnel))
+    run('runuser', '-u', 'builder', '--', '/usr/bin/relayforge-tunnel', 'check')
+    assert all(p.read_bytes() == data for p, data in protected.items())
+    # Missing/corrupt installed client is denied before any process/network use.
+    binary = Path('/usr/lib/tunnel-client/tunnel-client')
+    saved = binary.read_bytes()
+    binary.write_bytes(b'corrupt fixture')
+    run('runuser', '-u', 'builder', '--', '/usr/bin/relayforge-tunnel', 'check', ok=False)
+    binary.unlink()
+    run('runuser', '-u', 'builder', '--', '/usr/bin/relayforge-tunnel', 'check', ok=False)
+    run('pacman', '-U', '--noconfirm', str(tunnel))
+    assert binary.read_bytes() == saved
     inactive()
     run('cp', '/usr/bin/relayforge-user-data', '/tmp/installed-user-data.py')
     run('pacman', '-R', '--noconfirm', 'relayforge')
@@ -136,11 +190,19 @@ def main():
     assert all(not Path('/' + name).exists() for name in expected)
     inactive()
     assert token.read_text() == 'a7' * 32 and sentinel.read_text() == 'retained'
+    run('pacman', '-R', '--noconfirm', 'tunnel-client')
+    run('pacman', '-Q', 'tunnel-client', ok=False)
+    assert all(not Path('/' + name).exists() for name in client_expected)
+    assert all(p.read_bytes() == data for p, data in protected.items())
+    assert (home / '.config/tunnel-client/relayforge-local.yaml').read_text() == 'retained legacy fixture'
     # Purge is separate: test installed script saved as fixture before removal.
     run('runuser', '-u', 'builder', '--', 'python3', '-B', 'ci/purge-fixture.py')
     record = {'source_sha': identity['source_sha'], 'package': package.name,
                       'sha256': hashlib.sha256(package.read_bytes()).hexdigest(),
-                      'installed_binary_sha256': installed_hash, 'lifecycle': 'PASS'}
+                      'installed_binary_sha256': installed_hash, 'lifecycle': 'PASS',
+                      'tunnel_package': tunnel.name,
+                      'tunnel_sha256': hashlib.sha256(tunnel.read_bytes()).hexdigest(),
+                      'tunnel_lifecycle': 'PASS'}
     evidence = Path('.build/arch-dist/lifecycle.json')
     evidence.write_text(json.dumps(record, sort_keys=True) + '\n')
     with Path('.build/arch-dist/SHA256SUMS').open('a') as sums:

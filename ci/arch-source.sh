@@ -14,10 +14,14 @@ git archive --format=tar HEAD > .build/makepkg/relayforge-source.tar
 python3 -B ci/package_identity.py .build/makepkg
 (cd .build/makepkg && makepkg --noconfirm --cleanbuild)
 cp .build/makepkg/*.pkg.tar.zst .build/arch-dist/
+# Independently versioned official client: verify before packaging or execution.
+python3 -B ci/tunnel_upstream.py .build/tunnel-makepkg
+(cd .build/tunnel-makepkg && makepkg --noconfirm --cleanbuild)
+cp .build/tunnel-makepkg/*.pkg.tar.zst .build/arch-dist/
 # Native MCP suite plus the existing portable operational contract.
 export CARGO_TARGET_DIR="$PWD/.build/makepkg/src/target"
 cargo test --locked -p relayforge-mcp
-for suite in process_roles runtime_artifact activation_transaction attended_activation attended_upgrade source_package arch_packaging; do
+for suite in process_roles runtime_artifact activation_transaction attended_activation attended_upgrade source_package arch_packaging managed_tunnel; do
     python3 -B -m unittest discover -s scripts -p "test_${suite}.py"
 done
 python3 -B scripts/source_package.py build --binary "$CARGO_TARGET_DIR/release/relayforge-mcp" --output .build/arch-package
