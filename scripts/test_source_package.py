@@ -44,6 +44,48 @@ class SourcePackageTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 p.verify(self.archive, commit)
 
+    def test_support_copies_and_seal_match_tracked_source(self):
+        # Portable counterpart of R3's exact support-copy and seal checks.
+        # This fixture is built from tracked source and synthetic binary bytes.
+        with tarfile.open(self.archive) as tar:
+            entries = {m.name: (m, tar.extractfile(m).read()) for m in tar}
+        self.assertEqual(set(entries), set(p.SOURCES) | {
+            'bin/relayforge-mcp', 'manifest.json', 'package.json', 'seal.json'})
+        for name in p.SOURCES:
+            with self.subTest(source=name):
+                self.assertEqual(entries[name][1], (p.ROOT / name).read_bytes())
+        seal = json.loads(entries['seal.json'][1])
+        self.assertEqual(set(seal), set(entries) - {'seal.json'})
+        for name, (info, body) in entries.items():
+            with self.subTest(member=name):
+                mode = 0o500 if name.startswith('bin/') else 0o400
+                self.assertEqual(info.mode, mode)
+                if name != 'seal.json':
+                    self.assertEqual(seal[name], {'sha256': p.digest(body), 'mode': mode})
+
+    def test_support_code_tampering_fails_seal(self):
+        original = self.archive.read_bytes()
+        for name in ('deploy/attended_upgrade.py', 'deploy/attended_activation.py',
+                     'deploy/activation_transaction.py', 'deploy/runtime_artifact.py'):
+            with self.subTest(source=name):
+                self.archive.write_bytes(original)
+                self.rewrite(lambda e: e[name].__setitem__(1, b'changed support code'))
+                with self.assertRaisesRegex(ValueError, 'seal'):
+                    p.verify(self.archive, self.commit)
+
+    def test_private_receipt_slots_cannot_enter_source_bundle(self):
+        original = self.archive.read_bytes()
+        for name in ('rollback-receipt.json', 'independent-evidence.json'):
+            with self.subTest(receipt=name):
+                self.archive.write_bytes(original)
+                def add(entries):
+                    info = tarfile.TarInfo(name)
+                    info.mode = 0o400
+                    entries[name] = [info, b'{}']
+                self.rewrite(add, reseal=True)
+                with self.assertRaisesRegex(ValueError, 'inventory'):
+                    p.verify(self.archive, self.commit)
+
     def test_verify_bounds_unpacked_bytes(self):
         # A low test-only limit exercises the cumulative bound without a
         # large allocation or a compressed-bomb fixture.
