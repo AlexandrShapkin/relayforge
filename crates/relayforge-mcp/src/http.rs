@@ -1,14 +1,15 @@
 //! Local-only authenticated Streamable HTTP MCP pilot.
 //!
-//! Deliberately NOT a public remote MCP service: no OAuth 2.1 resource
-//! server, authorization server, or TLS terminator has been configured.
+//! Static-token pilot and opt-in external-IdP OAuth protected resource.
+//! Neither mode is a public listener, authorization server or TLS terminator.
 //! Never change the bind IP from 127.0.0.1 without a security review.
 use axum::{
     body::Bytes,
-    extract::{DefaultBodyLimit, State},
+    extract::{DefaultBodyLimit, Request, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::post,
+    routing::{get, post},
     Json, Router,
 };
 use serde_json::{json, Value};
@@ -29,6 +30,7 @@ const DEFAULT_PORT: u16 = 8765;
 #[derive(Clone)]
 struct StateData {
     token: Arc<[u8]>,
+    oauth: Option<Arc<crate::oauth::OAuth>>,
     local_authority: String,
     limiter: Arc<Semaphore>,
 }
@@ -59,7 +61,7 @@ fn authenticated(headers: &HeaderMap, token: &[u8]) -> bool {
 
 // Axum response includes headers (including WWW-Authenticate) on failure.
 #[allow(clippy::result_large_err)]
-fn check_headers(headers: &HeaderMap, state: &StateData) -> Result<(), Response> {
+async fn check_access(headers: &HeaderMap, state: &StateData) -> Result<(), Response> {
     // Deny all browser Origin headers, including the localhost origin:
     // the pilot has no reason to permit browser requests or CORS.
     if headers.contains_key(header::ORIGIN) {
@@ -79,7 +81,16 @@ fn check_headers(headers: &HeaderMap, state: &StateData) -> Result<(), Response>
     {
         return Err(failure(StatusCode::FORBIDDEN, "Invalid host"));
     }
-    if !authenticated(headers, &state.token) {
+    if let Some(oauth) = &state.oauth {
+        if let Err(rejection) = oauth.verify(headers).await {
+            let (status, challenge) = oauth.challenge(&rejection);
+            let mut response = failure(status, "OAuth authorization required or unavailable");
+            response
+                .headers_mut()
+                .insert(header::WWW_AUTHENTICATE, challenge);
+            return Err(response);
+        }
+    } else if !authenticated(headers, &state.token) {
         let mut response = failure(StatusCode::UNAUTHORIZED, "Unauthorized");
         response.headers_mut().insert(
             header::WWW_AUTHENTICATE,
@@ -87,7 +98,18 @@ fn check_headers(headers: &HeaderMap, state: &StateData) -> Result<(), Response>
         );
         return Err(response);
     }
+    Ok(())
+}
 
+async fn protect(State(state): State<StateData>, request: Request, next: Next) -> Response {
+    if let Err(response) = check_access(request.headers(), &state).await {
+        return response;
+    }
+    next.run(request).await
+}
+
+#[allow(clippy::result_large_err)]
+fn check_headers(headers: &HeaderMap) -> Result<(), Response> {
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
@@ -121,7 +143,7 @@ fn check_headers(headers: &HeaderMap, state: &StateData) -> Result<(), Response>
 }
 
 async fn post_mcp(State(state): State<StateData>, headers: HeaderMap, body: Bytes) -> Response {
-    if let Err(result) = check_headers(&headers, &state) {
+    if let Err(result) = check_headers(&headers) {
         return result;
     }
     let request: Value = match serde_json::from_slice(&body) {
@@ -158,9 +180,14 @@ async fn post_mcp(State(state): State<StateData>, headers: HeaderMap, body: Byte
     };
     // Device/agent diagnostic calls spawn short-lived SSH processes; keep them
     // off the async executor and bound the number of concurrent operations.
+    let restricted = state.oauth.is_some();
     let task = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        crate::stdio::handle(&request)
+        if restricted {
+            crate::stdio::handle_tunnel(&request)
+        } else {
+            crate::stdio::handle(&request)
+        }
     });
     match tokio::time::timeout(Duration::from_secs(20), task).await {
         Ok(Ok(Some(response))) => (
@@ -176,39 +203,50 @@ async fn post_mcp(State(state): State<StateData>, headers: HeaderMap, body: Byte
     }
 }
 
-async fn get_mcp(State(state): State<StateData>, headers: HeaderMap) -> Response {
-    if headers.contains_key(header::ORIGIN) {
-        return failure(StatusCode::FORBIDDEN, "Origin not permitted");
-    }
-    let host = headers
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or_default();
-    if host != state.local_authority
-        && host
-            != format!(
-                "localhost:{}",
-                state.local_authority.rsplit(':').next().unwrap_or("")
-            )
-    {
-        return failure(StatusCode::FORBIDDEN, "Invalid host");
-    }
-    if !authenticated(&headers, &state.token) {
-        return failure(StatusCode::UNAUTHORIZED, "Unauthorized");
-    }
+async fn get_mcp() -> Response {
     failure(StatusCode::METHOD_NOT_ALLOWED, "SSE GET not supported")
 }
 
-fn router(token: Vec<u8>, port: u16) -> Router {
+async fn resource_metadata(State(state): State<StateData>) -> Response {
+    match &state.oauth {
+        Some(oauth) => (
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(oauth.metadata()),
+        )
+            .into_response(),
+        None => failure(StatusCode::NOT_FOUND, "Not found"),
+    }
+}
+
+fn router_with_auth(token: Vec<u8>, oauth: Option<Arc<crate::oauth::OAuth>>, port: u16) -> Router {
     let state = StateData {
         token: Arc::from(token),
+        oauth,
         local_authority: format!("127.0.0.1:{port}"),
         limiter: Arc::new(Semaphore::new(MAX_INFLIGHT)),
     };
-    Router::new()
+    let protected = Router::new()
         .route("/mcp", post(post_mcp).get(get_mcp))
+        .route_layer(middleware::from_fn_with_state(state.clone(), protect));
+    let mut router = Router::new().merge(protected);
+    if state.oauth.is_some() {
+        router = router
+            .route(
+                "/.well-known/oauth-protected-resource",
+                get(resource_metadata),
+            )
+            .route(
+                "/.well-known/oauth-protected-resource/mcp",
+                get(resource_metadata),
+            );
+    }
+    router
         .layer(DefaultBodyLimit::max(MAX_BODY))
         .with_state(state)
+}
+
+fn router(token: Vec<u8>, port: u16) -> Router {
+    router_with_auth(token, None, port)
 }
 
 pub fn load_token(path: &Path) -> io::Result<Vec<u8>> {
@@ -249,6 +287,11 @@ pub async fn run_from_env() -> io::Result<()> {
         )
     })?;
     let token = load_token(Path::new(&path))?;
+    let port = port_from_env()?;
+    serve(router(token, port), port).await
+}
+
+fn port_from_env() -> io::Result<u16> {
     let port: u16 = std::env::var("RELAYFORGE_HTTP_PORT")
         .unwrap_or_else(|_| DEFAULT_PORT.to_string())
         .parse()
@@ -259,10 +302,29 @@ pub async fn run_from_env() -> io::Result<()> {
             "Zero port not allowed",
         ));
     }
+    Ok(port)
+}
+
+pub async fn run_oauth_from_env() -> io::Result<()> {
+    let path = std::env::var("RELAYFORGE_OAUTH_CONFIG_FILE")
+        .map_err(|_| io::Error::other("RELAYFORGE_OAUTH_CONFIG_FILE is required"))?;
+    // Configuration has no secrets; systemd supplies an immutable credential snapshot.
+    let bytes = fs::read(path)?;
+    if bytes.len() > 16384 {
+        return Err(io::Error::other("OAuth config too large"));
+    }
+    let config =
+        serde_json::from_slice(&bytes).map_err(|_| io::Error::other("Invalid OAuth config"))?;
+    let port = port_from_env()?;
+    let oauth = Arc::new(crate::oauth::OAuth::new(config, port).await?);
+    serve(router_with_auth(Vec::new(), Some(oauth), port), port).await
+}
+
+async fn serve(app: Router, port: u16) -> io::Result<()> {
     let bind = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
     let listener = tokio::net::TcpListener::bind(bind).await?;
     eprintln!("RelayForge loopback MCP on http://127.0.0.1:{port}/mcp (NOT internet accessible)");
-    axum::serve(listener, router(token, port)).await
+    axum::serve(listener, app).await
 }
 
 #[cfg(test)]
@@ -272,6 +334,7 @@ mod tests {
 
     fn auth_state() -> StateData {
         StateData {
+            oauth: None,
             token: Arc::from(
                 b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_vec(),
             ),
@@ -298,44 +361,47 @@ mod tests {
         );
         headers
     }
-    #[test]
-    fn requires_auth_and_origin_protection() {
+    #[tokio::test]
+    async fn requires_auth_and_origin_protection() {
         let s = auth_state();
-        assert!(check_headers(&headers(), &s).is_ok());
+        assert!(check_access(&headers(), &s).await.is_ok());
         let mut missing = headers();
         missing.remove(header::AUTHORIZATION);
-        assert!(check_headers(&missing, &s).is_err());
+        assert!(check_access(&missing, &s).await.is_err());
         let mut wrong = headers();
         wrong.insert(
             header::AUTHORIZATION,
             HeaderValue::from_static("Bearer wrong"),
         );
-        assert!(check_headers(&wrong, &s).is_err());
+        assert!(check_access(&wrong, &s).await.is_err());
         let mut origin = headers();
         origin.insert(
             header::ORIGIN,
             HeaderValue::from_static("http://127.0.0.1:8765"),
         );
-        assert!(check_headers(&origin, &s).is_err());
+        assert!(check_access(&origin, &s).await.is_err());
         let mut rebinding = headers();
         rebinding.insert(header::HOST, HeaderValue::from_static("attacker.example"));
-        assert!(check_headers(&rebinding, &s).is_err());
+        assert!(check_access(&rebinding, &s).await.is_err());
     }
     #[test]
     fn rejects_bad_content_and_protocol_revision() {
-        let s = auth_state();
         let mut wrong = headers();
         wrong.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain"));
-        assert!(check_headers(&wrong, &s).is_err());
+        assert!(check_headers(&wrong).is_err());
         let mut version = headers();
         version.insert(
             "mcp-protocol-version",
             HeaderValue::from_static("2026-07-28"),
         );
-        assert!(check_headers(&version, &s).is_err());
+        assert!(check_headers(&version).is_err());
     }
     #[test]
     fn rejects_non_private_token_paths() {
         assert!(load_token(Path::new("relative-token")).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "http_oauth_tests.rs"]
+mod oauth_tests;

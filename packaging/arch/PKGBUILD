@@ -29,6 +29,13 @@ package() {
     install -Dm755 packaging/tunnel.py "$pkgdir/usr/bin/relayforge-tunnel"
     install -Dm644 packaging/arch/relayforge-tunnel.service "$pkgdir/usr/lib/systemd/user/relayforge-tunnel.service"
     install -Dm644 docs/managed-tunnel.md "$pkgdir/usr/share/doc/relayforge/managed-tunnel.md"
+    for unit in relayforge-mcp-oauth relayforge-tunnel-http; do
+        install -Dm644 "packaging/arch/$unit.service" "$pkgdir/usr/lib/systemd/user/$unit.service"
+    done
+    install -Dm644 docs/oauth-http.md "$pkgdir/usr/share/doc/relayforge/oauth-http.md"
+    for example in resource tunnel; do
+        install -Dm644 "packaging/oauth/$example.example.json" "$pkgdir/usr/share/doc/relayforge/$example.example.json"
+    done
     install -Dm755 packaging/user_data.py "$pkgdir/usr/bin/relayforge-user-data"
     install -Dm644 packaging/arch/source.json "$pkgdir/usr/share/relayforge/source.json"
     install -Dm644 docs/arch-packaging.md "$pkgdir/usr/share/doc/relayforge/arch-packaging.md"

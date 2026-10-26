@@ -32,6 +32,7 @@ pub mod bridge;
 pub mod changes;
 pub mod fleet;
 pub mod http;
+mod oauth;
 pub mod routeros;
 pub mod routeros_health;
 pub mod ssh;

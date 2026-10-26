@@ -102,3 +102,9 @@ CI exercises both installed packages, denied starts and supply-chain failures
 inside disposable containers. Native Rust/security gates and the existing
 reviewed-main release workflow remain mandatory. No additional publisher,
 manual release path, host install or live tunnel activation is introduced.
+
+## Separate OAuth HTTP option
+
+Issue #114 adds a separately named, disabled [OAuth HTTP path](oauth-http.md)
+using official client configuration and native systemd credentials. It preserves
+this stdio setup and its runtime key; no existing profile or service is migrated.

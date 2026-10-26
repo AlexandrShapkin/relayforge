@@ -1,0 +1,6 @@
+{
+  "issuer": "https://auth.example.com/realms/relayforge",
+  "resource": "https://api.openai.com/v1/mcp/REPLACE_WITH_TUNNEL_ID",
+  "scopes": ["mcp:read"],
+  "subject": "REPLACE_WITH_OWNER_IMMUTABLE_SUBJECT"
+}

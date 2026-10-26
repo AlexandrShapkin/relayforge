@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import time
 
 
@@ -33,10 +34,31 @@ assert ctl('is-active', unit, check=False).returncode != 0
 ctl('start', unit, check=False)
 assert ctl('show', '-p', 'MainPID', '--value', unit).stdout.strip() == '0'
 assert ctl('show', '-p', 'ConditionResult', '--value', unit).stdout.strip() == 'no'
+# The separate HTTP/OAuth units must also stay disabled and inert without config.
+for optin in ('relayforge-mcp-oauth.service', 'relayforge-tunnel-http.service'):
+    run('systemd-analyze', '--user', 'verify', '/usr/lib/systemd/user/' + optin)
+    assert ctl('is-enabled', optin, check=False).stdout.strip() == 'disabled'
+    ctl('start', optin, check=False)
+    assert ctl('show', '-p', 'MainPID', '--value', optin).stdout.strip() == '0'
+    assert ctl('is-active', optin, check=False).returncode != 0
+
 client = '/usr/bin/tunnel-client'
 help_text = run(client, 'run', '--help').stdout
 assert '0.0.18' in help_text and '--mcp.command' in help_text and '--config' in help_text
 run(client, 'cloudflared', '--help')
+# Parse the shipped HTTP profile with the actual independently packaged client.
+# No OAuth/server/control-plane connection is made; external network is absent.
+with tempfile.TemporaryDirectory(prefix='oauth-profile-') as temporary:
+    directory = Path(temporary)
+    sample = json.loads(Path('/usr/share/doc/relayforge/tunnel.example.json').read_text())
+    sample['control_plane']['tunnel_id'] = 'tunnel_' + '1' * 32
+    source = directory / 'sample.json'
+    source.write_text(json.dumps(sample))
+    run('env', 'CONTROL_PLANE_API_KEY=ci-dummy-key-never-valid', client,
+        'profiles', 'add', 'oauth-fixture', '--profile-dir', str(directory),
+        '--from-file', str(source))
+    assert (directory / 'oauth-fixture.yaml').is_file()
+
 root = home / guard.RELATIVE
 root.mkdir(mode=0o700)
 key = root / 'runtime-key'

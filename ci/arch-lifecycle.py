@@ -32,7 +32,12 @@ def main():
                 'usr/share/relayforge/source.json', 'usr/share/doc/relayforge/arch-packaging.md',
                 'usr/share/licenses/relayforge/LICENSE', 'usr/bin/relayforge-tunnel',
                 'usr/lib/systemd/user/relayforge-tunnel.service',
-                'usr/share/doc/relayforge/managed-tunnel.md'}
+                'usr/share/doc/relayforge/managed-tunnel.md',
+                'usr/lib/systemd/user/relayforge-mcp-oauth.service',
+                'usr/lib/systemd/user/relayforge-tunnel-http.service',
+                'usr/share/doc/relayforge/oauth-http.md',
+                'usr/share/doc/relayforge/resource.example.json',
+                'usr/share/doc/relayforge/tunnel.example.json'}
     assert {name for name in inventory if not name.endswith('/') and not name.startswith('.')} == expected
     assert not {'.INSTALL', '.CHANGELOG'} & set(inventory)
     # Reject special files/links and surprising permissions in the assembled package.
