@@ -45,3 +45,39 @@ Acceptance: both existing Ubuntu workflows pass at the same source SHA; Arch
 build, MCP smoke, manifest/seal negatives and existing offline recovery suites
 pass; artifacts identify that SHA. CI is source evidence, never live readiness.
 Independent exact-head acceptance remains required before leaving Draft.
+
+## R3 test portability (Issue #89)
+
+The original ignored regression sources were inspected read-only at
+`.build/issue89-operational-upgrade-20261025-r3/test_package.py` and
+`test_process_roles.py` in the same directory, plus
+`.build/issue89-owner-recovery-drill-20261025-dbus-fix/test_timer_trigger.py`.
+Only test intent and synthetic fixtures are portable; these paths are provenance
+notes, never test dependencies. No private seals, receipts or host evidence are
+included.
+
+The bounded port reuses `test_source_package.py` for exact support-source copies,
+synthetic seal bytes/modes/inventory, support-code tampering and refusal of receipt
+slots even after resealing. `test_attended_upgrade.py` exercises all three
+operations through the tracked shared engine entrypoint and rejects integrity
+failure before lock acquisition or engine construction. Existing process-role
+tests already cover the R3 synthetic process fixtures. Existing unittest discovery,
+Arch suite selection and extracted-bundle verification run these tests unchanged.
+Acceptance requires focused suites, full Python discovery and the existing native
+and exact-head hosted gates. No production implementation or CI job is added.
+
+The original `transition.py`, configured backend and `package_integrity.py` are
+host-package adapters, absent from tracked source. Their exact wrapper dispatch,
+first-activation exclusion and recovery-template path assertions cannot be claimed
+by testing the shared engine. Likewise the typed timer tests call
+`owner_drill.timer_trigger`, which exists only in the ignored drill adapter.
+Its typed `busctl` GetUnit/uint64 parsing is not the tracked recovery status parser.
+Porting those tests would require a separately scoped decision about their original
+implementation; no replacement parser, skipped tests or tests of copied code are
+introduced here. Timer parsing remains unverified by tracked CI.
+
+Installed provenance/pins, genuine restricted-worker identity, protected baseline
+rollback, native user-systemd timer firing/recovery and physical owner acceptance
+remain host-only checks. The previously reported failed recovery service also
+requires separate diagnosis and authority. Source CI cannot establish these facts
+or authorize runtime, service, selector, permission or recovery-unit changes.

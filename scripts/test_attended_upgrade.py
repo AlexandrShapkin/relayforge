@@ -11,7 +11,7 @@ import tempfile
 import time
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 DEPLOY = Path(__file__).resolve().parents[1] / 'deploy'
 
@@ -389,6 +389,44 @@ class UpgradeTests(unittest.TestCase):
                 patch.object(u.Upgrade, 'check', return_value={'actions_performed': []}):
             u.run(self.b, self.receipt, self.proof)
         self.assertEqual(locks[-1], {'readonly': True, 'wait': False})
+
+    def test_all_package_operations_dispatch_to_shared_upgrade_engine(self):
+        # R3 wrapper intent, exercised through the tracked entrypoint. Every
+        # operation is mocked: no scheduler, terminal prompt or host access.
+        self.b.m.M['uid'] = os.getuid()
+        attempt = 'a' * 32
+        for operation in ('check', 'activate', 'recover'):
+            with self.subTest(operation=operation):
+                engine = Mock()
+                argv = ['transition.py', operation]
+                if operation == 'recover':
+                    argv += ['--attempt', attempt]
+                with patch.object(sys, 'argv', argv), \
+                        patch.object(sys.stdin, 'isatty', return_value=True), \
+                        patch.object(sys.stdout, 'isatty', return_value=True), \
+                        patch.object(self.b, 'locked', return_value=contextlib.nullcontext()) as locked, \
+                        patch.object(u.signal, 'signal'), patch.object(u.signal, 'alarm'), \
+                        patch.object(u, 'Upgrade', return_value=engine) as constructor:
+                    u.run(self.b, self.receipt, self.proof)
+                constructor.assert_called_once_with(self.b, self.receipt, self.proof)
+                locked.assert_called_once_with(readonly=operation == 'check',
+                                               wait=operation == 'recover')
+                self.assertEqual([call[0] for call in engine.method_calls], [operation])
+                if operation == 'recover':
+                    engine.recover.assert_called_once_with(attempt)
+
+    def test_package_integrity_failure_prevents_engine_dispatch(self):
+        self.b.m.M['uid'] = os.getuid()
+        for operation in ('check', 'activate', 'recover'):
+            with self.subTest(operation=operation), \
+                    patch.object(sys, 'argv', ['transition.py', operation]), \
+                    patch.object(self.b, 'sealed', side_effect=RuntimeError('tampered')), \
+                    patch.object(self.b, 'locked') as locked, \
+                    patch.object(u, 'Upgrade') as constructor:
+                with self.assertRaisesRegex(RuntimeError, 'tampered'):
+                    u.run(self.b, self.receipt, self.proof)
+                locked.assert_not_called()
+                constructor.assert_not_called()
 
     def test_sigkill_after_selector_independent_recovery_and_stale_state(self):
         pid = os.fork()
