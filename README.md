@@ -72,3 +72,5 @@ archives or production runtime settings.
 
 See [MCP clients](docs/mcp-clients.md) and the
 [remaining roadmap](docs/roadmap.md).
+
+Arch Linux distribution and explicit opt-in setup: [pacman lifecycle](docs/arch-packaging.md). Package installation does not activate services or grant device access.

@@ -1,0 +1,32 @@
+# Canonical package recipe. Build with ci/arch-source.sh from a clean full checkout.
+pkgname=relayforge
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Deny-by-default infrastructure bridge (explicit local authorization required)'
+arch=('x86_64')
+url='https://github.com/AlexandrShapkin/relayforge'
+license=('Apache-2.0')
+depends=('glibc' 'gcc-libs' 'systemd' 'python' 'bubblewrap' 'git' 'openssh' 'iproute2')
+makedepends=('rust' 'licenses')
+# A checksummed git archive is created from the exact committed revision, never HOME.
+source=('relayforge-source.tar')
+sha256sums=('@SOURCE_SHA256@')
+options=('!strip' '!debug')
+
+build() {
+    cd "$srcdir"
+    export CARGO_TARGET_DIR="$srcdir/target"
+    cargo build --release --locked -p relayforge-mcp -p relayforge-agent
+}
+
+package() {
+    cd "$srcdir"
+    install -Dm755 target/release/relayforge-mcp "$pkgdir/usr/bin/relayforge-mcp"
+    install -Dm755 target/release/relayforge-agent "$pkgdir/usr/bin/relayforge-agent"
+    install -Dm644 packaging/arch/relayforge-mcp-http.service \
+        "$pkgdir/usr/lib/systemd/user/relayforge-mcp-http.service"
+    install -Dm755 packaging/user_data.py "$pkgdir/usr/bin/relayforge-user-data"
+    install -Dm644 packaging/arch/source.json "$pkgdir/usr/share/relayforge/source.json"
+    install -Dm644 docs/arch-packaging.md "$pkgdir/usr/share/doc/relayforge/arch-packaging.md"
+    install -Dm644 /usr/share/licenses/spdx/Apache-2.0.txt "$pkgdir/usr/share/licenses/relayforge/LICENSE"
+}

@@ -1,5 +1,10 @@
 # Build isolation and explicitly approved runtime migration (Issue #77)
 
+> Future normal distribution uses the [Arch package lifecycle](arch-packaging.md).
+> This legacy runtime/receipt contract remains binding for the existing installation
+> until a separately attended migration retires it; no existing evidence is relabeled.
+
+
 ## Incident and scope
 
 On 2026-10-20 a verification release build replaced the executable selected

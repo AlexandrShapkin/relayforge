@@ -1,0 +1,67 @@
+name: Publish tested Arch package
+on:
+  workflow_run:
+    workflows: [Rust checks, RDC-independent development verification]
+    types: [completed]
+    branches: [main]
+permissions:
+  contents: read
+  actions: read
+  attestations: read
+concurrency:
+  group: arch-release-main
+  cancel-in-progress: false
+jobs:
+  gate:
+    if: >-
+      github.repository == 'AlexandrShapkin/relayforge' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.repository.full_name == github.repository &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    outputs:
+      ready: ${{ steps.required.outputs.ready }}
+      plan: ${{ steps.required.outputs.plan }}
+    steps:
+      # Never check out an artifact or PR source with a privileged token.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - id: required
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: python3 -B ci/release_arch.py gate --sha "$SOURCE_SHA"
+  publish:
+    needs: gate
+    if: needs.gate.outputs.ready == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Download and verify approved pending main artifacts in order
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+          RELEASE_PLAN: ${{ needs.gate.outputs.plan }}
+        run: python3 -B ci/release_arch.py download --sha "$SOURCE_SHA"
+      - uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: |
+            dist/**/*.pkg.tar.zst
+            dist/**/SHA256SUMS
+      - name: Verify exact-head gate and publish without overwriting
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+          RELEASE_PLAN: ${{ needs.gate.outputs.plan }}
+        run: python3 -B ci/release_arch.py publish --sha "$SOURCE_SHA"
