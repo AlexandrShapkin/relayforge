@@ -17,15 +17,17 @@ concurrency:
 
 jobs:
   verify-offline:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/.build/ci
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -73,6 +75,20 @@ jobs:
             /tmp/relayforge-ci-linux-x86_64.tar.gz.sha256
           retention-days: 7
           if-no-files-found: error
+      - name: Build exact-source non-activating Ubuntu package
+        run: |
+          python3 -B ci/ubuntu_package.py --binary-dir .build/ci/release --dist .build/ubuntu-dist --sha "$SOURCE_SHA"
+      - name: Test installed Ubuntu package in a disposable container
+        run: |
+          docker run --rm -e CI_UBUNTU_DISPOSABLE=1 -v "$PWD:/workspace:ro" -w /workspace ubuntu:24.04 bash ci/ubuntu-package-smoke.sh
+      - name: Retain unactivated Ubuntu package for exact-source inspection
+        uses: actions/upload-artifact@v4
+        with:
+          name: relayforge-ubuntu-source-${{ github.event.pull_request.head.sha || github.sha }}
+          path: .build/ubuntu-dist/*
+          retention-days: 7
+          if-no-files-found: error
+
 
   arch-source:
     runs-on: ubuntu-22.04
