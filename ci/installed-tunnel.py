@@ -106,6 +106,11 @@ try:
 except BaseException:
     # Only dummy CI profile/key data exists in this disconnected container.
     print(run('journalctl', '--user', '-u', unit, '--no-pager', '-n', '35').stdout, file=sys.stderr)
+    diagnostic = run('systemd-run', '--user', '--wait', '--pipe', '--collect',
+        '-p', 'NoNewPrivileges=true', '-p', 'PrivateTmp=true', '-p', 'ProtectSystem=full',
+        '/usr/bin/bash', '-c',
+        'cat /proc/self/uid_map /proc/self/gid_map; /usr/bin/pacman -Qkk relayforge tunnel-client', check=False)
+    print(diagnostic.stdout + diagnostic.stderr, file=sys.stderr)
     raise
 finally:
     ctl('stop', unit)
