@@ -181,7 +181,11 @@ def main():
     binary.unlink()
     userctl = ['runuser', '-u', 'builder', '--', 'env', 'XDG_RUNTIME_DIR=/run/user/1000',
                'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus', 'systemctl', '--user']
-    run(*userctl, 'reset-failed', 'relayforge-tunnel.service')
+    # ALPM's daemon-reload hook may unload a stopped unit. Reset is housekeeping;
+    # the following startup and condition assertions remain mandatory.
+    subprocess.run([*userctl, 'reset-failed', 'relayforge-tunnel.service'],
+                   text=True, capture_output=True, check=False)
+
     run(*userctl, 'start', 'relayforge-tunnel.service')
     assert run(*userctl, 'show', '-p', 'ConditionResult', '--value', 'relayforge-tunnel.service').strip() == 'no'
     assert run(*userctl, 'show', '-p', 'MainPID', '--value', 'relayforge-tunnel.service').strip() == '0'
