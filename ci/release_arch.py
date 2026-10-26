@@ -105,6 +105,9 @@ def pending_main(trigger_sha, commits, releases, get=api):
         if matches:
             if len(matches) != 1:
                 raise ValueError('conflicting release history')
+            if (matches[0]['tag_name'] != tag or
+                    matches[0]['target_commitish'] != sha):
+                raise ValueError('existing release source conflict')
             if not matches[0]['draft']:
                 verify_published(matches[0], sha, tag, package, get)
                 continue
