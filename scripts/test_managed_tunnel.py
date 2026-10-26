@@ -117,6 +117,27 @@ class GuardTests(unittest.TestCase):
             self.assertEqual(evidence.read_text(), 'private legacy sentinel')
             for fd in guard.checked(str(home)): os.close(fd)
 
+    def test_service_condition_validates_readonly_snapshots_without_skipping_packages(self):
+        # Runtime credential snapshots normally live under /run/user/UID.
+        with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
+            credentials = Path(tmp)
+            for name, source in (('profile', self.profile), ('runtime-key', self.key)):
+                (credentials / name).write_bytes(source.read_bytes())
+                (credentials / name).chmod(0o400)
+            with patch.object(guard, 'package_check') as package:
+                guard.service_check(str(self.home), str(credentials))
+                package.assert_called_once()
+            (credentials / 'runtime-key').chmod(0o600)
+            (credentials / 'runtime-key').write_text('different')
+            with patch.object(guard, 'package_check'):
+                with self.assertRaises(ValueError): guard.service_check(str(self.home), str(credentials))
+            (credentials / 'runtime-key').unlink()
+            (credentials / 'runtime-key').symlink_to(self.key)
+            with patch.object(guard, 'package_check'):
+                with self.assertRaises(OSError): guard.service_check(str(self.home), str(credentials))
+            with patch.object(guard, 'package_check', side_effect=ValueError('corrupt package')):
+                with self.assertRaises(ValueError): guard.service_check(str(self.home), str(credentials))
+
     def test_package_failure_blocks_before_exec(self):
         with patch.object(guard.subprocess, 'run', side_effect=subprocess.CalledProcessError(1, 'pacman')), patch.object(guard.os, 'execve') as execute:
             with self.assertRaisesRegex(guard.Refused, 'installed-package'): guard.launch(str(self.home))

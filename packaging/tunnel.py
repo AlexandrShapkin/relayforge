@@ -132,6 +132,40 @@ def launch(home, check_only=False):
         raise Refused('client-exec') from None
 
 
+def service_check(home, credentials):
+    # The user manager executes this condition with '+' before the client's
+    # filesystem/user namespace. It remains the same ordinary UID, never root.
+    package_check()
+    opened = checked(home)
+    try:
+        # LoadCredential snapshots are read-only runtime copies made by the user
+        # manager, not imports from any shared/legacy profile or credential path.
+        fd = os.open('/', FLAGS | os.O_DIRECTORY)
+        try:
+            for part in Path(credentials).parts[1:]:
+                child = os.open(part, FLAGS | os.O_DIRECTORY, dir_fd=fd)
+                os.close(fd)
+                fd = child
+                info = os.fstat(fd)
+                if info.st_uid not in (0, os.getuid()) or info.st_mode & 0o022:
+                    raise ValueError('unsafe credential directory')
+            for name, source in zip(('profile', 'runtime-key'), opened):
+                child = os.open(name, FLAGS, dir_fd=fd)
+                try:
+                    info = os.fstat(child)
+                    if (not stat.S_ISREG(info.st_mode) or info.st_uid not in (0, os.getuid())
+                            or info.st_mode & 0o077 or info.st_size > 16384
+                            or os.read(child, 16385) != os.pread(source, 16385, 0)):
+                        raise ValueError('credential snapshot mismatch')
+                finally:
+                    os.close(child)
+        finally:
+            os.close(fd)
+    finally:
+        for source in opened:
+            os.close(source)
+
+
 def setup(home, tunnel_id):
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         raise ValueError('attended physical terminal required')
@@ -180,8 +214,9 @@ def setup(home, tunnel_id):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('plan', 'setup', 'check', 'run'))
+    parser.add_argument('action', choices=('plan', 'setup', 'check', 'run', 'service-check'))
     parser.add_argument('--tunnel-id')
+    parser.add_argument('--credentials-dir')
     args = parser.parse_args()
     if os.getuid() == 0:
         raise ValueError('ordinary user required')
@@ -190,6 +225,10 @@ def main():
         print('Preserve ~/.config/tunnel-client and legacy ~/.local/libexec/relayforge unchanged.')
         print('Inventory legacy unit overrides, processes and ownership locally; stop if they conflict.')
         print('New profile: ~/' + RELATIVE + '/profile.json; new key required; no services changed.')
+    elif args.action == 'service-check':
+        if not args.credentials_dir or not Path(args.credentials_dir).is_absolute():
+            raise ValueError('absolute credential directory required')
+        service_check(home, args.credentials_dir)
     elif args.action == 'setup':
         setup(home, args.tunnel_id or '')
     else:

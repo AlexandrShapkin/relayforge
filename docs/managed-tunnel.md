@@ -26,8 +26,15 @@ under a private 0700 `~/.config/relayforge/managed-tunnel` directory. The new
 JSON profile is valid YAML and permits only one stdio target:
 `/usr/bin/relayforge-mcp --readonly-stdio`. Extra channels, HTTP targets,
 unsafe modes, hardlinks and symlinks fail closed. Inherited tunnel/client proxy,
-profile, MCP and debugging environment overrides are discarded. Open file
-descriptors keep validated inputs stable across the exec boundary. This does
+profile, MCP and debugging environment overrides are discarded. Direct launcher use keeps validated descriptors across exec. For the user unit,
+an ordinary-user `ExecCondition` with the systemd `+` prefix validates packages
+outside the client's filesystem/user namespace: inside that namespace, host root
+ownership is unmapped and pacman's ownership checks would falsely fail. The
+prefix grants no host root privilege in a user manager. All package checks remain
+mandatory. `LoadCredential` provides read-only per-invocation profile/key
+snapshots, which the condition compares byte-for-byte with the no-follow source
+descriptors. The hardened client receives only those snapshots and a fixed stdio
+command through a clean environment; its namespace restrictions remain enabled. This does
 not defend against a malicious process with the same UID changing file contents.
 
 ## Explicit migration, physical terminal only
