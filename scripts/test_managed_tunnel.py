@@ -119,7 +119,7 @@ class GuardTests(unittest.TestCase):
 
     def test_package_failure_blocks_before_exec(self):
         with patch.object(guard.subprocess, 'run', side_effect=subprocess.CalledProcessError(1, 'pacman')), patch.object(guard.os, 'execve') as execute:
-            with self.assertRaises(subprocess.CalledProcessError): guard.launch(str(self.home))
+            with self.assertRaisesRegex(guard.Refused, 'installed-package'): guard.launch(str(self.home))
             execute.assert_not_called()
 
 

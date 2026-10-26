@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import pwd
 import stat
 import subprocess
 import sys
@@ -14,6 +15,10 @@ CLIENT = '/usr/bin/tunnel-client'
 COMMAND = '/usr/bin/relayforge-mcp --readonly-stdio'
 RELATIVE = '.config/relayforge/managed-tunnel'
 FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+
+
+class Refused(ValueError):
+    """Fixed diagnostic category; never includes private input or subprocess text."""
 
 
 def directory(home):
@@ -102,8 +107,14 @@ def package_check():
 
 
 def launch(home, check_only=False):
-    package_check()
-    opened = checked(home)
+    try:
+        package_check()
+    except (OSError, ValueError, subprocess.SubprocessError):
+        raise Refused('installed-package') from None
+    try:
+        opened = checked(home)
+    except (OSError, ValueError, KeyError, TypeError):
+        raise Refused('private-profile-or-key') from None
     if check_only:
         for fd in opened:
             os.close(fd)
@@ -115,7 +126,10 @@ def launch(home, check_only=False):
     args = [CLIENT, 'run', '--config', f'/proc/self/fd/{opened[0]}',
             '--control-plane.api-key', f'file:/proc/self/fd/{opened[1]}',
             '--mcp.command', f'command={COMMAND},channel=main']
-    os.execve(CLIENT, args, {'HOME': home, 'PATH': '/usr/bin', 'LANG': 'C.UTF-8'})
+    try:
+        os.execve(CLIENT, args, {'HOME': home, 'PATH': '/usr/bin', 'LANG': 'C.UTF-8'})
+    except OSError:
+        raise Refused('client-exec') from None
 
 
 def setup(home, tunnel_id):
@@ -171,7 +185,7 @@ def main():
     args = parser.parse_args()
     if os.getuid() == 0:
         raise ValueError('ordinary user required')
-    home = str(Path.home())
+    home = pwd.getpwuid(os.getuid()).pw_dir
     if args.action == 'plan':
         print('Preserve ~/.config/tunnel-client and legacy ~/.local/libexec/relayforge unchanged.')
         print('Inventory legacy unit overrides, processes and ownership locally; stop if they conflict.')
@@ -185,6 +199,9 @@ def main():
 if __name__ == '__main__':
     try:
         main()
+    except Refused as error:
+        print('RelayForge tunnel refused: ' + str(error), file=sys.stderr)
+        sys.exit(1)
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
         # Never echo profile values, key bodies, subprocess arguments or errors.
         print('RelayForge tunnel refused: inspect package integrity and private setup locally.', file=sys.stderr)

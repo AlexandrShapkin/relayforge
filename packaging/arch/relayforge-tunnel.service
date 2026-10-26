@@ -9,6 +9,7 @@ ConditionPathExists=%h/.config/relayforge/managed-tunnel/runtime-key
 [Service]
 Type=simple
 ExecStart=/usr/bin/relayforge-tunnel run
+Environment=HOME=%h
 Restart=no
 NoNewPrivileges=true
 PrivateTmp=true

@@ -85,6 +85,7 @@ for case in ('command', 'key-mode', 'key-symlink', 'missing-key', 'profile-mode'
 # A valid startup uses the actual installed unit/client, with no external network.
 if not key.exists(): key.write_text('ci-dummy-key-never-valid')
 key.chmod(0o600); profile.chmod(0o600); profile.write_text(json.dumps(valid))
+run('/usr/bin/relayforge-tunnel', 'check')
 ctl('reset-failed', unit, check=False)
 ctl('set-environment', 'MCP_COMMAND=/bin/sh', 'TUNNEL_CLIENT_PROFILE=legacy',
     'CONTROL_PLANE_BASE_URL=https://override.invalid')
