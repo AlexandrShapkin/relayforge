@@ -1,7 +1,7 @@
 name: Rust checks
 on:
   push:
-    branches: [main]
+    branches: ['**']
     tags: ['**']
   pull_request:
 permissions:
@@ -15,6 +15,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
       - name: Parse inert autonomy metadata (Python 3.11+)
         run: |
           python3 - <<'PY'

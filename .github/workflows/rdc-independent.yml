@@ -4,7 +4,7 @@ name: RDC-independent development verification
 # No ThinkPad, VPS, RouterOS or Android connection is required.
 on:
   push:
-    branches: [main]
+    branches: ['**']
   pull_request:
   workflow_dispatch:
 
@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: rdc-independent-${{ github.workflow }}-${{ github.ref }}
+  group: rdc-independent-${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -25,6 +25,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -74,55 +75,51 @@ jobs:
           if-no-files-found: error
 
   arch-source:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    container:
-      # Official base-20260924.0.599135, verified against registry manifest.
-      image: archlinux/archlinux@sha256:676f4d5b2cacc259ab30b1e871a272bd4a2e023a901f725fb1b12c84dc355f10
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
     env:
-      CARGO_TARGET_DIR: ${{ github.workspace }}/.build/ci-arch
       SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
-      - name: Install snapshot toolchain in disposable container
-        run: |
-          echo 'Server = https://archive.archlinux.org/repos/2026/09/25/$repo/os/$arch' > /etc/pacman.d/mirrorlist
-          pacman -Syu --noconfirm --needed base-devel rust python git
-          useradd --create-home builder
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
           persist-credentials: false
-      - name: Build and verify as unprivileged user
-        shell: bash
+      - name: Build pinned disposable Arch environment
+        run: docker build -t relayforge-arch-ci -f ci/arch-container.Dockerfile .
+      - name: Build package as non-root (no host HOME or credentials mounted)
         run: |
-          chown -R builder:builder "$GITHUB_WORKSPACE"
-          runuser -u builder -- env CARGO_TARGET_DIR="$CARGO_TARGET_DIR" SOURCE_SHA="$SOURCE_SHA" bash ci/arch-source.sh
-      - name: Retain exact-source binaries and operational source package
+          docker create --name arch-build relayforge-arch-ci sleep infinity
+          docker cp . arch-build:/workspace
+          docker start arch-build
+          docker exec arch-build chown -R builder:builder /workspace
+          docker exec -u builder -w /workspace -e SOURCE_SHA="$SOURCE_SHA" -e CARGO_TARGET_DIR=/workspace/.build/ci-arch arch-build bash ci/arch-source.sh
+      - name: Test actual installed package with disposable systemd and bubblewrap
+        run: |
+          docker commit arch-build relayforge-arch-tested
+          docker run -d --name arch-installed --privileged --cgroupns=private --tmpfs /run --tmpfs /tmp -e GITHUB_ACTIONS=true relayforge-arch-tested /sbin/init
+          for attempt in $(seq 1 60); do
+            if docker exec arch-installed systemctl is-active --quiet multi-user.target; then break; fi
+            sleep 1
+          done
+          docker exec arch-installed systemctl is-active --quiet multi-user.target
+          docker exec arch-installed touch /run/relayforge-disposable-ci
+          docker exec -w /workspace -e GITHUB_ACTIONS=true arch-installed python3 -B ci/arch-lifecycle.py
+      - name: Export verified bytes and lifecycle evidence
+        run: |
+          mkdir -p .build/arch-dist
+          docker cp arch-installed:/workspace/.build/arch-dist/. .build/arch-dist/
+      - name: Retain exact-source pacman package and operational evidence
         uses: actions/upload-artifact@v4
         with:
           name: relayforge-arch-source-${{ github.event.pull_request.head.sha || github.sha }}
           path: .build/arch-dist/*
           retention-days: 7
           if-no-files-found: error
-
-  attest-arch:
-    needs: arch-source
-    # PRs (including forks) receive no write/OIDC permissions. Public trusted
-    # main dispatch supports GitHub attestations; unsupported repositories skip.
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.event.repository.private == false
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      id-token: write
-      attestations: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: relayforge-arch-source-${{ github.sha }}
-          path: dist
-      - uses: actions/attest-build-provenance@v3
-        with:
-          subject-path: 'dist/*.tar.gz'
+      - name: Remove only this job's disposable containers
+        if: always()
+        run: |
+          docker rm -f arch-installed arch-build || true
 
   sandbox-integration:
     # Noble's restricted userns policy denies bwrap's loopback RTM_NEWADDR.
@@ -136,6 +133,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - name: Install disposable-runner sandbox dependency
         run: |

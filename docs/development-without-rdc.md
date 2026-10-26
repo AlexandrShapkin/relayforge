@@ -33,8 +33,9 @@ device**.
 
 **The CI workflow cannot and must not automatically deploy** a release to
 ThinkPad or a VPS. It never receives SSH credentials, API keys, ADB keys,
-router configuration or device secrets. GitHub's `GITHUB_TOKEN` is read-only
-(`contents: read`). No self-hosted runner and no production machine is
+router configuration or device secrets. Build/test jobs use read-only GitHub permissions. The separate trusted
+[Arch release gate](arch-packaging.md) alone may publish packages after both
+exact-main workflows pass; it cannot deploy them. No self-hosted runner and no production machine is
 required for the builds.
 
 ## Existing infrastructure diagnosis without RDC

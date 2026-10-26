@@ -1,5 +1,11 @@
 # Arch source verification (Issue #89)
 
+> Issue #110 adds the canonical [pacman lifecycle](arch-packaging.md). The
+> operational source TAR below remains historical/offline evidence, not the normal
+> installation channel. Only the trusted release job now requests provenance
+> write permissions; Arch installed-package verification extends this job.
+
+
 The `arch-source` job in RDC-independent verification builds the exact checked-out
 PR SHA on a disposable GitHub runner. The official Arch image is digest-pinned;
 pacman uses the signed 2026-09-25 Arch Linux Archive snapshot. Package versions
