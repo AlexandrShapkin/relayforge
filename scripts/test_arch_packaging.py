@@ -398,7 +398,7 @@ class GateTests(unittest.TestCase):
         existing, files = self.durable_fixture()
         cases = [([dict(existing, tag_name='v9.9.9')], 'source conflict'),
                  ([dict(existing, target_commitish='b' * 40)], 'source conflict'),
-                 ([existing, existing], 'incomplete release history'),
+                 ([existing, existing], 'conflicting release history'),
                  ([dict(existing, assets=[])], 'inventory differs'),
                  ([dict(existing, assets=existing['assets'] + existing['assets'][:1])], 'inventory differs')]
         for releases, message in cases:
