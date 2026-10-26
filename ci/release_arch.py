@@ -52,6 +52,27 @@ def accepted_runs(sha, get=api):
     return selected
 
 
+def accepted_merge(sha, get=api):
+    """Require the independent exact-PR-head handoff, not an author's green CI."""
+    prs = get(f'commits/{sha}/pulls')
+    for pr in prs:
+        if (not pr['merged_at'] or pr['base']['ref'] != 'main'
+                or pr['base']['repo']['full_name'] != REPO or pr['merge_commit_sha'] != sha):
+            continue
+        head = pr['head']['sha']
+        comments = get(f"issues/{pr['number']}/comments?per_page=100")
+        # Fail closed on pagination rather than overlooking a later revocation.
+        if len(comments) >= 100:
+            raise ValueError('review handoff requires bounded explicit reconciliation')
+        marker = f'Independent technical ACCEPT: {head}'
+        refusal = f'Independent technical REJECT: {head}'
+        handoffs = [c for c in comments if c['user']['login'] == REPO.split('/')[0]
+                    and (marker in c['body'].splitlines() or refusal in c['body'].splitlines())]
+        if handoffs and marker in handoffs[-1]['body'].splitlines():
+            return True
+    return False
+
+
 def release_files(directory, sha, runs):
     identity = json.loads((directory / 'source.json').read_text())
     if identity['source_sha'] != sha or identity['activation_allowed'] is not False:
@@ -105,12 +126,8 @@ def publish(directory, sha, runs):
     # Re-query directly before write; gate is not a stale permission receipt.
     if accepted_runs(sha) != runs:
         raise ValueError('required exact-head checks changed')
-    if not api(f'commits/{sha}/pulls'):
-        raise ValueError('main publication requires a reviewed merged PR')
-    prs = api(f'commits/{sha}/pulls')
-    if not any(p['merged_at'] and p['base']['ref'] == 'main' and
-               p['base']['repo']['full_name'] == REPO and p['merge_commit_sha'] == sha for p in prs):
-        raise ValueError('not an accepted main merge commit')
+    if not accepted_merge(sha):
+        raise ValueError('merged main PR lacks independent exact-head ACCEPT handoff')
     identity, names = release_files(directory, sha, runs)
     tag = identity['tag']
     # A source SHA must be in protected-by-process main history, even if newer main exists.

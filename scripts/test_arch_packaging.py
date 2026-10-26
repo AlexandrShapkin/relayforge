@@ -73,6 +73,48 @@ class GateTests(unittest.TestCase):
                                     {'tag_name': 'v0.1.2', 'target_commitish': self.sha, 'assets': []},
                                     self.sha, 'v0.1.2')
 
+    def test_independent_accept_must_match_merged_pr_head(self):
+        head = 'b' * 40
+        pr = {'number': 111, 'merged_at': 'now', 'merge_commit_sha': self.sha,
+              'base': {'ref': 'main', 'repo': {'full_name': release.REPO}}, 'head': {'sha': head}}
+        comments = []
+        def get(path):
+            return [pr] if path.startswith('commits/') else comments
+        self.assertFalse(release.accepted_merge(self.sha, get))
+        comments.append({'user': {'login': 'outsider'}, 'body': f'Independent technical ACCEPT: {head}'})
+        self.assertFalse(release.accepted_merge(self.sha, get))
+        comments.append({'user': {'login': 'AlexandrShapkin'}, 'body': f'Independent technical ACCEPT: {head}'})
+        self.assertTrue(release.accepted_merge(self.sha, get))
+        comments.append({'user': {'login': 'AlexandrShapkin'}, 'body': f'Independent technical REJECT: {head}'})
+        self.assertFalse(release.accepted_merge(self.sha, get))
+        pr['head']['sha'] = 'c' * 40
+        self.assertFalse(release.accepted_merge(self.sha, get))
+
+    def test_release_bytes_and_lifecycle_must_match_checksums(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            pkgver = '0.1.0.r10.g' + self.sha[:12]
+            name = f'relayforge-{pkgver}-1-x86_64.pkg.tar.zst'
+            (directory / name).write_bytes(b'synthetic package bytes')
+            digest = hashlib.sha256((directory / name).read_bytes()).hexdigest()
+            (directory / 'source.json').write_text(json.dumps({'source_sha': self.sha,
+                'pkgver': pkgver, 'tag': 'v0.1.10', 'activation_allowed': False}))
+            (directory / 'arch-packages.txt').write_text('signed snapshot inventory')
+            (directory / 'rustc.txt').write_text('rustc fixture')
+            (directory / 'lifecycle.json').write_text(json.dumps({'source_sha': self.sha,
+                'package': name, 'sha256': digest, 'lifecycle': 'PASS'}))
+            original = ''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n'
+                               for p in sorted(directory.iterdir()))
+            (directory / 'SHA256SUMS').write_text(original)
+            identity, assets = release.release_files(directory, self.sha, {'tests.yml': 1})
+            self.assertEqual(identity['source_sha'], self.sha)
+            self.assertEqual(assets, release.ASSETS | {name})
+            (directory / 'SHA256SUMS').write_text(original)
+            (directory / name).write_bytes(b'tampered')
+            with self.assertRaisesRegex(ValueError, 'checksum mismatch'):
+                release.release_files(directory, self.sha, {'tests.yml': 1})
+
 
 class PurgeTests(unittest.TestCase):
     def setUp(self):

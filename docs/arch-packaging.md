@@ -115,7 +115,7 @@ read-only gate queries both workflow identities, exact source SHA and latest
 attempts, requiring Rust `test` plus independent `verify-offline`, `arch-source`
 and `sandbox-integration` success. Only its trusted publication job has contents
 write and optional provenance permissions. It downloads the tested Arch run's
-bytes, rechecks checksums and CI, confirms a merged main PR/history, enforces
+bytes, rechecks checksums and CI, confirms a merged main PR/history and the independent exact-head handoff, enforces
 monotonic immutable identity, creates an annotated tag and draft release, verifies
 all uploaded bytes, then publishes. No rebuild or PR/branch publication occurs.
 A complete existing release is skipped only when exact inventory/bytes match;
@@ -125,7 +125,13 @@ no-overwrite contract; GitHub server-side immutable-release settings are not
 changed by this PR. Distribution authority is the owner's bounded Issue #110
 request for automatic accepted-main releases; this task does not itself merge,
 publish, deploy or change repository administration. Independent acceptance and
-owner merge authority remain separate from author checks.
+owner merge authority remain separate from author checks. Before merge, the
+independent session must record a maintainer-authored PR comment containing the
+standalone line `Independent technical ACCEPT: FULL_PR_HEAD_SHA`. A later
+`Independent technical REJECT: FULL_PR_HEAD_SHA` revokes it; the latest matching
+handoff wins. This records the separate session's review, not GitHub APPROVE,
+and must never be posted by the implementing session to certify itself. Missing
+handoffs or excessive comment pagination block publication for owner review.
 
 ## Attended legacy migration boundary
 

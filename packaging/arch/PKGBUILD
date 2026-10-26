@@ -7,7 +7,7 @@ arch=('x86_64')
 url='https://github.com/AlexandrShapkin/relayforge'
 license=('Apache-2.0')
 depends=('glibc' 'gcc-libs' 'systemd' 'python' 'bubblewrap' 'git' 'openssh' 'iproute2')
-makedepends=('rust')
+makedepends=('rust' 'licenses')
 # A checksummed git archive is created from the exact committed revision, never HOME.
 source=('relayforge-source.tar')
 sha256sums=('@SOURCE_SHA256@')
@@ -28,5 +28,5 @@ package() {
     install -Dm755 packaging/user_data.py "$pkgdir/usr/bin/relayforge-user-data"
     install -Dm644 packaging/arch/source.json "$pkgdir/usr/share/relayforge/source.json"
     install -Dm644 docs/arch-packaging.md "$pkgdir/usr/share/doc/relayforge/arch-packaging.md"
-    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/relayforge/LICENSE"
+    install -Dm644 /usr/share/licenses/spdx/Apache-2.0.txt "$pkgdir/usr/share/licenses/relayforge/LICENSE"
 }
