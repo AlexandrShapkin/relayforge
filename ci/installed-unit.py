@@ -11,6 +11,8 @@ def ctl(*args, check=True):
     return subprocess.run(['systemctl', '--user', *args], check=check, capture_output=True, text=True)
 
 
+subprocess.run(['systemd-analyze', '--user', 'verify',
+                '/usr/lib/systemd/user/relayforge-mcp-http.service'], check=True)
 assert ctl('is-enabled', 'relayforge-mcp-http.service', check=False).stdout.strip() == 'disabled'
 assert ctl('is-active', 'relayforge-mcp-http.service', check=False).returncode != 0
 ctl('start', 'relayforge-mcp-http.service')
@@ -22,7 +24,8 @@ try:
     for attempt in range(100):
         try:
             req = urllib.request.Request('http://127.0.0.1:8765/mcp', data=data,
-                                         headers={'Content-Type': 'application/json'})
+                                         headers={'Content-Type': 'application/json',
+                                                  'Accept': 'application/json, text/event-stream'})
             opener.open(req, timeout=2)
             raise AssertionError('unauthenticated request accepted')
         except urllib.error.HTTPError as error:

@@ -26,7 +26,9 @@ device**.
    and a SHA-256 digest as GitHub Actions artifacts. The digest detects
    accidental changes; it is **not** a cryptographic publisher signature.
    Artifacts expire after seven days. These are untrusted CI build products
-   until separately reviewed and verified for their target host.
+   until separately reviewed and verified for their target host. Arch CI also
+   constructs and tests the canonical pacman package; see the
+   [package/release contract](arch-packaging.md).
 6. After merging, use the Actions tab to invoke
    `RDC-independent development verification` via `workflow_dispatch`
    when an independent main-branch build or packaging run is needed.

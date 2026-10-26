@@ -118,7 +118,6 @@ def main():
         print(run('runuser', '-u', 'builder', '--', 'env', 'RELAYFORGE_CI_SYSTEMD_SYSTEM=1',
                   'python3', '-B', f'scripts/{script}', '/usr/bin/relayforge-mcp'), flush=True)
     # Unit definition from the installed package, not legacy deploy templates.
-    run('systemd-analyze', '--user', 'verify', '/usr/lib/systemd/user/relayforge-mcp-http.service')
     run('loginctl', 'enable-linger', 'builder')
     run('systemctl', 'start', 'user@1000.service')
     run('runuser', '-u', 'builder', '--', 'env', 'XDG_RUNTIME_DIR=/run/user/1000',
@@ -128,6 +127,7 @@ def main():
     run('cp', '/usr/bin/relayforge-user-data', '/tmp/installed-user-data.py')
     run('pacman', '-R', '--noconfirm', 'relayforge')
     run('pacman', '-Q', 'relayforge', ok=False)
+    run('pacman', '-R', '--noconfirm', 'relayforge', ok=False)
     assert all(not Path('/' + name).exists() for name in expected)
     inactive()
     assert token.read_text() == 'a7' * 32 and sentinel.read_text() == 'retained'
