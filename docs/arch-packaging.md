@@ -117,10 +117,17 @@ and `sandbox-integration` success. Only its trusted publication job has contents
 write and optional provenance permissions. It downloads the tested Arch run's
 bytes, rechecks checksums and CI, confirms a merged main PR/history and the independent exact-head handoff, enforces
 monotonic immutable identity, creates an annotated tag and draft release, verifies
-all uploaded bytes, then publishes. No rebuild or PR/branch publication occurs.
+all uploaded bytes, then publishes. Release notes use the independently reviewed PR’s “Problem and resulting behavior”
+narrative plus explicit installation/compatibility/rollback instructions; missing
+narratives block publication. No rebuild or PR/branch publication occurs.
 A complete existing release is skipped only when exact inventory/bytes match;
 any mismatch or partial publication fails without overwrite and needs owner
-reconciliation. Workflow concurrency serializes releases. Publication uses a
+reconciliation. Workflow concurrency serializes publication. Every completion scans pending
+first-parent main revisions since introduction of this policy, oldest first, so
+coalesced/delayed completion events do not silently lose a release. An unfinished
+predecessor defers later publication; failed exact-main revisions are not released.
+The next completion drains eligible pending revisions in order; missing review,
+partial releases or bounded-history overflow fail for owner reconciliation. Publication uses a
 no-overwrite contract; GitHub server-side immutable-release settings are not
 changed by this PR. Distribution authority is the owner's bounded Issue #110
 request for automatic accepted-main releases; this task does not itself merge,

@@ -46,6 +46,8 @@ def main():
     token = config / 'http-token'
     token.write_text('a7' * 32)
     token.chmod(0o600)
+    run('chown', 'builder:builder', str(home / '.config'))
+    run('chmod', '0700', str(home / '.config'))
     run('chown', '-R', 'builder:builder', str(config))
     run('chown', 'builder:builder', str(sentinel))
     # Capture service state before each transaction; no hooks may start/enable it.

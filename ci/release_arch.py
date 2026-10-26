@@ -23,7 +23,7 @@ def api(path, *args):
     return json.loads(command('gh', 'api', f'repos/{REPO}/{path}', *args))
 
 
-def accepted_runs(sha, get=api):
+def inspect_runs(sha, get=api):
     if not re.fullmatch('[0-9a-f]{40}', sha):
         raise ValueError('full source SHA required')
     selected = {}
@@ -33,10 +33,12 @@ def accepted_runs(sha, get=api):
                       and r['event'] == 'push' and r['repository']['full_name'] == REPO
                       and r['path'] == f'.github/workflows/{workflow}']
         if not candidates:
-            return None
+            return 'pending', None
         latest = max(candidates, key=lambda r: (r['run_number'], r['run_attempt']))
-        if latest['status'] != 'completed' or latest['conclusion'] != 'success':
-            return None
+        if latest['status'] != 'completed':
+            return 'pending', None
+        if latest['conclusion'] != 'success':
+            return 'failed', None
         result = get(f"actions/runs/{latest['id']}/jobs?filter=latest&per_page=100")
         actual = result['jobs']
         if result['total_count'] != len(actual):
@@ -45,11 +47,17 @@ def accepted_runs(sha, get=api):
         for name in jobs:
             matches = [j for j in actual if j['name'] == name]
             if len(matches) != 1 or matches[0]['conclusion'] != 'success':
-                return None
+                return 'failed', None
         if any(j['conclusion'] != 'success' for j in actual):
-            return None
+            return 'failed', None
         selected[workflow] = latest['id']
-    return selected
+    return 'success', selected
+
+
+def accepted_runs(sha, get=api):
+    state, runs = inspect_runs(sha, get)
+    return runs if state == 'success' else None
+
 
 
 def accepted_merge(sha, get=api):
@@ -72,6 +80,59 @@ def accepted_merge(sha, get=api):
                 and refusal not in handoffs[-1]['body'].splitlines()):
             return True
     return False
+
+
+def main_history():
+    """Only first-parent main commits since this delivery policy was introduced."""
+    additions = command('git', 'log', '--first-parent', '--diff-filter=A', '--format=%H',
+                        '--', '.github/workflows/release-arch.yml').splitlines()
+    if not additions:
+        raise ValueError('release policy introduction unavailable')
+    first = additions[-1]
+    commits = command('git', 'rev-list', '--first-parent', '--reverse', f'{first}^..HEAD').splitlines()
+    if len(commits) > 1000:
+        raise ValueError('release history requires owner archival review')
+    return commits
+
+
+def pending_main(trigger_sha, commits, releases, get=api):
+    """Drain missed completion events in source order; CI failure never publishes."""
+    published = {r['target_commitish'] for r in releases if not r['draft']}
+    plan = []
+    for sha in commits:
+        # Re-run the triggering immutable release through byte verification.
+        if sha in published and sha != trigger_sha:
+            continue
+        state, runs = inspect_runs(sha, get)
+        if state == 'pending':
+            break  # preserve monotonic ordering until the predecessor completes
+        if state == 'failed':
+            continue  # failed exact-main source is never a distributable release
+        if not accepted_merge(sha, get):
+            raise ValueError(f'independent review handoff missing for main {sha}')
+        plan.append({'sha': sha, 'run_id': runs['rdc-independent.yml']})
+    if len(plan) > 100:
+        raise ValueError('too many pending releases; owner reconciliation required')
+    return plan
+
+
+def all_releases():
+    pages = json.loads(command('gh', 'api', '--paginate', '--slurp', f'repos/{REPO}/releases?per_page=100'))
+    return [r for page in pages for r in page]
+
+
+def merge_narrative(sha, get=api):
+    for pr in get(f'commits/{sha}/pulls'):
+        if pr['merged_at'] and pr['merge_commit_sha'] == sha and pr['base']['ref'] == 'main':
+            body = pr.get('body') or ''
+            heading = '## Problem and resulting behavior\n'
+            if heading not in body:
+                raise ValueError('reviewed PR narrative required for release notes')
+            text = body.split(heading, 1)[1].split('\n## ', 1)[0].strip()
+            if not 80 <= len(text) <= 12000:
+                raise ValueError('reviewed release narrative missing or excessive')
+            return text + f"\n\nReviewed change: {pr['html_url']}"
+    raise ValueError('merged PR narrative unavailable')
 
 
 def release_files(directory, sha, runs):
@@ -129,6 +190,7 @@ def publish(directory, sha, runs):
         raise ValueError('required exact-head checks changed')
     if not accepted_merge(sha):
         raise ValueError('merged main PR lacks independent exact-head ACCEPT handoff')
+    narrative = merge_narrative(sha)
     identity, names = release_files(directory, sha, runs)
     tag = identity['tag']
     # A source SHA must be in protected-by-process main history, even if newer main exists.
@@ -136,9 +198,8 @@ def publish(directory, sha, runs):
     if comparison['status'] not in ('ahead', 'identical') or comparison['merge_base_commit']['sha'] != sha:
         raise ValueError('source no longer belongs to main history')
     # Do not depend on GitHub setting immutability to avoid our own overwrites.
-    releases = json.loads(command('gh', 'api', '--paginate', '--slurp', f'repos/{REPO}/releases?per_page=100'))
-    all_releases = [r for page in releases for r in page]
-    existing = next((r for r in all_releases if r['tag_name'] == tag), None)
+    releases = all_releases()
+    existing = next((r for r in releases if r['tag_name'] == tag), None)
     if existing:
         verify_existing(directory, names, existing, sha, tag)
         if existing['draft']:
@@ -146,7 +207,7 @@ def publish(directory, sha, runs):
         print(f'exact immutable release already published: {tag}')
         return
     # Enforce monotonic Arch and SemVer order, not lexical short-SHA ordering.
-    for release in all_releases:
+    for release in releases:
         match = re.fullmatch(r'v(\d+)\.(\d+)\.(\d+)', release['tag_name'])
         if match and tuple(map(int, tag[1:].split('.'))) <= tuple(map(int, match.groups())):
             raise ValueError('release sequence must be strictly increasing')
@@ -158,9 +219,11 @@ def publish(directory, sha, runs):
     notes = directory / 'notes.md'
     notes.write_text(f'''RelayForge {tag} — canonical Arch Linux x86_64 package.
 
-This release replaces manual binary copying as the normal distribution channel.
-Pacman owns the binaries and inactive HTTP user-unit template. Installation,
-updates and removal never authorize service activation or erase user credentials.
+{narrative}
+
+Installation and operator action: pacman owns the binaries and inactive HTTP
+user-unit template. Install/update/remove does not authorize service activation
+or erase user credentials.
 
 Source/build: `{sha}`. Exact-head required CI: {record_urls(runs)}.
 Verify SHA256SUMS and source.json before `pacman -U`. Read the included Arch
@@ -188,7 +251,7 @@ def record_urls(runs):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=['gate', 'publish'])
+    parser.add_argument('command', choices=['gate', 'download', 'publish'])
     parser.add_argument('--sha', required=True)
     parser.add_argument('--directory', type=Path, default=Path('dist'))
     args = parser.parse_args()
@@ -198,13 +261,29 @@ if __name__ == '__main__':
     if (event['event'] != 'push' or event['head_branch'] != 'main' or event['head_sha'] != args.sha
             or event['repository']['full_name'] != REPO):
         raise SystemExit('only exact-source main push may release')
-    runs = accepted_runs(args.sha)
     if args.command == 'gate':
+        plan = pending_main(args.sha, main_history(), all_releases())
         with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-            output.write(f'ready={str(runs is not None and accepted_merge(args.sha)).lower()}\n')
-            if runs:
-                output.write(f"run_id={runs['rdc-independent.yml']}\n")
-    elif runs:
-        publish(args.directory, args.sha, runs)
+            output.write(f'ready={str(bool(plan)).lower()}\n')
+            output.write('plan=' + json.dumps(plan, separators=(',', ':')) + '\n')
     else:
-        raise SystemExit('all required same-SHA checks must pass')
+        plan = json.loads(os.environ['RELEASE_PLAN'])
+        if not plan or len(plan) > 100:
+            raise SystemExit('bounded approved release plan required')
+        for item in plan:
+            sha = item['sha']
+            runs = accepted_runs(sha)
+            if not runs or runs['rdc-independent.yml'] != item['run_id'] or not accepted_merge(sha):
+                raise SystemExit('exact-head CI/review changed; publication refused')
+            destination = args.directory / sha
+            if args.command == 'download':
+                subprocess.run(['gh', 'run', 'download', str(item['run_id']), '--repo', REPO,
+                    '--name', f'relayforge-arch-source-{sha}', '--dir', str(destination)], check=True)
+                # Validate tested bytes before any optional provenance publication.
+                (destination / 'BUILD-SHA256SUMS').write_bytes((destination / 'SHA256SUMS').read_bytes())
+                release_files(destination, sha, runs)
+            else:
+                # Re-download step already generated release metadata; original
+                # build checksums are retained to verify tested inputs again.
+                (destination / 'SHA256SUMS').write_bytes((destination / 'BUILD-SHA256SUMS').read_bytes())
+                publish(destination, sha, runs)

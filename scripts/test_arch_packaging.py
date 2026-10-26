@@ -115,6 +115,40 @@ class GateTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'checksum mismatch'):
                 release.release_files(directory, self.sha, {'tests.yml': 1})
 
+    def test_pending_main_drains_oldest_first_and_retains_rerun_verification(self):
+        commits = ['a' * 40, 'b' * 40, 'c' * 40]
+        def inspect(sha, get):
+            return 'success', {'rdc-independent.yml': commits.index(sha) + 1}
+        with patch.object(release, 'inspect_runs', side_effect=inspect), patch.object(release, 'accepted_merge', return_value=True):
+            plan = release.pending_main(commits[-1], commits, [], self.api)
+            self.assertEqual([p['sha'] for p in plan], commits)
+            published = [{'target_commitish': commits[0], 'draft': False}]
+            self.assertEqual([p['sha'] for p in release.pending_main(commits[-1], commits, published, self.api)], commits[1:])
+            self.assertEqual(release.pending_main(commits[0], commits[:1], published, self.api)[0]['sha'], commits[0])
+
+    def test_pending_predecessor_blocks_later_publication(self):
+        commits = ['a' * 40, 'b' * 40]
+        with patch.object(release, 'inspect_runs', return_value=('pending', None)):
+            self.assertEqual(release.pending_main(commits[-1], commits, [], self.api), [])
+        with patch.object(release, 'inspect_runs', return_value=('failed', None)):
+            self.assertEqual(release.pending_main(commits[-1], commits, [], self.api), [])
+
+    def test_pending_main_without_review_fails_closed(self):
+        with patch.object(release, 'inspect_runs', return_value=('success', {'rdc-independent.yml': 1})), patch.object(release, 'accepted_merge', return_value=False):
+            with self.assertRaisesRegex(ValueError, 'review handoff missing'):
+                release.pending_main(self.sha, [self.sha], [], self.api)
+
+    def test_release_notes_need_reviewed_problem_narrative(self):
+        pr = {'merged_at': 'now', 'merge_commit_sha': self.sha, 'base': {'ref': 'main'},
+              'html_url': 'https://github.com/example/pull/1', 'body': 'title only'}
+        with self.assertRaisesRegex(ValueError, 'narrative required'):
+            release.merge_narrative(self.sha, lambda _: [pr])
+        text = 'Previous manual copies lacked a native installation contract. Pacman now owns installed binaries and inactive templates.'
+        pr['body'] = '## Problem and resulting behavior\n' + text + '\n## Verification\ninternal checks'
+        result = release.merge_narrative(self.sha, lambda _: [pr])
+        self.assertIn(text, result)
+        self.assertNotIn('internal checks', result)
+
 
 class PurgeTests(unittest.TestCase):
     def setUp(self):
