@@ -7,6 +7,7 @@ on:
 permissions:
   contents: read
   actions: read
+  attestations: read
 concurrency:
   group: arch-release-main
   cancel-in-progress: false
@@ -54,9 +55,10 @@ jobs:
           RELEASE_PLAN: ${{ needs.gate.outputs.plan }}
         run: python3 -B ci/release_arch.py download --sha "$SOURCE_SHA"
       - uses: actions/attest-build-provenance@v3
-        if: github.event.repository.private == false
         with:
-          subject-path: 'dist/**/*.pkg.tar.zst'
+          subject-path: |
+            dist/**/*.pkg.tar.zst
+            dist/**/SHA256SUMS
       - name: Verify exact-head gate and publish without overwriting
         env:
           GH_TOKEN: ${{ github.token }}

@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import tomllib
 
 REPO = 'AlexandrShapkin/relayforge'
 REQUIRED = {'tests.yml': {'test'},
@@ -99,37 +100,91 @@ def pending_main(trigger_sha, commits, releases, get=api):
     """Drain missed completion events in source order; CI failure never publishes."""
     plan = []
     for sha in commits:
+        tag, package = source_names(sha)
+        matches = [r for r in releases if r['tag_name'] == tag or r['target_commitish'] == sha]
+        if matches:
+            if len(matches) != 1 or matches[0]['draft']:
+                raise ValueError('conflicting or incomplete release history')
+            verify_published(matches[0], sha, tag, package, get)
+            continue
         state, runs = inspect_runs(sha, get)
-        claims = [r for r in releases if r['target_commitish'] == sha]
-        if claims and state != 'success':
-            raise ValueError('existing release lacks successful exact-head CI')
         if state == 'pending':
             break  # preserve monotonic ordering until the predecessor completes
         if state == 'failed':
             continue  # failed exact-main source is never a distributable release
         if not accepted_merge(sha, get):
             raise ValueError(f'independent review handoff missing for main {sha}')
-        if releases:
-            # Reconstruct expected bytes from tested CI, never Release metadata.
-            # Missing/expired artifacts require owner reconciliation, not a skip.
-            with tempfile.TemporaryDirectory(prefix='relayforge-history-') as tmp:
-                directory = Path(tmp)
-                subprocess.run(['gh', 'run', 'download', str(runs['rdc-independent.yml']),
-                                '--repo', REPO, '--name', f'relayforge-arch-source-{sha}',
-                                '--dir', tmp], check=True)
-                identity, names = release_files(directory, sha, runs)
-                matches = [r for r in releases if r['tag_name'] == identity['tag']
-                           or r['target_commitish'] == sha]
-                if matches:
-                    if len(matches) != 1 or matches[0]['draft']:
-                        raise ValueError('conflicting or incomplete release history')
-                    verify_existing(directory, names, matches[0], sha, identity['tag'], get)
-                    if sha != trigger_sha:
-                        continue
         plan.append({'sha': sha, 'run_id': runs['rdc-independent.yml']})
     if len(plan) > 100:
         raise ValueError('too many pending releases; owner reconciliation required')
     return plan
+
+
+def source_names(sha):
+    """Derive immutable names from committed source, independently of Release data."""
+    if not re.fullmatch('[0-9a-f]{40}', sha):
+        raise ValueError('full source SHA required')
+    version = tomllib.loads(command('git', 'show', f'{sha}:Cargo.toml'))['workspace']['package']['version']
+    if not re.fullmatch(r'\d+\.\d+\.\d+', version):
+        raise ValueError('invalid source version')
+    revision = int(command('git', 'rev-list', '--first-parent', '--count', sha))
+    major, minor, _ = version.split('.')
+    return (f'v{major}.{minor}.{revision}',
+            f'relayforge-{version}.r{revision}.g{sha[:12]}-1-x86_64.pkg.tar.zst')
+
+
+def verify_provenance(directory):
+    # Authenticate the entire digest inventory, including release/source/lifecycle
+    # records. A package-only attestation cannot authenticate those records.
+    # workflow_run runs on current main, possibly newer than the package source;
+    # the signed manifest binds that source, the certificate binds the publisher.
+    subprocess.run(['gh', 'attestation', 'verify', str(directory / 'SHA256SUMS'),
+                    '--repo', REPO, '--signer-workflow', f'{REPO}/.github/workflows/release-arch.yml',
+                    '--source-ref', 'refs/heads/main', '--deny-self-hosted-runners'], check=True)
+
+
+def verify_published(release, sha, tag, package, get=api):
+    """Durable authenticated evidence; never consult ephemeral Actions artifacts."""
+    names = ASSETS | {package}
+    if release['tag_name'] != tag or release['target_commitish'] != sha:
+        raise ValueError('existing release source conflict')
+    assets = release['assets']
+    if len(assets) != len(names) or {a['name'] for a in assets} != names:
+        raise ValueError('existing immutable asset inventory differs; no overwrite')
+    if tag_commit(tag, get) != sha:
+        raise ValueError('existing immutable tag commit conflict')
+    with tempfile.TemporaryDirectory(prefix='relayforge-history-') as tmp:
+        directory = Path(tmp)
+        subprocess.run(['gh', 'release', 'download', tag, '--repo', REPO, '--dir', tmp], check=True)
+        verify_provenance(directory)
+        sums = {}
+        for line in (directory / 'SHA256SUMS').read_text().splitlines():
+            digest, name = line.split('  ')
+            if name not in names - {'SHA256SUMS'} or name in sums or not re.fullmatch('[0-9a-f]{64}', digest):
+                raise ValueError('invalid authenticated release inventory')
+            sums[name] = digest
+        if set(sums) != names - {'SHA256SUMS'}:
+            raise ValueError('incomplete authenticated release inventory')
+        for name, digest in sums.items():
+            if hashlib.sha256((directory / name).read_bytes()).hexdigest() != digest:
+                raise ValueError('authenticated release checksum mismatch')
+        record = json.loads((directory / 'release.json').read_text())
+        runs = record['required_runs']
+        if (record['schema_version'] != 1 or record['live_acceptance'] is not False
+                or set(runs) != set(REQUIRED) or any(type(r) is not int or r <= 0 for r in runs.values())
+                or record['source_sha'] != sha or record['build_sha'] != sha
+                or record['package'] != package or record['package_sha256'] != sums[package]):
+            raise ValueError('authenticated release identity mismatch')
+        identity = json.loads((directory / 'source.json').read_text())
+        lifecycle = json.loads((directory / 'lifecycle.json').read_text())
+        # Validate historical records without regenerating them using today's
+        # build environment defaults or requiring the old run/artifact APIs.
+        if (identity['source_sha'] != sha or identity['tag'] != tag
+                or identity['activation_allowed'] is not False
+                or f"relayforge-{identity['pkgver']}-1-x86_64.pkg.tar.zst" != package
+                or lifecycle['source_sha'] != sha or lifecycle['package'] != package
+                or lifecycle['sha256'] != sums[package] or lifecycle['lifecycle'] != 'PASS'):
+            raise ValueError('authenticated release metadata mismatch')
 
 
 def all_releases():
@@ -233,6 +288,10 @@ def publish(directory, sha, runs):
     narrative = merge_narrative(sha)
     identity, names = release_files(directory, sha, runs)
     tag = identity['tag']
+    expected_tag, package = source_names(sha)
+    if tag != expected_tag or names != ASSETS | {package}:
+        raise ValueError('tested artifact source naming mismatch')
+    verify_provenance(directory)
     # A source SHA must be in protected-by-process main history, even if newer main exists.
     comparison = api(f'compare/{sha}...main')
     if comparison['status'] not in ('ahead', 'identical') or comparison['merge_base_commit']['sha'] != sha:
@@ -289,6 +348,14 @@ def record_urls(runs):
     return ', '.join(f'https://github.com/{REPO}/actions/runs/{r}' for r in runs.values())
 
 
+def download_tested(destination, sha, runs):
+    subprocess.run(['gh', 'run', 'download', str(runs['rdc-independent.yml']), '--repo', REPO,
+                    '--name', f'relayforge-arch-source-{sha}', '--dir', str(destination)], check=True)
+    # Validate actual tested bytes before any provenance publication.
+    (destination / 'BUILD-SHA256SUMS').write_bytes((destination / 'SHA256SUMS').read_bytes())
+    release_files(destination, sha, runs)
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=['gate', 'download', 'publish'])
@@ -317,11 +384,7 @@ if __name__ == '__main__':
                 raise SystemExit('exact-head CI/review changed; publication refused')
             destination = args.directory / sha
             if args.command == 'download':
-                subprocess.run(['gh', 'run', 'download', str(item['run_id']), '--repo', REPO,
-                    '--name', f'relayforge-arch-source-{sha}', '--dir', str(destination)], check=True)
-                # Validate tested bytes before any optional provenance publication.
-                (destination / 'BUILD-SHA256SUMS').write_bytes((destination / 'SHA256SUMS').read_bytes())
-                release_files(destination, sha, runs)
+                download_tested(destination, sha, runs)
             else:
                 # Re-download step already generated release metadata; original
                 # build checksums are retained to verify tested inputs again.

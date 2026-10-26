@@ -1,8 +1,10 @@
 """Focused packaging security and exact-head release gate regression tests."""
+import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -24,6 +26,12 @@ purge = module('user_data', 'packaging/user_data.py')
 class GateTests(unittest.TestCase):
     def setUp(self):
         self.sha = 'a' * 40
+        self.tag = 'v0.1.10'
+        self.package = f'relayforge-0.1.0.r10.g{self.sha[:12]}-1-x86_64.pkg.tar.zst'
+        self.source_names = release.source_names
+        names = patch.object(release, 'source_names', return_value=(self.tag, self.package))
+        names.start()
+        self.addCleanup(names.stop)
         self.runs = {}
         for index, (workflow, jobs) in enumerate(release.REQUIRED.items(), 1):
             run = {'id': index, 'head_sha': self.sha, 'head_branch': 'main', 'event': 'push',
@@ -39,6 +47,16 @@ class GateTests(unittest.TestCase):
             return {'total_count': len(jobs), 'jobs': jobs}
         workflow = path.split('/')[2]
         return {'workflow_runs': [self.runs[workflow]]}
+
+    def test_historical_names_use_committed_version_and_first_parent_revision(self):
+        def command(*args):
+            if args == ('git', 'show', f'{self.sha}:Cargo.toml'):
+                return '[workspace.package]\nversion = "0.2.9"\n'
+            self.assertEqual(args, ('git', 'rev-list', '--first-parent', '--count', self.sha))
+            return '321'
+        with patch.object(release, 'command', side_effect=command):
+            self.assertEqual(self.source_names(self.sha),
+                             ('v0.2.321', f'relayforge-0.2.9.r321.g{self.sha[:12]}-1-x86_64.pkg.tar.zst'))
 
     def test_both_exact_head_workflows_and_jobs_required(self):
         self.assertEqual(release.accepted_runs(self.sha, self.api), {'tests.yml': 1, 'rdc-independent.yml': 2})
@@ -115,18 +133,19 @@ class GateTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'checksum mismatch'):
                 release.release_files(directory, self.sha, {'tests.yml': 1})
 
-    def test_pending_main_drains_oldest_first_and_retains_rerun_verification(self):
+    def test_pending_main_drains_oldest_first_and_verifies_published_trigger(self):
         commits = ['a' * 40, 'b' * 40, 'c' * 40]
         def inspect(sha, get):
             return 'success', {'rdc-independent.yml': commits.index(sha) + 1}
         with patch.object(release, 'inspect_runs', side_effect=inspect), patch.object(release, 'accepted_merge', return_value=True):
             plan = release.pending_main(commits[-1], commits, [], self.api)
             self.assertEqual([p['sha'] for p in plan], commits)
-            published = [{'target_commitish': commits[0], 'tag_name': 'v0.1.10', 'draft': False}]
-            with patch.object(release.subprocess, 'run'), patch.object(release, 'release_files', return_value=({'tag': 'v0.1.10'}, {'package'})), patch.object(release, 'verify_existing') as verify:
+            published = [{'target_commitish': commits[0], 'tag_name': self.tag, 'draft': False}]
+            with patch.object(release, 'verify_published') as verify:
                 self.assertEqual(release.pending_main(commits[-1], commits[:1], published, self.api), [])
                 verify.assert_called_once()
-                self.assertEqual(release.pending_main(commits[0], commits[:1], published, self.api)[0]['sha'], commits[0])
+                # A repeated completion validates the durable release, too.
+                self.assertEqual(release.pending_main(commits[0], commits[:1], published, self.api), [])
 
     def test_remote_tag_peels_lightweight_and_nested_annotated_tags(self):
         tag = 'v0.1.10'
@@ -169,57 +188,137 @@ class GateTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             release.tag_commit('v0.1.10', lambda _: (_ for _ in ()).throw(RuntimeError('404')))
 
-    def test_history_rejects_unrelated_draft_duplicate_missing_and_changed_assets(self):
-        tag = 'v0.1.10'
-        existing = {'tag_name': tag, 'target_commitish': self.sha, 'draft': False,
-                    'assets': [{'name': 'package'}]}
+    def durable_fixture(self):
+        identity = {'source_sha': self.sha, 'pkgver': '0.1.0.r10.g' + self.sha[:12],
+                    'tag': self.tag, 'activation_allowed': False}
+        digest = hashlib.sha256(b'tested package').hexdigest()
+        files = {self.package: b'tested package', 'source.json': json.dumps(identity).encode(),
+                 'arch-packages.txt': b'snapshot inventory', 'rustc.txt': b'rustc fixture',
+                 'lifecycle.json': json.dumps({'source_sha': self.sha, 'package': self.package,
+                     'sha256': digest, 'lifecycle': 'PASS'}).encode()}
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            for name, data in files.items():
+                (directory / name).write_bytes(data)
+            (directory / 'SHA256SUMS').write_bytes(self.checksums(files))
+            release.release_files(directory, self.sha, {'tests.yml': 1, 'rdc-independent.yml': 2})
+            files = {p.name: p.read_bytes() for p in directory.iterdir()}
+        existing = {'tag_name': self.tag, 'target_commitish': self.sha, 'draft': False,
+                    'assets': [{'name': n} for n in files]}
+        return existing, files
+
+    @staticmethod
+    def checksums(files):
+        return ''.join(f'{hashlib.sha256(data).hexdigest()}  {name}\n'
+                       for name, data in sorted(files.items()) if name != 'SHA256SUMS').encode()
+
+    def durable_api(self, path):
+        self.assertEqual(path, f'git/ref/tags/{self.tag}')
+        return {'ref': f'refs/tags/{self.tag}', 'object': {'type': 'commit', 'sha': self.sha}}
+
+    def durable_commands(self, files, anchored_manifest):
+        def run(args, **kwargs):
+            self.assertTrue(kwargs['check'])
+            if args[:3] == ['gh', 'release', 'download']:
+                directory = Path(args[args.index('--dir') + 1])
+                for name, data in files.items():
+                    (directory / name).write_bytes(data)
+            elif args[:3] == ['gh', 'attestation', 'verify']:
+                self.assertEqual(args[args.index('--repo') + 1], release.REPO)
+                self.assertEqual(args[args.index('--signer-workflow') + 1],
+                                 f'{release.REPO}/.github/workflows/release-arch.yml')
+                self.assertEqual(args[args.index('--source-ref') + 1], 'refs/heads/main')
+                self.assertIn('--deny-self-hosted-runners', args)
+                # Independent trust store: rewriting Release files/checksums
+                # cannot change the digest authenticated by the signer.
+                if Path(args[3]).read_bytes() != anchored_manifest:
+                    raise subprocess.CalledProcessError(1, args)
+            else:
+                self.fail(f'ephemeral artifact or unexpected command: {args[:3]}')
+        return run
+
+    def test_new_merge_after_seven_day_expiration_uses_only_durable_history(self):
+        existing, files = self.durable_fixture()
+        later = 'b' * 40
+        def names(sha):
+            return (self.tag, self.package) if sha == self.sha else ('v0.1.11', 'next-package')
+        def inspect(sha, get):
+            self.assertEqual(sha, later, 'historical CI/artifacts expired eight days ago')
+            return 'success', {'tests.yml': 3, 'rdc-independent.yml': 4}
+        with patch.object(release, 'source_names', side_effect=names), patch.object(release, 'inspect_runs', side_effect=inspect), patch.object(release, 'accepted_merge', return_value=True) as review, patch.object(release.subprocess, 'run', side_effect=self.durable_commands(files, files['SHA256SUMS'])) as commands:
+            self.assertEqual(release.pending_main(later, [self.sha, later], [existing], self.durable_api),
+                             [{'sha': later, 'run_id': 4}])
+            review.assert_called_once_with(later, self.durable_api)
+            self.assertEqual(commands.call_count, 2)
+
+    def test_history_metadata_inventory_and_tag_tampering_fail_closed(self):
+        existing, files = self.durable_fixture()
         cases = [([dict(existing, tag_name='v9.9.9')], 'source conflict'),
                  ([dict(existing, target_commitish='b' * 40)], 'source conflict'),
                  ([dict(existing, draft=True)], 'incomplete release history'),
                  ([existing, existing], 'incomplete release history'),
                  ([dict(existing, assets=[])], 'inventory differs'),
-                 ([existing], 'bytes differ')]
+                 ([dict(existing, assets=existing['assets'] + existing['assets'][:1])], 'inventory differs')]
         for releases, message in cases:
-            with self.subTest(message=message):
-                def download(args, **kwargs):
-                    if args[:3] == ['gh', 'release', 'download']:
-                        (Path(args[args.index('--dir') + 1]) / 'package').write_bytes(b'changed')
-                def files(destination, sha, runs):
-                    (destination / 'package').write_bytes(b'expected')
-                    return {'tag': tag}, {'package'}
-                def get(path):
-                    return {'ref': f'refs/tags/{tag}', 'object': {'type': 'commit', 'sha': self.sha}}
-                with patch.object(release, 'inspect_runs', return_value=('success', {'rdc-independent.yml': 2})), patch.object(release, 'accepted_merge', return_value=True), patch.object(release, 'release_files', side_effect=files), patch.object(release.subprocess, 'run', side_effect=download):
-                    with self.assertRaisesRegex(ValueError, message):
-                        release.pending_main('b' * 40, [self.sha], releases, get)
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                release.pending_main('b' * 40, [self.sha], releases, self.durable_api)
+        def wrong_tag(path):
+            return {'ref': f'refs/tags/{self.tag}', 'object': {'type': 'commit', 'sha': 'c' * 40}}
+        with self.assertRaisesRegex(ValueError, 'tag commit conflict'):
+            release.pending_main('b' * 40, [self.sha], [existing], wrong_tag)
 
-    def test_history_skips_only_after_real_tag_and_byte_verification(self):
-        tag = 'v0.1.10'
-        existing = {'tag_name': tag, 'target_commitish': self.sha, 'draft': False,
-                    'assets': [{'name': 'package'}]}
-        downloads = []
-        def download(args, **kwargs):
-            downloads.append(args[:3])
-            if args[:3] == ['gh', 'release', 'download']:
-                (Path(args[args.index('--dir') + 1]) / 'package').write_bytes(b'tested')
-        def files(destination, sha, runs):
-            (destination / 'package').write_bytes(b'tested')
-            return {'tag': tag}, {'package'}
-        def get(path):
-            return {'ref': f'refs/tags/{tag}', 'object': {'type': 'commit', 'sha': self.sha}}
-        with patch.object(release, 'inspect_runs', return_value=('success', {'rdc-independent.yml': 2})), patch.object(release, 'accepted_merge', return_value=True), patch.object(release, 'release_files', side_effect=files), patch.object(release.subprocess, 'run', side_effect=download):
-            self.assertEqual(release.pending_main('b' * 40, [self.sha], [existing], get), [])
-        self.assertEqual(downloads, [['gh', 'run', 'download'], ['gh', 'release', 'download']])
+    def test_durable_asset_and_self_reported_checksum_tampering_fail_closed(self):
+        existing, original = self.durable_fixture()
+        for name in original:
+            for rewrite_checksums in (False, True):
+                if name == 'SHA256SUMS' and rewrite_checksums:
+                    continue  # Regenerating an unchanged inventory restores it.
+                with self.subTest(name=name, rewrite_checksums=rewrite_checksums):
+                    files = dict(original)
+                    files[name] += b'tampered'
+                    if rewrite_checksums:
+                        files['SHA256SUMS'] = self.checksums(files)
+                    with patch.object(release.subprocess, 'run', side_effect=self.durable_commands(files, original['SHA256SUMS'])):
+                        with self.assertRaises((ValueError, subprocess.CalledProcessError)):
+                            release.pending_main('b' * 40, [self.sha], [existing], self.durable_api)
 
-    def test_history_missing_ci_or_artifacts_cannot_be_skipped(self):
-        existing = {'tag_name': 'v0.1.10', 'target_commitish': self.sha, 'draft': False}
-        for state in ('pending', 'failed'):
-            with patch.object(release, 'inspect_runs', return_value=(state, None)):
-                with self.assertRaisesRegex(ValueError, 'exact-head CI'):
-                    release.pending_main('b' * 40, [self.sha], [existing])
-        with patch.object(release, 'inspect_runs', return_value=('success', {'rdc-independent.yml': 2})), patch.object(release, 'accepted_merge', return_value=True), patch.object(release.subprocess, 'run', side_effect=RuntimeError('artifact expired')):
-            with self.assertRaisesRegex(RuntimeError, 'artifact expired'):
-                release.pending_main('b' * 40, [self.sha], [existing])
+    def test_missing_assets_or_independent_attestation_fail_closed(self):
+        existing, files = self.durable_fixture()
+        for missing in files:
+            remaining = {n: data for n, data in files.items() if n != missing}
+            with self.subTest(missing=missing), patch.object(release.subprocess, 'run', side_effect=self.durable_commands(remaining, files['SHA256SUMS'])):
+                with self.assertRaises(FileNotFoundError):
+                    release.pending_main('b' * 40, [self.sha], [existing], self.durable_api)
+        # Covers unavailable, invalid signature, wrong signer/ref, or absent
+        # provenance: any nonzero verification exit must propagate.
+        def missing_attestation(args, **kwargs):
+            if args[:3] == ['gh', 'attestation', 'verify']:
+                raise subprocess.CalledProcessError(1, args)
+            return self.durable_commands(files, files['SHA256SUMS'])(args, **kwargs)
+        with patch.object(release.subprocess, 'run', side_effect=missing_attestation):
+            with self.assertRaises(subprocess.CalledProcessError):
+                release.pending_main('b' * 40, [self.sha], [existing], self.durable_api)
+
+    def test_authenticated_but_inconsistent_metadata_and_inventory_fail_closed(self):
+        existing, original = self.durable_fixture()
+        for name, field, value in [('source.json', 'tag', 'v9.9.9'),
+                                   ('release.json', 'source_sha', 'c' * 40),
+                                   ('release.json', 'required_runs', {'tests.yml': 1}),
+                                   ('lifecycle.json', 'lifecycle', 'FAIL')]:
+            files = dict(original)
+            record = json.loads(files[name])
+            record[field] = value
+            files[name] = json.dumps(record).encode()
+            files['SHA256SUMS'] = self.checksums(files)
+            with self.subTest(field=field), patch.object(release.subprocess, 'run', side_effect=self.durable_commands(files, files['SHA256SUMS'])):
+                with self.assertRaises(ValueError):
+                    release.pending_main('b' * 40, [self.sha], [existing], self.durable_api)
+        for manifest in (b'', original['SHA256SUMS'] * 2,
+                         original['SHA256SUMS'] + b'0' * 64 + b'  ../outside\n'):
+            files = dict(original, SHA256SUMS=manifest)
+            with patch.object(release.subprocess, 'run', side_effect=self.durable_commands(files, manifest)):
+                with self.assertRaises(ValueError):
+                    release.pending_main('b' * 40, [self.sha], [existing], self.durable_api)
 
     def test_pending_predecessor_blocks_later_publication(self):
         commits = ['a' * 40, 'b' * 40]
@@ -232,6 +331,36 @@ class GateTests(unittest.TestCase):
         with patch.object(release, 'inspect_runs', return_value=('success', {'rdc-independent.yml': 1})), patch.object(release, 'accepted_merge', return_value=False):
             with self.assertRaisesRegex(ValueError, 'review handoff missing'):
                 release.pending_main(self.sha, [self.sha], [], self.api)
+
+    def test_unpublished_missing_or_tampered_tested_bytes_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            destination = Path(tmp)
+            runs = {'tests.yml': 1, 'rdc-independent.yml': 2}
+            with patch.object(release.subprocess, 'run', side_effect=subprocess.CalledProcessError(1, 'expired')):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    release.download_tested(destination, self.sha, runs)
+            _, files = self.durable_fixture()
+            for name, data in files.items():
+                (destination / name).write_bytes(data)
+            (destination / self.package).write_bytes(b'tampered after testing')
+            with patch.object(release.subprocess, 'run') as download:
+                with self.assertRaisesRegex(ValueError, 'checksum mismatch'):
+                    release.download_tested(destination, self.sha, runs)
+                args = download.call_args.args[0]
+                self.assertEqual(args[:4], ['gh', 'run', 'download', '2'])
+                self.assertEqual(args[args.index('--name') + 1], f'relayforge-arch-source-{self.sha}')
+
+    def test_publication_requires_manifest_provenance_before_any_write(self):
+        _, files = self.durable_fixture()
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            for name, data in files.items():
+                (directory / name).write_bytes(data)
+            runs = {'tests.yml': 1, 'rdc-independent.yml': 2}
+            with patch.object(release, 'accepted_runs', return_value=runs), patch.object(release, 'accepted_merge', return_value=True), patch.object(release, 'merge_narrative', return_value='reviewed narrative'), patch.object(release.subprocess, 'run', side_effect=subprocess.CalledProcessError(1, 'missing provenance')), patch.object(release, 'api') as writes:
+                with self.assertRaises(subprocess.CalledProcessError):
+                    release.publish(directory, self.sha, runs)
+                writes.assert_not_called()
 
     def test_release_notes_need_reviewed_problem_narrative(self):
         pr = {'merged_at': 'now', 'merge_commit_sha': self.sha, 'base': {'ref': 'main'},

@@ -114,13 +114,29 @@ The release workflow responds only to completed main **push** workflows. A
 read-only gate queries both workflow identities, exact source SHA and latest
 attempts, requiring Rust `test` plus independent `verify-offline`, `arch-source`
 and `sandbox-integration` success. Only its trusted publication job has contents
-write and optional provenance permissions. It downloads the tested Arch run's
+write and provenance permissions. It downloads the tested Arch run's
 bytes, rechecks checksums and CI, confirms a merged main PR/history and the independent exact-head handoff, enforces
 monotonic immutable identity, creates an annotated tag and draft release, verifies
 all uploaded bytes, then publishes. Release notes use the independently reviewed PR’s “Problem and resulting behavior”
 narrative plus explicit installation/compatibility/rollback instructions; missing
 narratives block publication. No rebuild or PR/branch publication occurs.
-A complete existing release is skipped only when exact inventory/bytes match;
+A complete published release is skipped only after deriving its tag/package name
+from committed source, resolving the actual remote Git tag to that source, and
+checking the exact asset inventory and every asset digest. Historical validation
+downloads Release assets, never the original seven-day Actions artifacts or old
+CI job results. `SHA256SUMS` must have independently verified GitHub build
+provenance from this repository's `release-arch.yml` publisher on `refs/heads/main`,
+using GitHub-hosted runners. That authenticated manifest covers the package,
+source identity, installed lifecycle evidence and release/build/run records;
+rewriting assets and self-reported checksums cannot replace the signed evidence.
+The publisher may run on a newer main revision while draining earlier revisions;
+the signed manifest binds the package source rather than treating the publisher's
+checkout SHA as the package source. Both package and manifest attestations are
+required publication outputs. Missing/unsupported provenance fails closed.
+Unpublished revisions still require current successful exact-source CI and review,
+downloadable tested package bytes and verified input/lifecycle checksums before
+attestation or publication. Expired unpublished artifacts require reconciliation.
+For existing releases,
 any mismatch or partial publication fails without overwrite and needs owner
 reconciliation. Workflow concurrency serializes publication. Every completion scans pending
 first-parent main revisions since introduction of this policy, oldest first, so
