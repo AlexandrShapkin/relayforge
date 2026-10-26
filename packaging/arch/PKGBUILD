@@ -12,7 +12,10 @@ makedepends=('rust' 'licenses')
 # A checksummed git archive is created from the exact committed revision, never HOME.
 source=('relayforge-source.tar')
 sha256sums=('@SOURCE_SHA256@')
-options=('!strip' '!debug')
+# GCC LTO objects from ring/AWS-LC cannot be linked by Rust's LLVM linker.
+# Arch Rust package guidelines recommend !lto for these bundled C crates;
+# this does not disable Rust's own optimization or other hardening flags.
+options=('!strip' '!debug' '!lto')
 
 build() {
     cd "$srcdir"
