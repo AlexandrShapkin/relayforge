@@ -103,10 +103,16 @@ def pending_main(trigger_sha, commits, releases, get=api):
         tag, package = source_names(sha)
         matches = [r for r in releases if r['tag_name'] == tag or r['target_commitish'] == sha]
         if matches:
-            if len(matches) != 1 or matches[0]['draft']:
-                raise ValueError('conflicting or incomplete release history')
-            verify_published(matches[0], sha, tag, package, get)
-            continue
+            if len(matches) != 1:
+                raise ValueError('conflicting release history')
+            if (matches[0]['tag_name'] != tag or
+                    matches[0]['target_commitish'] != sha):
+                raise ValueError('existing release source conflict')
+            if not matches[0]['draft']:
+                verify_published(matches[0], sha, tag, package, get)
+                continue
+            # A partial draft is not a published historical release. Recover
+            # only through fresh exact-head CI and independent review.
         state, runs = inspect_runs(sha, get)
         if state == 'pending':
             break  # preserve monotonic ordering until the predecessor completes
@@ -264,6 +270,24 @@ def tag_commit(tag, get=api):
     raise ValueError('tag chain exceeds verification bound')
 
 
+def verify_draft_uploaded(directory, names, release, sha, tag, get=api):
+    """Check a private partial draft by GitHub's stored asset digests, never by a tag lookup."""
+    if (release.get('draft') is not True or type(release.get('id')) is not int
+            or release['tag_name'] != tag or release['target_commitish'] != sha):
+        raise ValueError('draft release source/identity conflict')
+    if tag_commit(tag, get) != sha:
+        raise ValueError('draft release tag target conflict')
+    assets = release['assets']
+    if len(assets) != len(names) or {a['name'] for a in assets} != names:
+        raise ValueError('draft release asset inventory mismatch')
+    for asset in assets:
+        data = (directory / asset['name']).read_bytes()
+        expected = 'sha256:' + hashlib.sha256(data).hexdigest()
+        if (type(asset.get('id')) is not int or type(asset.get('size')) is not int
+                or asset['size'] != len(data) or asset.get('digest') != expected):
+            raise ValueError('draft release asset digest mismatch')
+
+
 def verify_existing(directory, names, release, sha, tag, get=api):
     if release['tag_name'] != tag or release['target_commitish'] != sha:
         raise ValueError('existing release source conflict')
@@ -298,11 +322,24 @@ def publish(directory, sha, runs):
         raise ValueError('source no longer belongs to main history')
     # Do not depend on GitHub setting immutability to avoid our own overwrites.
     releases = all_releases()
-    existing = next((r for r in releases if r['tag_name'] == tag), None)
+    claims = [r for r in releases if r['tag_name'] == tag or r['target_commitish'] == sha]
+    if len(claims) > 1:
+        raise ValueError('conflicting release identities; owner reconciliation required')
+    existing = claims[0] if claims else None
     if existing:
-        verify_existing(directory, names, existing, sha, tag)
         if existing['draft']:
-            raise ValueError('matching draft retained; owner must reconcile incomplete publication')
+            # A prior partial write is recoverable only using the same tested
+            # bytes, signed local manifest, exact tag/commit and GH-stored digests.
+            fresh = api(f"releases/{existing['id']}")
+            verify_draft_uploaded(directory, names, fresh, sha, tag)
+            completed = api(f"releases/{fresh['id']}", '-X', 'PATCH', '-F', 'draft=false')
+            if (completed['id'] != fresh['id'] or completed['draft'] is not False
+                    or completed['tag_name'] != tag):
+                raise ValueError('draft publication confirmation mismatch')
+            verify_existing(directory, names, completed, sha, tag)
+            print(f'recovered verified immutable release: {tag}')
+            return
+        verify_existing(directory, names, existing, sha, tag)
         print(f'exact immutable release already published: {tag}')
         return
     # Enforce monotonic Arch and SemVer order, not lexical short-SHA ordering.
@@ -339,9 +376,19 @@ provenance are attached. These are CI-tested bytes, not reproducible-build proof
     subprocess.run(['gh', 'release', 'create', tag, '--repo', REPO, '--target', sha,
                     '--verify-tag', '--draft', '--title', f'RelayForge {tag}', '--notes-file', str(notes),
                     *[str(directory / n) for n in sorted(names)]], check=True)
-    release = api(f'releases/tags/{tag}')
-    verify_existing(directory, names, release, sha, tag)
-    subprocess.run(['gh', 'release', 'edit', tag, '--repo', REPO, '--draft=false'], check=True)
+    # GET /releases/tags/{tag} may 404 for drafts even when the draft and tag
+    # exist; list by immutable identity and re-read the stable release ID.
+    matches = [r for r in all_releases() if r['tag_name'] == tag
+               or r['target_commitish'] == sha]
+    if len(matches) != 1 or matches[0]['draft'] is not True:
+        raise ValueError('new draft release missing or ambiguous')
+    draft = api(f"releases/{matches[0]['id']}")
+    verify_draft_uploaded(directory, names, draft, sha, tag)
+    published = api(f"releases/{draft['id']}", '-X', 'PATCH', '-F', 'draft=false')
+    if (published['id'] != draft['id'] or published['draft'] is not False
+            or published['tag_name'] != tag):
+        raise ValueError('draft publication confirmation mismatch')
+    verify_existing(directory, names, published, sha, tag)
 
 
 def record_urls(runs):
