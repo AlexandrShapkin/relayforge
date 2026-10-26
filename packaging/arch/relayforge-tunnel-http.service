@@ -1,0 +1,25 @@
+[Unit]
+Description=RelayForge OAuth HTTP Secure MCP Tunnel (explicit opt-in)
+After=network-online.target relayforge-mcp-oauth.service
+Wants=network-online.target
+Requires=relayforge-mcp-oauth.service
+ConditionPathExists=/usr/bin/tunnel-client
+ConditionPathExists=%h/.config/relayforge/oauth-tunnel/relayforge-oauth.yaml
+ConditionPathExists=%h/.config/relayforge/oauth-tunnel/runtime-key
+
+[Service]
+Type=simple
+LoadCredential=profile:%h/.config/relayforge/oauth-tunnel/relayforge-oauth.yaml
+LoadCredential=runtime-key:%h/.config/relayforge/oauth-tunnel/runtime-key
+ExecStart=/usr/bin/env -i HOME=%h PATH=/usr/bin LANG=C.UTF-8 /usr/bin/tunnel-client run --config %d/profile --control-plane.api-key file:%d/runtime-key --mcp.server-url channel=main,url=http://127.0.0.1:8766/mcp --harpoon.allow-plaintext-http
+Restart=on-failure
+RestartSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+UMask=0077
+TimeoutStopSec=5
+
+[Install]
+WantedBy=default.target
