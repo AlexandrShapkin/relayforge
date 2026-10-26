@@ -9,6 +9,12 @@ if ! grep -qx 'VERSION_ID="24.04"' /etc/os-release; then
     echo 'Ubuntu 24.04 required' >&2
     exit 1
 fi
+# The stock Ubuntu Docker image excludes /usr/share/doc/* during unpack.
+# Remove that CI-image-only exclusion before installing the tested package.
+# The installed-file audit below refuses any still-omitted package payload.
+if [ -f /etc/dpkg/dpkg.cfg.d/docker ]; then
+    sed -i '/^[[:space:]]*path-exclude=\/usr\/share\/doc\/\*/d' /etc/dpkg/dpkg.cfg.d/docker
+fi
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends python3 bubblewrap git openssh-client iproute2 systemd libgcc-s1 util-linux ca-certificates
@@ -59,17 +65,67 @@ mkdir -p /home/probe/.config/relayforge
 printf 'retain\n' > /home/probe/.config/relayforge/unrelated-record
 # A real dpkg install, not only extracted-file inspection.
 dpkg -i "${pkg}"
-dpkg --verify relayforge
+# dpkg --verify can return zero while reporting missing excluded files.
+# Require both a successful exit and strictly empty diagnostic output.
+verify_installed() {
+    local report
+    report=$(dpkg --verify relayforge 2>&1) || {
+        printf '%s\n' "${report}" >&2
+        return 1
+    }
+    if [ -n "${report}" ]; then
+        printf 'installed package verification discrepancies:\n%s\n' "${report}" >&2
+        return 1
+    fi
+}
+verify_installed
 python3 - <<'PY'
-import hashlib,json
+import hashlib
+import io
+import json
 from pathlib import Path
-record=json.loads(Path('/usr/share/relayforge/source.json').read_text())
-for name,digest in record['binaries_sha256'].items():
-    assert hashlib.sha256((Path('/usr/bin')/name).read_bytes()).hexdigest()==digest
+import stat
+import subprocess
+import tarfile
+
+record = json.loads(Path('/usr/share/relayforge/source.json').read_text())
+pkg, = Path('.').glob('relayforge_*.deb')
+archive = subprocess.check_output(['dpkg-deb', '--fsys-tarfile', str(pkg)])
+with tarfile.open(fileobj=io.BytesIO(archive)) as stream:
+    files = {m.name.lstrip('./'): stream.extractfile(m).read()
+             for m in stream.getmembers() if m.isfile()}
+assert files, 'empty packaged payload'
+listed = subprocess.check_output(['dpkg-query', '--listfiles', 'relayforge'],
+                                 text=True).splitlines()
+registered = {p.lstrip('/') for p in listed if p.startswith('/')}
+assert files.keys() <= registered, 'missing dpkg-owned file registrations'
+for name, expected_bytes in files.items():
+    path = Path('/') / name
+    info = path.lstat()  # missing or symlinked files must fail
+    assert stat.S_ISREG(info.st_mode), f'not a regular file: {name}'
+    assert info.st_uid == 0 and info.st_gid == 0, f'wrong owner: {name}'
+    assert path.read_bytes() == expected_bytes, f'installed payload differs: {name}'
+for example in ('resource.example.json', 'tunnel.example.json'):
+    path = Path('/usr/share/doc/relayforge') / example
+    assert json.loads(path.read_text()), f'invalid installed example: {example}'
+for name, digest in record['binaries_sha256'].items():
+    assert hashlib.sha256((Path('/usr/bin') / name).read_bytes()).hexdigest() == digest
 assert not list(Path('/etc/systemd').rglob('*.wants/relayforge*'))
 assert not list(Path('/home').rglob('*.wants/relayforge*'))
 assert not Path('/etc/relayforge').exists()
+print('installed package: every owned file exists and matches archive bytes: PASS')
 PY
+# Negative regression: a missing documentation file must fail verification,
+# even though dpkg may exit with status zero. Restore only the CI fixture.
+doc=/usr/share/doc/relayforge/tunnel.example.json
+mv "${doc}" /tmp/relayforge-ci-tunnel-example.json
+if verify_installed >/dev/null 2>&1; then
+    echo 'missing packaged documentation incorrectly passed verification' >&2
+    exit 1
+fi
+mv /tmp/relayforge-ci-tunnel-example.json "${doc}"
+verify_installed
+printf 'missing-file verification negative test: PASS\n'
 for unit in relayforge-mcp-http relayforge-mcp-oauth; do
     test -f "/usr/lib/systemd/user/${unit}.service"
     systemd-analyze verify "/usr/lib/systemd/user/${unit}.service"
