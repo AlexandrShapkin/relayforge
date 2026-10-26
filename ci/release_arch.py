@@ -97,19 +97,35 @@ def main_history():
 
 def pending_main(trigger_sha, commits, releases, get=api):
     """Drain missed completion events in source order; CI failure never publishes."""
-    published = {r['target_commitish'] for r in releases if not r['draft']}
     plan = []
     for sha in commits:
-        # Re-run the triggering immutable release through byte verification.
-        if sha in published and sha != trigger_sha:
-            continue
         state, runs = inspect_runs(sha, get)
+        claims = [r for r in releases if r['target_commitish'] == sha]
+        if claims and state != 'success':
+            raise ValueError('existing release lacks successful exact-head CI')
         if state == 'pending':
             break  # preserve monotonic ordering until the predecessor completes
         if state == 'failed':
             continue  # failed exact-main source is never a distributable release
         if not accepted_merge(sha, get):
             raise ValueError(f'independent review handoff missing for main {sha}')
+        if releases:
+            # Reconstruct expected bytes from tested CI, never Release metadata.
+            # Missing/expired artifacts require owner reconciliation, not a skip.
+            with tempfile.TemporaryDirectory(prefix='relayforge-history-') as tmp:
+                directory = Path(tmp)
+                subprocess.run(['gh', 'run', 'download', str(runs['rdc-independent.yml']),
+                                '--repo', REPO, '--name', f'relayforge-arch-source-{sha}',
+                                '--dir', tmp], check=True)
+                identity, names = release_files(directory, sha, runs)
+                matches = [r for r in releases if r['tag_name'] == identity['tag']
+                           or r['target_commitish'] == sha]
+                if matches:
+                    if len(matches) != 1 or matches[0]['draft']:
+                        raise ValueError('conflicting or incomplete release history')
+                    verify_existing(directory, names, matches[0], sha, identity['tag'], get)
+                    if sha != trigger_sha:
+                        continue
         plan.append({'sha': sha, 'run_id': runs['rdc-independent.yml']})
     if len(plan) > 100:
         raise ValueError('too many pending releases; owner reconciliation required')
@@ -171,12 +187,36 @@ def release_files(directory, sha, runs):
     return identity, names | {'SHA256SUMS'}
 
 
-def verify_existing(directory, names, release, sha, tag):
+def tag_commit(tag, get=api):
+    """Resolve the remote ref, peeling annotated tags to a commit, with a bound."""
+    ref = get(f'git/ref/tags/{tag}')
+    if ref['ref'] != f'refs/tags/{tag}':
+        raise ValueError('existing tag ref conflict')
+    obj = ref['object']
+    seen = set()
+    for _ in range(16):
+        if not re.fullmatch('[0-9a-f]{40}', obj['sha']):
+            raise ValueError('invalid tag object identity')
+        if obj['type'] == 'commit':
+            return obj['sha']
+        if obj['type'] != 'tag' or obj['sha'] in seen:
+            raise ValueError('tag does not resolve to a commit')
+        seen.add(obj['sha'])
+        annotated = get(f"git/tags/{obj['sha']}")
+        if annotated['sha'] != obj['sha']:
+            raise ValueError('annotated tag identity conflict')
+        obj = annotated['object']
+    raise ValueError('tag chain exceeds verification bound')
+
+
+def verify_existing(directory, names, release, sha, tag, get=api):
     if release['tag_name'] != tag or release['target_commitish'] != sha:
         raise ValueError('existing release source conflict')
     assets = release['assets']
     if len(assets) != len(names) or {a['name'] for a in assets} != names:
         raise ValueError('existing immutable asset inventory differs; no overwrite')
+    if tag_commit(tag, get) != sha:
+        raise ValueError('existing immutable tag commit conflict')
     with tempfile.TemporaryDirectory(prefix='relayforge-release-verify-') as tmp:
         subprocess.run(['gh', 'release', 'download', tag, '--repo', REPO, '--dir', tmp], check=True)
         for name in names:

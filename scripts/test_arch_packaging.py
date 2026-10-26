@@ -122,9 +122,104 @@ class GateTests(unittest.TestCase):
         with patch.object(release, 'inspect_runs', side_effect=inspect), patch.object(release, 'accepted_merge', return_value=True):
             plan = release.pending_main(commits[-1], commits, [], self.api)
             self.assertEqual([p['sha'] for p in plan], commits)
-            published = [{'target_commitish': commits[0], 'draft': False}]
-            self.assertEqual([p['sha'] for p in release.pending_main(commits[-1], commits, published, self.api)], commits[1:])
-            self.assertEqual(release.pending_main(commits[0], commits[:1], published, self.api)[0]['sha'], commits[0])
+            published = [{'target_commitish': commits[0], 'tag_name': 'v0.1.10', 'draft': False}]
+            with patch.object(release.subprocess, 'run'), patch.object(release, 'release_files', return_value=({'tag': 'v0.1.10'}, {'package'})), patch.object(release, 'verify_existing') as verify:
+                self.assertEqual(release.pending_main(commits[-1], commits[:1], published, self.api), [])
+                verify.assert_called_once()
+                self.assertEqual(release.pending_main(commits[0], commits[:1], published, self.api)[0]['sha'], commits[0])
+
+    def test_remote_tag_peels_lightweight_and_nested_annotated_tags(self):
+        tag = 'v0.1.10'
+        for depth in (0, 1, 2):
+            objects = ['b' * 40, 'c' * 40][:depth] + [self.sha]
+            def get(path):
+                if path == f'git/ref/tags/{tag}':
+                    return {'ref': f'refs/tags/{tag}', 'object': {
+                        'type': 'tag' if depth else 'commit', 'sha': objects[0]}}
+                index = objects.index(path.rsplit('/', 1)[1])
+                return {'sha': objects[index], 'object': {
+                    'type': 'commit' if index + 1 == depth else 'tag', 'sha': objects[index + 1]}}
+            with self.subTest(depth=depth):
+                self.assertEqual(release.tag_commit(tag, get), self.sha)
+
+    def test_matching_release_metadata_cannot_hide_wrong_git_tag(self):
+        existing = {'tag_name': 'v0.1.10', 'target_commitish': self.sha,
+                    'assets': [{'name': 'package'}]}
+        for annotated in (False, True):
+            def get(path):
+                obj = {'type': 'commit', 'sha': 'b' * 40}
+                if path.startswith('git/ref/'):
+                    return {'ref': 'refs/tags/v0.1.10', 'object':
+                            {'type': 'tag', 'sha': 'c' * 40} if annotated else obj}
+                return {'sha': 'c' * 40, 'object': obj}
+            with self.subTest(annotated=annotated), patch.object(release.subprocess, 'run') as download:
+                with self.assertRaisesRegex(ValueError, 'tag commit conflict'):
+                    release.verify_existing(Path('/unused'), {'package'}, existing,
+                                            self.sha, 'v0.1.10', get)
+                download.assert_not_called()
+
+    def test_tag_noncommit_cycles_missing_and_malformed_objects_fail_closed(self):
+        for obj in ({'type': 'tree', 'sha': self.sha},
+                    {'type': 'tag', 'sha': self.sha},
+                    {'type': 'commit', 'sha': 'short'}):
+            def get(path):
+                return {'ref': 'refs/tags/v0.1.10', 'sha': self.sha, 'object': obj}
+            with self.subTest(obj=obj), self.assertRaises(ValueError):
+                release.tag_commit('v0.1.10', get)
+        with self.assertRaises(RuntimeError):
+            release.tag_commit('v0.1.10', lambda _: (_ for _ in ()).throw(RuntimeError('404')))
+
+    def test_history_rejects_unrelated_draft_duplicate_missing_and_changed_assets(self):
+        tag = 'v0.1.10'
+        existing = {'tag_name': tag, 'target_commitish': self.sha, 'draft': False,
+                    'assets': [{'name': 'package'}]}
+        cases = [([dict(existing, tag_name='v9.9.9')], 'source conflict'),
+                 ([dict(existing, target_commitish='b' * 40)], 'source conflict'),
+                 ([dict(existing, draft=True)], 'incomplete release history'),
+                 ([existing, existing], 'incomplete release history'),
+                 ([dict(existing, assets=[])], 'inventory differs'),
+                 ([existing], 'bytes differ')]
+        for releases, message in cases:
+            with self.subTest(message=message):
+                def download(args, **kwargs):
+                    if args[:3] == ['gh', 'release', 'download']:
+                        (Path(args[args.index('--dir') + 1]) / 'package').write_bytes(b'changed')
+                def files(destination, sha, runs):
+                    (destination / 'package').write_bytes(b'expected')
+                    return {'tag': tag}, {'package'}
+                def get(path):
+                    return {'ref': f'refs/tags/{tag}', 'object': {'type': 'commit', 'sha': self.sha}}
+                with patch.object(release, 'inspect_runs', return_value=('success', {'rdc-independent.yml': 2})), patch.object(release, 'accepted_merge', return_value=True), patch.object(release, 'release_files', side_effect=files), patch.object(release.subprocess, 'run', side_effect=download):
+                    with self.assertRaisesRegex(ValueError, message):
+                        release.pending_main('b' * 40, [self.sha], releases, get)
+
+    def test_history_skips_only_after_real_tag_and_byte_verification(self):
+        tag = 'v0.1.10'
+        existing = {'tag_name': tag, 'target_commitish': self.sha, 'draft': False,
+                    'assets': [{'name': 'package'}]}
+        downloads = []
+        def download(args, **kwargs):
+            downloads.append(args[:3])
+            if args[:3] == ['gh', 'release', 'download']:
+                (Path(args[args.index('--dir') + 1]) / 'package').write_bytes(b'tested')
+        def files(destination, sha, runs):
+            (destination / 'package').write_bytes(b'tested')
+            return {'tag': tag}, {'package'}
+        def get(path):
+            return {'ref': f'refs/tags/{tag}', 'object': {'type': 'commit', 'sha': self.sha}}
+        with patch.object(release, 'inspect_runs', return_value=('success', {'rdc-independent.yml': 2})), patch.object(release, 'accepted_merge', return_value=True), patch.object(release, 'release_files', side_effect=files), patch.object(release.subprocess, 'run', side_effect=download):
+            self.assertEqual(release.pending_main('b' * 40, [self.sha], [existing], get), [])
+        self.assertEqual(downloads, [['gh', 'run', 'download'], ['gh', 'release', 'download']])
+
+    def test_history_missing_ci_or_artifacts_cannot_be_skipped(self):
+        existing = {'tag_name': 'v0.1.10', 'target_commitish': self.sha, 'draft': False}
+        for state in ('pending', 'failed'):
+            with patch.object(release, 'inspect_runs', return_value=(state, None)):
+                with self.assertRaisesRegex(ValueError, 'exact-head CI'):
+                    release.pending_main('b' * 40, [self.sha], [existing])
+        with patch.object(release, 'inspect_runs', return_value=('success', {'rdc-independent.yml': 2})), patch.object(release, 'accepted_merge', return_value=True), patch.object(release.subprocess, 'run', side_effect=RuntimeError('artifact expired')):
+            with self.assertRaisesRegex(RuntimeError, 'artifact expired'):
+                release.pending_main('b' * 40, [self.sha], [existing])
 
     def test_pending_predecessor_blocks_later_publication(self):
         commits = ['a' * 40, 'b' * 40]
