@@ -9,12 +9,14 @@ if ! grep -qx 'VERSION_ID="24.04"' /etc/os-release; then
     echo 'Ubuntu 24.04 required' >&2
     exit 1
 fi
-# The stock Ubuntu Docker image excludes /usr/share/doc/* during unpack.
-# Remove that CI-image-only exclusion before installing the tested package.
-# The installed-file audit below refuses any still-omitted package payload.
-if [ -f /etc/dpkg/dpkg.cfg.d/docker ]; then
-    sed -i '/^[[:space:]]*path-exclude=\/usr\/share\/doc\/\*/d' /etc/dpkg/dpkg.cfg.d/docker
-fi
+# Ubuntu Docker images may apply dpkg path-exclude rules via different
+# config filenames. Disable these size-optimization exclusions ONLY inside this
+# disposable container so the full package payload (including OAuth examples)
+# is actually installed. The byte-for-byte inventory audit below fails closed.
+for config in /etc/dpkg/dpkg.cfg /etc/dpkg/dpkg.cfg.d/*; do
+    [ -f "${config}" ] || continue
+    sed -i '/^[[:space:]]*path-exclude[[:space:]]*=/d' "${config}"
+done
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends python3 bubblewrap git openssh-client iproute2 systemd libgcc-s1 util-linux ca-certificates
