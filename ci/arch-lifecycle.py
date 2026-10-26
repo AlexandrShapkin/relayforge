@@ -65,6 +65,9 @@ def main():
         reply = json.loads(run('runuser', '-u', 'builder', '--', '/usr/bin/relayforge-agent',
                                input='{"version":0,"operation":"shell","command":"id"}\n'))
         assert reply['ok'] is False
+        reply = json.loads(run('runuser', '-u', 'builder', '--', '/usr/bin/relayforge-agent',
+                               input='{"version":1,"operation":"device.status"}\n'))
+        assert reply['ok'] is True
         assert sentinel.read_text() == 'retained' and token.read_text() == 'a7' * 32
 
     # Missing/truncated/not-an-archive: pacman must fail without installation.

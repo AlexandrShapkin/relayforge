@@ -68,7 +68,8 @@ def accepted_merge(sha, get=api):
         refusal = f'Independent technical REJECT: {head}'
         handoffs = [c for c in comments if c['user']['login'] == REPO.split('/')[0]
                     and (marker in c['body'].splitlines() or refusal in c['body'].splitlines())]
-        if handoffs and marker in handoffs[-1]['body'].splitlines():
+        if (handoffs and marker in handoffs[-1]['body'].splitlines()
+                and refusal not in handoffs[-1]['body'].splitlines()):
             return True
     return False
 
@@ -200,7 +201,7 @@ if __name__ == '__main__':
     runs = accepted_runs(args.sha)
     if args.command == 'gate':
         with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
-            output.write(f'ready={str(runs is not None).lower()}\n')
+            output.write(f'ready={str(runs is not None and accepted_merge(args.sha)).lower()}\n')
             if runs:
                 output.write(f"run_id={runs['rdc-independent.yml']}\n")
     elif runs:
