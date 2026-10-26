@@ -179,6 +179,12 @@ def main():
     binary.write_bytes(b'corrupt fixture')
     run('runuser', '-u', 'builder', '--', '/usr/bin/relayforge-tunnel', 'check', ok=False)
     binary.unlink()
+    userctl = ['runuser', '-u', 'builder', '--', 'env', 'XDG_RUNTIME_DIR=/run/user/1000',
+               'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus', 'systemctl', '--user']
+    run(*userctl, 'reset-failed', 'relayforge-tunnel.service')
+    run(*userctl, 'start', 'relayforge-tunnel.service')
+    assert run(*userctl, 'show', '-p', 'ConditionResult', '--value', 'relayforge-tunnel.service').strip() == 'no'
+    assert run(*userctl, 'show', '-p', 'MainPID', '--value', 'relayforge-tunnel.service').strip() == '0'
     run('runuser', '-u', 'builder', '--', '/usr/bin/relayforge-tunnel', 'check', ok=False)
     run('pacman', '-U', '--noconfirm', str(tunnel))
     assert binary.read_bytes() == saved

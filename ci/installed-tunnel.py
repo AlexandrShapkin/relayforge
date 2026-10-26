@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import time
 
 
@@ -85,6 +86,8 @@ for case in ('command', 'key-mode', 'key-symlink', 'missing-key', 'profile-mode'
 if not key.exists(): key.write_text('ci-dummy-key-never-valid')
 key.chmod(0o600); profile.chmod(0o600); profile.write_text(json.dumps(valid))
 ctl('reset-failed', unit, check=False)
+ctl('set-environment', 'MCP_COMMAND=/bin/sh', 'TUNNEL_CLIENT_PROFILE=legacy',
+    'CONTROL_PLANE_BASE_URL=https://override.invalid')
 ctl('start', unit)
 try:
     for _ in range(50):
@@ -99,8 +102,13 @@ try:
     assert b'--config' in cmdline and b'--control-plane.api-key' in cmdline
     environment = Path(f'/proc/{pid}/environ').read_bytes().split(b'\0')
     assert all(e.split(b'=')[0] in (b'HOME', b'PATH', b'LANG', b'') for e in environment)
+except BaseException:
+    # Only dummy CI profile/key data exists in this disconnected container.
+    print(run('journalctl', '--user', '-u', unit, '--no-pager', '-n', '35').stdout, file=sys.stderr)
+    raise
 finally:
     ctl('stop', unit)
+    ctl('unset-environment', 'MCP_COMMAND', 'TUNNEL_CLIENT_PROFILE', 'CONTROL_PLANE_BASE_URL')
 assert (legacy / 'relayforge-local.yaml').read_text() == 'retained legacy fixture'
 assert ctl('is-enabled', unit, check=False).stdout.strip() == 'disabled'
 print('installed tunnel client CLI and denied unit startup: PASS')

@@ -144,6 +144,41 @@ class SupplyChainTests(unittest.TestCase):
                 with self.assertRaises(ValueError): upstream.verify(directory, lock)
                 verifier.assert_not_called()
 
+    def test_release_assets_use_committed_historical_contract(self):
+        sha = 'a' * 40
+        with patch.object(release, 'command', return_value=''):
+            self.assertEqual(release.tunnel_assets(sha), set())
+        lock = json.loads((ROOT / 'packaging/arch/tunnel-client/upstream.json').read_text())
+        with patch.object(release, 'command', side_effect=['tracked lock', json.dumps(lock)]):
+            self.assertEqual(release.tunnel_assets(sha), {'tunnel-client-0.0.18-1-x86_64.pkg.tar.zst'})
+        lock['version'] = '../escape'
+        with patch.object(release, 'command', side_effect=['tracked lock', json.dumps(lock)]):
+            with self.assertRaises(ValueError): release.tunnel_assets(sha)
+
+    def test_release_manifest_includes_both_tested_packages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp); sha = 'a' * 40
+            pkgver = '0.1.0.r10.g' + sha[:12]
+            package = f'relayforge-{pkgver}-1-x86_64.pkg.tar.zst'
+            tunnel = 'tunnel-client-0.0.18-1-x86_64.pkg.tar.zst'
+            for name in (package, tunnel, 'arch-packages.txt', 'rustc.txt'):
+                (directory / name).write_bytes(b'tested fixture')
+            digest = hashlib.sha256(b'tested fixture').hexdigest()
+            (directory / 'source.json').write_text(json.dumps({'source_sha': sha, 'pkgver': pkgver,
+                'tag': 'v0.1.10', 'activation_allowed': False, 'tunnel_package': tunnel}))
+            (directory / 'lifecycle.json').write_text(json.dumps({'source_sha': sha, 'package': package,
+                'sha256': digest, 'lifecycle': 'PASS', 'tunnel_package': tunnel,
+                'tunnel_sha256': digest, 'tunnel_lifecycle': 'PASS'}))
+            original = ''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n'
+                               for p in sorted(directory.iterdir()))
+            (directory / 'SHA256SUMS').write_text(original)
+            with patch.object(release, 'tunnel_assets', return_value={tunnel}):
+                _, assets = release.release_files(directory, sha, {'tests.yml': 1})
+                self.assertEqual(assets, release.ASSETS | {package, tunnel})
+                self.assertIn(tunnel, (directory / 'SHA256SUMS').read_text())
+                (directory / tunnel).write_bytes(b'tampered')
+                with self.assertRaises(ValueError): release.release_files(directory, sha, {'tests.yml': 1})
+
     def test_release_requires_independent_package_and_lifecycle(self):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp); name = 'tunnel-client-0.0.18-1-x86_64.pkg.tar.zst'
