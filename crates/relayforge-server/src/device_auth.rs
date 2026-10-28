@@ -30,9 +30,30 @@ pub enum DeviceAuthError {
     AlreadyPending,
     NotPending,
     InvalidChallenge,
+    TransportMismatch,
     Expired,
     InvalidSignature,
     RandomUnavailable,
+}
+
+/// Opaque 32-byte TLS exporter output bound to a single verified connection.
+///
+/// The QUIC/WSS adapter must call its TLS 1.3 exporter with a dedicated
+/// RelayForge exporter label and a stable context, on the *authenticated
+/// connection*. Never construct this from a request body, peer header,
+/// reusable key or network-supplied nonce. This type does not itself verify
+/// TLS; there is no network-facing adapter in this source-only stage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransportBinding([u8; 32]);
+
+impl TransportBinding {
+    pub fn from_tls_exporter(output: [u8; 32]) -> Self {
+        Self(output)
+    }
+}
+
+fn matches_binding(a: &[u8; 32], b: &TransportBinding) -> bool {
+    ring::constant_time::verify_slices_are_equal(a, &b.0).is_ok()
 }
 
 /// One owner-approved public key, loaded from trusted persistence.
@@ -52,6 +73,7 @@ struct DeviceRecord {
 #[derive(Debug)]
 struct PendingChallenge {
     nonce: [u8; NONCE_LEN],
+    binding: TransportBinding,
     expires_at: Instant,
 }
 
@@ -83,6 +105,7 @@ impl DeviceChallenge {
 pub struct VerifiedDevice {
     device_id: String,
     session_nonce: String,
+    binding: TransportBinding,
     expires_at: Instant,
 }
 
@@ -99,6 +122,10 @@ impl VerifiedDevice {
 
     pub fn expires_at(&self) -> Instant {
         self.expires_at
+    }
+
+    pub fn matches_transport(&self, binding: &TransportBinding) -> bool {
+        matches_binding(&self.binding.0, binding)
     }
 }
 
@@ -132,13 +159,19 @@ fn valid_id(value: &str, max_len: usize) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
 }
 
-fn signing_bytes(coordinator_id: &str, device_id: &str, nonce: &[u8; NONCE_LEN]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(DOMAIN.len() + coordinator_id.len() + device_id.len() + 44);
+fn signing_bytes(
+    coordinator_id: &str,
+    device_id: &str,
+    nonce: &[u8; NONCE_LEN],
+    binding: &TransportBinding,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(DOMAIN.len() + coordinator_id.len() + device_id.len() + 80);
     out.extend_from_slice(DOMAIN);
     for part in [
         coordinator_id.as_bytes(),
         device_id.as_bytes(),
         nonce.as_slice(),
+        binding.0.as_slice(),
     ] {
         out.extend_from_slice(&(part.len() as u32).to_be_bytes());
         out.extend_from_slice(part);
@@ -195,6 +228,7 @@ impl DeviceAuthenticator {
     pub fn begin(
         &mut self,
         device_id: &str,
+        binding: &TransportBinding,
         now: Instant,
     ) -> Result<DeviceChallenge, DeviceAuthError> {
         match self.devices.get(device_id) {
@@ -217,13 +251,14 @@ impl DeviceAuthenticator {
             device_id.into(),
             PendingChallenge {
                 nonce,
+                binding: binding.clone(),
                 expires_at: now + self.challenge_ttl,
             },
         );
         Ok(DeviceChallenge {
             device_id: device_id.into(),
             nonce,
-            signing_bytes: signing_bytes(&self.coordinator_id, device_id, &nonce),
+            signing_bytes: signing_bytes(&self.coordinator_id, device_id, &nonce, binding),
         })
     }
 
@@ -235,6 +270,7 @@ impl DeviceAuthenticator {
         device_id: &str,
         nonce: &[u8; NONCE_LEN],
         signature: &[u8],
+        binding: &TransportBinding,
         now: Instant,
     ) -> Result<VerifiedDevice, DeviceAuthError> {
         let record = self
@@ -251,6 +287,9 @@ impl DeviceAuthenticator {
         if &pending.nonce != nonce {
             return Err(DeviceAuthError::InvalidChallenge);
         }
+        if !matches_binding(&pending.binding.0, binding) {
+            return Err(DeviceAuthError::TransportMismatch);
+        }
         let pending = self
             .pending
             .remove(device_id)
@@ -258,13 +297,14 @@ impl DeviceAuthenticator {
         if now >= pending.expires_at {
             return Err(DeviceAuthError::Expired);
         }
-        let payload = signing_bytes(&self.coordinator_id, device_id, nonce);
+        let payload = signing_bytes(&self.coordinator_id, device_id, nonce, binding);
         UnparsedPublicKey::new(&ED25519, record.public_key)
             .verify(&payload, signature)
             .map_err(|_| DeviceAuthError::InvalidSignature)?;
         Ok(VerifiedDevice {
             device_id: device_id.into(),
             session_nonce: nonce_hex(nonce),
+            binding: pending.binding,
             expires_at: pending.expires_at,
         })
     }
@@ -301,6 +341,10 @@ mod tests {
         )
     }
 
+    fn binding() -> TransportBinding {
+        TransportBinding::from_tls_exporter([3; 32])
+    }
+
     fn auth(device: TrustedDevice) -> DeviceAuthenticator {
         DeviceAuthenticator::new("relayforge.ru0", [device], 2, Duration::from_secs(30)).unwrap()
     }
@@ -310,16 +354,16 @@ mod tests {
         let now = Instant::now();
         let (device, keypair) = key("thinkpad");
         let mut verifier = auth(device);
-        let challenge = verifier.begin("thinkpad", now).unwrap();
+        let challenge = verifier.begin("thinkpad", &binding(), now).unwrap();
         assert_eq!(challenge.device_id(), "thinkpad");
         let sig = keypair.sign(challenge.signing_bytes());
         let verified = verifier
-            .complete("thinkpad", challenge.nonce(), sig.as_ref(), now)
+            .complete("thinkpad", challenge.nonce(), sig.as_ref(), &binding(), now)
             .unwrap();
         assert_eq!(verified.device_id(), "thinkpad");
         assert_eq!(verified.session_nonce(), nonce_hex(challenge.nonce()));
         assert!(matches!(
-            verifier.complete("thinkpad", challenge.nonce(), sig.as_ref(), now),
+            verifier.complete("thinkpad", challenge.nonce(), sig.as_ref(), &binding(), now),
             Err(DeviceAuthError::NotPending)
         ));
     }
@@ -330,17 +374,17 @@ mod tests {
         let (device, keypair) = key("thinkpad");
         let mut verifier = auth(device);
         assert!(matches!(
-            verifier.begin("unknown", now),
+            verifier.begin("unknown", &binding(), now),
             Err(DeviceAuthError::UnknownDevice)
         ));
-        let challenge = verifier.begin("thinkpad", now).unwrap();
+        let challenge = verifier.begin("thinkpad", &binding(), now).unwrap();
         let sig = keypair.sign(challenge.signing_bytes());
         assert!(matches!(
-            verifier.complete("unknown", challenge.nonce(), sig.as_ref(), now),
+            verifier.complete("unknown", challenge.nonce(), sig.as_ref(), &binding(), now),
             Err(DeviceAuthError::UnknownDevice)
         ));
         assert!(verifier
-            .complete("thinkpad", challenge.nonce(), sig.as_ref(), now)
+            .complete("thinkpad", challenge.nonce(), sig.as_ref(), &binding(), now)
             .is_ok());
     }
 
@@ -350,22 +394,47 @@ mod tests {
         let (device, owner) = key("thinkpad");
         let (_, attacker) = key("attacker");
         let mut verifier = auth(device);
-        let challenge = verifier.begin("thinkpad", now).unwrap();
+        let challenge = verifier.begin("thinkpad", &binding(), now).unwrap();
         let bad = attacker.sign(challenge.signing_bytes());
         assert_eq!(
-            verifier.complete("thinkpad", challenge.nonce(), bad.as_ref(), now),
+            verifier.complete("thinkpad", challenge.nonce(), bad.as_ref(), &binding(), now),
             Err(DeviceAuthError::InvalidSignature)
         );
         assert_eq!(
-            verifier.complete("thinkpad", challenge.nonce(), bad.as_ref(), now),
+            verifier.complete("thinkpad", challenge.nonce(), bad.as_ref(), &binding(), now),
             Err(DeviceAuthError::NotPending)
         );
-        let next = verifier.begin("thinkpad", now).unwrap();
-        let mismatched = signing_bytes("another.coordinator", "thinkpad", next.nonce());
+        let next = verifier.begin("thinkpad", &binding(), now).unwrap();
+        let mismatched = signing_bytes("another.coordinator", "thinkpad", next.nonce(), &binding());
         let sig = owner.sign(&mismatched);
         assert_eq!(
-            verifier.complete("thinkpad", next.nonce(), sig.as_ref(), now),
+            verifier.complete("thinkpad", next.nonce(), sig.as_ref(), &binding(), now),
             Err(DeviceAuthError::InvalidSignature)
+        );
+    }
+
+    #[test]
+    fn proof_is_bound_to_tls_exporter_and_is_not_consumed_by_other_connection() {
+        let now = Instant::now();
+        let (device, owner) = key("thinkpad");
+        let mut verifier = auth(device);
+        let original = binding();
+        let other = TransportBinding::from_tls_exporter([9; 32]);
+        let challenge = verifier.begin("thinkpad", &original, now).unwrap();
+        let sig = owner.sign(challenge.signing_bytes());
+        assert_eq!(
+            verifier.complete("thinkpad", challenge.nonce(), sig.as_ref(), &other, now),
+            Err(DeviceAuthError::TransportMismatch)
+        );
+        // The correct TLS connection can still complete exactly once.
+        let verified = verifier
+            .complete("thinkpad", challenge.nonce(), sig.as_ref(), &original, now)
+            .unwrap();
+        assert!(verified.matches_transport(&original));
+        assert!(!verified.matches_transport(&other));
+        assert_eq!(
+            verifier.complete("thinkpad", challenge.nonce(), sig.as_ref(), &original, now),
+            Err(DeviceAuthError::NotPending)
         );
     }
 
@@ -374,13 +443,14 @@ mod tests {
         let now = Instant::now();
         let (device, pair) = key("thinkpad");
         let mut verifier = auth(device);
-        let challenge = verifier.begin("thinkpad", now).unwrap();
+        let challenge = verifier.begin("thinkpad", &binding(), now).unwrap();
         let sig = pair.sign(challenge.signing_bytes());
         assert_eq!(
             verifier.complete(
                 "thinkpad",
                 challenge.nonce(),
                 sig.as_ref(),
+                &binding(),
                 now + Duration::from_secs(30)
             ),
             Err(DeviceAuthError::Expired)
@@ -392,15 +462,15 @@ mod tests {
         let now = Instant::now();
         let (device, pair) = key("thinkpad");
         let mut verifier = auth(device);
-        let challenge = verifier.begin("thinkpad", now).unwrap();
+        let challenge = verifier.begin("thinkpad", &binding(), now).unwrap();
         let sig = pair.sign(challenge.signing_bytes());
         verifier.revoke("thinkpad").unwrap();
         assert_eq!(
-            verifier.complete("thinkpad", challenge.nonce(), sig.as_ref(), now),
+            verifier.complete("thinkpad", challenge.nonce(), sig.as_ref(), &binding(), now),
             Err(DeviceAuthError::Revoked)
         );
         assert!(matches!(
-            verifier.begin("thinkpad", now),
+            verifier.begin("thinkpad", &binding(), now),
             Err(DeviceAuthError::Revoked)
         ));
     }
@@ -410,14 +480,14 @@ mod tests {
         let now = Instant::now();
         let (device, pair) = key("thinkpad");
         let mut verifier = auth(device);
-        let challenge = verifier.begin("thinkpad", now).unwrap();
+        let challenge = verifier.begin("thinkpad", &binding(), now).unwrap();
         let sig = pair.sign(challenge.signing_bytes());
         assert_eq!(
-            verifier.complete("thinkpad", &[0; NONCE_LEN], sig.as_ref(), now),
+            verifier.complete("thinkpad", &[0; NONCE_LEN], sig.as_ref(), &binding(), now),
             Err(DeviceAuthError::InvalidChallenge)
         );
         assert!(verifier
-            .complete("thinkpad", challenge.nonce(), sig.as_ref(), now)
+            .complete("thinkpad", challenge.nonce(), sig.as_ref(), &binding(), now)
             .is_ok());
     }
 
@@ -433,17 +503,17 @@ mod tests {
             Duration::from_secs(10),
         )
         .unwrap();
-        verifier.begin("one", now).unwrap();
+        verifier.begin("one", &binding(), now).unwrap();
         assert!(matches!(
-            verifier.begin("one", now),
+            verifier.begin("one", &binding(), now),
             Err(DeviceAuthError::AlreadyPending)
         ));
         assert!(matches!(
-            verifier.begin("two", now),
+            verifier.begin("two", &binding(), now),
             Err(DeviceAuthError::Capacity)
         ));
         verifier
-            .begin("two", now + Duration::from_secs(10))
+            .begin("two", &binding(), now + Duration::from_secs(10))
             .unwrap();
         assert!(matches!(
             DeviceAuthenticator::new(
@@ -477,13 +547,22 @@ mod tests {
     fn key_is_bound_to_protocol_domain_and_coordinator() {
         let nonce = [7; NONCE_LEN];
         assert_ne!(
-            signing_bytes("ru0", "device", &nonce),
-            signing_bytes("srv0", "device", &nonce)
+            signing_bytes("ru0", "device", &nonce, &binding()),
+            signing_bytes("srv0", "device", &nonce, &binding())
         );
         assert_ne!(
-            signing_bytes("ru0", "device", &nonce),
-            signing_bytes("ru0", "device2", &nonce)
+            signing_bytes("ru0", "device", &nonce, &binding()),
+            signing_bytes("ru0", "device2", &nonce, &binding())
         );
-        assert!(signing_bytes("ru0", "device", &nonce).starts_with(DOMAIN));
+        assert!(signing_bytes("ru0", "device", &nonce, &binding()).starts_with(DOMAIN));
+        assert_ne!(
+            signing_bytes("ru0", "device", &nonce, &binding()),
+            signing_bytes(
+                "ru0",
+                "device",
+                &nonce,
+                &TransportBinding::from_tls_exporter([4; 32])
+            )
+        );
     }
 }
