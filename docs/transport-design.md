@@ -19,6 +19,71 @@ authenticates each agent over an outbound, TLS-protected channel. Neither a
 client-provided device ID nor an agent-provided actor ID is an authorization
 credential. Agent-side enforcement is mandatory for sensitive operations.
 
+## Separation of responsibilities and inexpensive evolution
+
+**Decision (owner, 2026-10-28):** the MCP gateway is a protocol-facing
+adapter, **not** a second host operations engine or a second authority for
+per-device files, services and commands. Agents are independent,
+self-contained host-side products; their typed resources, operation
+handlers, host-local permissions, and execution/audit logic work regardless
+of which supported client protocol reaches the coordinator.
+
+| Component | Responsibility | Must not own |
+| --- | --- | --- |
+| Keycloak | User authentication, MFA, enrollment approval | Device filesystem/service grants |
+| MCP gateway | Validate OAuth issuer/audience/subject/scope; expose an authorized MCP surface and validate/rate-limit requests | Copies of per-device path lists, commands, local grants or host executors |
+| Coordinator/router | Authenticate and register devices, authorize routing to the requested device, negotiate operation schemas, enforce session/protocol/rate/resource bounds, issue appropriately bound delegated request context and audit delivery | Host-specific authorization or a universal shell |
+| Device agent | Independently verify authenticated origin/delegated actor, requested target, local grants, resource constraints and execution preconditions; perform permitted host operation and audit the outcome | Trust caller-supplied actor/device IDs or treat discovery as a grant |
+
+- The **agent is authoritative** for the final decision about an operation on
+  its device. Gateway and coordinator deny unauthorized access to the system,
+  routes and exposed API **before** forwarding; they cannot grant an operation
+  that a device denies. The gateway cannot act as a blind public proxy either.
+- Implement per-device grants once, at the device boundary, behind a small
+  reusable policy/operation interface. Central discovery may advertise
+  **effective supported capabilities** but is not an authorization database
+  for target paths or operating-system privileges. Do not mirror or attempt
+  to synchronize the device's filesystem ACLs and policy rules into MCP.
+- Actor identity and delegation must be **verifiable by the agent**, scoped
+  to intended device, operation and short validity window, and protected
+  against substitution/replay. A plain MCP request field or an
+  unverified coordinator assertion is insufficient. The exact credential
+  or proof mechanism remains a security-design gate before remote execution.
+- The authenticated agent transport, routing and protocol codec are
+  **independent from MCP and Keycloak-specific user login adapters**. A
+  future non-MCP client or new device operating system should reuse the
+  same typed operations and policies, not introduce a parallel control
+  plane. When the coordinator performs operations on ru0 itself, it uses
+  an equivalent local agent/provider authority boundary.
+- Extend functionality by adding a typed resource/view or bounded command
+  to an agent-side provider registry plus its versioned schema and tests;
+  gateway-facing discovery and routing derive from the same approved
+  capability contract. **No generic shell, dynamic untrusted plugins, broad
+  dispatcher or untyped free-form payloads** as a shortcut to flexibility.
+  Keep the static Rust architecture small until actual multi-host needs
+  justify additional extension mechanisms.
+- Separate replaceable modules: `client adapter -> coordinator/router ->
+  transport -> agent policy -> provider`. Changes to one layer must not
+  require editing unrelated layers when public semantics and authority do
+  not change. Shared protocol types and compatibility adapters are
+  maintained in one place rather than duplicated across clients.
+- Preserve the **existing** SSH/stdio pilot's gateway-side restrictions
+  until an authenticated agent-side replacement demonstrably enforces
+  equivalent or narrower rights. Do not remove production safety checks,
+  allowlists or legacy compatibility merely because the *target*
+  architecture moves final host authorization to the agent.
+- Failure behavior is explicit and local: invalid delegation, absent
+  permissions, unsupported schema, offline host and unknown outcome all
+  fail closed without fallback to SSH, privilege escalation, cached allow,
+  automatic deferred execution or implicit retries for mutations.
+
+**Acceptance for this division:** a denied host resource remains denied
+regardless of MCP tool name, client adapter, WSS vs QUIC, caller-controlled
+fields, coordinator mistakes or protocol version; an added *authorized*
+resource provider requires no new gateway executor or copied permission
+table. Verify both independent gateway denials and independent agent
+denials in negative tests before any live cutover.
+
 ## Selected transport and routing contract
 
 - Every agent initiates an **outbound** connection to a registered coordinator.
