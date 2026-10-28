@@ -85,7 +85,6 @@ struct DeviceRecord {
     revoked: bool,
 }
 
-#[derive(Debug)]
 struct PendingChallenge {
     nonce: [u8; NONCE_LEN],
     binding: TransportBinding,
@@ -93,11 +92,21 @@ struct PendingChallenge {
 }
 
 /// A challenge must be answered with an Ed25519 signature from the enrolled key.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DeviceChallenge {
     device_id: String,
     nonce: [u8; NONCE_LEN],
     signing_bytes: Vec<u8>,
+}
+
+impl std::fmt::Debug for DeviceChallenge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceChallenge")
+            .field("device_id", &self.device_id)
+            .field("nonce", &"[REDACTED]")
+            .field("signing_bytes", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl DeviceChallenge {
@@ -443,6 +452,41 @@ mod tests {
         let binder = TransportBinding::from_tls_exporter([0x5a; 32]);
         let display = format!("{binder:?}");
         assert_eq!(display, "TransportBinding([REDACTED])");
+    }
+
+    #[test]
+    fn whole_challenge_debug_redacts_nonce_exporter_and_signed_payload() {
+        let now = Instant::now();
+        let (device, owner) = key("thinkpad");
+        let mut verifier = auth(device);
+        let exporter = [0x5a; 32];
+        let binding = TransportBinding::from_tls_exporter(exporter);
+        let challenge = verifier.begin("thinkpad", &binding, now).unwrap();
+        let sig = owner.sign(challenge.signing_bytes());
+        let verified = verifier
+            .complete("thinkpad", challenge.nonce(), sig.as_ref(), &binding, now)
+            .unwrap();
+        for debug in [
+            format!("{challenge:?}"),
+            format!("{challenge:#?}"),
+            format!("{verified:?}"),
+            format!("{verified:#?}"),
+        ] {
+            assert!(debug.contains("thinkpad"));
+            assert!(debug.contains("[REDACTED]"));
+            for secret in [
+                exporter.as_slice(),
+                challenge.nonce().as_slice(),
+                challenge.signing_bytes(),
+            ] {
+                assert!(!debug.contains(&format!("{secret:?}")));
+                assert!(!debug.contains(&format!("{secret:#?}")));
+            }
+            assert!(!debug.contains(&nonce_hex(challenge.nonce())));
+            // Any byte printed from the signed payload would introduce a digit.
+            assert!(!debug.chars().any(|c| c.is_ascii_digit()));
+        }
+        assert_eq!(format!("{challenge:?}"), "DeviceChallenge { device_id: \"thinkpad\", nonce: \"[REDACTED]\", signing_bytes: \"[REDACTED]\" }");
     }
 
     #[test]
