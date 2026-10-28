@@ -37,10 +37,27 @@ pub struct Advertisement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// A validated common contract. Consumers can inspect it, but cannot
+/// fabricate a session by constructing arbitrary negotiated capabilities.
+/// This is implementation support only, **not** an authorization grant.
 pub struct Negotiated {
-    pub wire_version: WireVersion,
-    pub schemas: Vec<OperationSchema>,
-    pub max_frame_bytes: u32,
+    wire_version: WireVersion,
+    schemas: Vec<OperationSchema>,
+    max_frame_bytes: u32,
+}
+
+impl Negotiated {
+    pub fn wire_version(&self) -> WireVersion {
+        self.wire_version
+    }
+
+    pub fn schemas(&self) -> &[OperationSchema] {
+        &self.schemas
+    }
+
+    pub fn max_frame_bytes(&self) -> u32 {
+        self.max_frame_bytes
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -208,8 +225,8 @@ mod tests {
         );
         let old_agent = advertise(vec![V1_0], vec![schema("file", "read", 1)]);
         let agreed = negotiate(&coordinator, &old_agent).unwrap();
-        assert_eq!(agreed.wire_version, V1_0);
-        assert_eq!(agreed.schemas, vec![schema("file", "read", 1)]);
+        assert_eq!(agreed.wire_version(), V1_0);
+        assert_eq!(agreed.schemas(), &[schema("file", "read", 1)]);
     }
 
     #[test]
@@ -329,6 +346,6 @@ mod tests {
         let a = advertise(vec![V1_0], vec![]);
         let mut b = advertise(vec![V1_0], vec![]);
         b.max_frame_bytes = 4096;
-        assert_eq!(negotiate(&a, &b).unwrap().max_frame_bytes, 4096);
+        assert_eq!(negotiate(&a, &b).unwrap().max_frame_bytes(), 4096);
     }
 }
