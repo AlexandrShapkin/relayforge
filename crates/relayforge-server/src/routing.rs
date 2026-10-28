@@ -452,7 +452,13 @@ mod tests {
         let challenge = verifier.begin("device_a", &binding(), now).unwrap();
         let signed = device_key.sign(challenge.signing_bytes());
         let verified = verifier
-            .complete("device_a", challenge.nonce(), signed.as_ref(), &binding(), now)
+            .complete(
+                "device_a",
+                challenge.nonce(),
+                signed.as_ref(),
+                &binding(),
+                now,
+            )
             .unwrap();
         let nonce = verified.session_nonce().to_owned();
 
@@ -491,7 +497,13 @@ mod tests {
         let challenge = auth.begin("device_a", &binding(), now).unwrap();
         let signed = pair.sign(challenge.signing_bytes());
         let proof = auth
-            .complete("device_a", challenge.nonce(), signed.as_ref(), &binding(), now)
+            .complete(
+                "device_a",
+                challenge.nonce(),
+                signed.as_ref(),
+                &binding(),
+                now,
+            )
             .unwrap();
         let mut router = router();
         let advertised = advertisement(V1);
