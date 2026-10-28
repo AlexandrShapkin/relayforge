@@ -9,3 +9,4 @@ license.workspace = true
 relayforge-protocol = { path = "../relayforge-protocol" }
 relayforge-policy = { path = "../relayforge-policy" }
 ring = "=0.17.14"
+subtle = "=2.6.1"
