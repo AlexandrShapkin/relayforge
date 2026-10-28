@@ -150,7 +150,10 @@ impl SessionRouter {
         connection_nonce: &str,
         now: Instant,
     ) -> Result<(), RouteError> {
-        let agent = self.agents.get(&target.device_id).ok_or(RouteError::Offline)?;
+        let agent = self
+            .agents
+            .get(&target.device_id)
+            .ok_or(RouteError::Offline)?;
         if now >= agent.expires_at
             || agent.nonce != target.session_nonce
             || agent.nonce != connection_nonce
@@ -347,14 +350,23 @@ mod tests {
             .prepare_after_gateway_authorization("device_a", &header("r1"), now)
             .unwrap();
         assert_eq!(r.validate_for_dispatch(&old, NONCE1, now), Ok(()));
-        assert_eq!(r.validate_for_dispatch(&old, NONCE2, now), Err(RouteError::Offline));
+        assert_eq!(
+            r.validate_for_dispatch(&old, NONCE2, now),
+            Err(RouteError::Offline)
+        );
 
         r.disconnect("device_a");
-        assert_eq!(r.validate_for_dispatch(&old, NONCE1, now), Err(RouteError::Offline));
+        assert_eq!(
+            r.validate_for_dispatch(&old, NONCE1, now),
+            Err(RouteError::Offline)
+        );
         r.attach_authenticated("device_a", NONCE2, &a, &a, now)
             .unwrap();
         // A previous target cannot be delivered through device_a's new session.
-        assert_eq!(r.validate_for_dispatch(&old, NONCE2, now), Err(RouteError::Offline));
+        assert_eq!(
+            r.validate_for_dispatch(&old, NONCE2, now),
+            Err(RouteError::Offline)
+        );
         let current = r
             .prepare_after_gateway_authorization("device_a", &header("r1"), now)
             .unwrap();
@@ -365,8 +377,14 @@ mod tests {
         );
         // Expiry permits a fresh connection but cannot revive the old target.
         let fresh_nonce = "fedcba9876543210fedcba9876543210";
-        r.attach_authenticated("device_a", fresh_nonce, &a, &a, now + Duration::from_secs(30))
-            .unwrap();
+        r.attach_authenticated(
+            "device_a",
+            fresh_nonce,
+            &a,
+            &a,
+            now + Duration::from_secs(30),
+        )
+        .unwrap();
         assert_eq!(
             r.validate_for_dispatch(&current, fresh_nonce, now + Duration::from_secs(30)),
             Err(RouteError::Offline)
