@@ -52,6 +52,14 @@ impl std::fmt::Debug for TransportBinding {
     }
 }
 
+impl PartialEq for TransportBinding {
+    fn eq(&self, other: &Self) -> bool {
+        matches_binding(&self.0, other)
+    }
+}
+
+impl Eq for TransportBinding {}
+
 impl TransportBinding {
     pub fn from_tls_exporter(output: [u8; 32]) -> Self {
         Self(output)
