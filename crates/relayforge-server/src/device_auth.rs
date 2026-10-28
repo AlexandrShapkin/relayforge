@@ -6,6 +6,7 @@
 //! no untrusted network input may populate it. Only the authenticated transport
 //! should deliver the fresh challenge and its response on the same connection.
 
+use subtle::ConstantTimeEq;
 use ring::{
     rand::{SecureRandom, SystemRandom},
     signature::{UnparsedPublicKey, ED25519},
@@ -67,7 +68,7 @@ impl TransportBinding {
 }
 
 fn matches_binding(a: &[u8; 32], b: &TransportBinding) -> bool {
-    ring::constant_time::verify_slices_are_equal(a, &b.0).is_ok()
+    a.as_slice().ct_eq(b.0.as_slice()).into()
 }
 
 /// One owner-approved public key, loaded from trusted persistence.
