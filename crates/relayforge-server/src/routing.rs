@@ -200,8 +200,8 @@ impl SessionRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use relayforge_protocol::wire::{OperationSchema, WireVersion};
     use crate::device_auth::{DeviceAuthenticator, TrustedDevice};
+    use relayforge_protocol::wire::{OperationSchema, WireVersion};
     use ring::{
         rand::SystemRandom,
         signature::{Ed25519KeyPair, KeyPair},
