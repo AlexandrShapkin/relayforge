@@ -1,4 +1,16 @@
-# Transport and authentication design (not yet deployed)
+# Agent transport and authentication — accepted target, not deployed
+
+**Decision (owner, 2026-10-28):** QUIC over TLS 1.3 is the preferred
+agent-to-coordinator transport; WSS over TLS/TCP is the required fallback.
+Agent enrollment must be a short, browser-approved flow with no manually
+distributed SSH keys or certificates. This is an **architecture decision, not
+an implementation or live deployment acceptance**.
+
+This refines the existing transport requirements and
+[ADR-0001](adr/0001-resource-api.md). The public ChatGPT-to-MCP boundary
+continues to use its separately managed OpenAI Secure MCP Tunnel and Keycloak
+OAuth. Neither MCP nor an OpenAI API key authenticates an agent device.
+
 
 ## Trust boundaries
 
@@ -6,6 +18,100 @@ The MCP client authenticates to the coordinator. The coordinator separately
 authenticates each agent over an outbound, TLS-protected channel. Neither a
 client-provided device ID nor an agent-provided actor ID is an authorization
 credential. Agent-side enforcement is mandatory for sensitive operations.
+
+## Selected transport and routing contract
+
+- Every agent initiates an **outbound** connection to a registered coordinator.
+  The coordinator routes versioned typed requests over that connection.
+  No agent-side inbound listener, SSH-key redistribution, public agent port,
+  or host address supplied by an MCP caller is necessary.
+- Use **QUIC (Quinn with a maintained Rust TLS stack)** as the primary channel:
+  TLS 1.3, a bounded control stream, and separate reliable bidirectional
+  streams for independent RPCs or bounded data transfer. Do not use unreliable
+  datagrams for operations or results. Disable application **0-RTT** to avoid
+  replaying a command during resumption.
+- If UDP/QUIC is unavailable, automatically try **WSS/TLS over TCP**, using
+  the *same* application request schema, authz checks, identity, error model
+  and replay semantics. Never downgrade to plaintext WS, insecure TLS, an
+  ad-hoc HTTP bearer listener or implicit SSH. Do not create separate policy
+  engines or executors for each transport. QUIC connection migration is a
+  possible optimization, not a delivery or continuity guarantee.
+- Endpoint/ports and any HTTPS reverse-proxy integration are deployment
+  inputs; do not hard-code UDP/443 or assume it is free on ru0. Validate
+  coexistence with Nginx, VPN and other services before any firewall or
+  listener change. Begin with a loopback-only/disposable pilot.
+- The device proves its **own** cryptographic identity on both transports.
+  Prefer mTLS with short-lived, device-scoped credentials; where a WSS
+  reverse proxy terminates TLS, an independently verified device-key proof
+  may be needed, never a trusted caller-supplied identity header. Both
+  transports must provide equivalent protection, including server trust,
+  credential revocation, session binding and audited failures.
+
+## One-command enrollment and operator experience
+
+**Goal after verified package installation:** run
+`relayforge-agent enroll` once on the target device (proposed CLI, not
+currently implemented). The expected user experience is:
+
+1. The installed agent determines its approved coordinator enrollment
+   endpoint from a validated distribution profile or a short-lived owner
+   invitation. It does not require editing JSON/YAML, DNS, firewall rules,
+   SSH config, or copying a certificate, password or API key. A freshly
+   generated invitation can supply the endpoint when it is not configured.
+2. The agent generates its own **non-exported private device key** locally,
+   opens a short-lived, rate-limited pending enrollment and displays an
+   HTTPS verification URL plus one-time code (optional QR).
+3. The owner opens that URL on any browser, signs in to **Keycloak with MFA**,
+   and explicitly approves the shown device name, device-key fingerprint
+   and requested initial **read-only** capabilities. A code alone is not
+   owner authorization. The agent never requests or stores the user's
+   Keycloak password, OTP or long-lived user refresh token.
+4. The coordinator checks the one-time transaction, binds approval to the
+   pending public key and registered device ID, and issues an appropriately
+   scoped, renewable device credential. The private key never leaves the
+   device. Denied, timed-out, replayed or mismatched enrollments fail closed.
+5. The agent verifies the server/credential, stores protected local state,
+   tests a read-only connection and offers to enable its **unprivileged**
+   systemd user service with explicit local consent. Package installation
+   alone does not start a network daemon or grant host access.
+
+Ordinary reconnect, credential renewal and QUIC→WSS fallback must be
+automatic. `relayforge-agent status` (proposed) and an owner-visible
+registered-device view should show online/offline, last contact, transport,
+granted read capabilities and credential expiry without leaking secrets.
+Device rename, re-enrollment, revocation and removal need simple attended
+commands/UI; revocation immediately prevents new sessions and requests.
+Re-enrollment does not silently restore revoked permissions.
+
+**Usability acceptance:** after a trusted package is installed, onboarding
+requires one local CLI command and one Keycloak MFA/browser confirmation,
+with no manual configuration edits or secret copying. Initial distro
+repository trust and package installation remain explicit OS operations.
+Remote host updates, privileged services, broad file access and mutations
+require **separate** local owner authorization; enrollment does not imply
+them.
+
+## Request delivery and host authority
+
+- Bind the registered device identity to each authenticated session and
+  agent-side policy. Never trust caller-controlled `device_id`, `actor_id`,
+  `host` or operation fields as credentials. Convey verified, audience-
+  appropriate actor/delegation context or require equivalent local owner
+  authorization; a gateway's claims alone cannot expand agent grants.
+- Do not execute arbitrary shell commands. Use ADR-0001's typed resource
+  reads and explicitly enumerated bounded domain commands with versioned
+  schemas. Keep the existing SSH/stdio pilot and its restricted rights until
+  equivalence and an independently accepted migration are proven.
+- The transport supplies request IDs, deadlines, bounded sizes and
+  concurrency, and explicit `offline`, `denied`, `timeout` and
+  `unknown_outcome` results. Losing a connection must not silently queue
+  later execution. Only explicitly idempotent reads can be safely retried;
+  no automatic replay of changes after crash, reconnect or fallback.
+- Use exponential reconnect backoff with jitter and fresh authentication.
+  Provide rotation/revocation without relying on a restarted coordinator,
+  rate-limited enrollment attempts, bounded audit metadata and negative
+  tests for wrong device, revoked key, expired approval and cross-session
+  replay.
 
 ## Session lifecycle
 
@@ -34,11 +140,19 @@ Set bounded message size, concurrent sessions, per-session request IDs,
 request timeouts and bounded queues. Revoke or rotate long-lived credentials
 without restarting the coordinator.
 
-## Next implementation gate
+## Next implementation gate (existing Issues #92 and #116)
 
-Choose a maintained TLS library and an authenticated enrollment mechanism,
-add adversarial transport tests and a persistent revocation store, then
-implement a loopback-only transport pilot before exposing any network listener.
+Start with a **source-only** Quinn/TLS + WSS fallback pilot and browser-approved
+Keycloak enrollment on disposable/loopback fixtures. Define the versioned
+wire messages, server/device key trust and revocation persistence before real
+network exposure. Verify read-only operations against a second enrolled host,
+blocked UDP fallback, disconnect/reconnect, disabled 0-RTT, forged identities,
+expired/replayed enrollment, revoked credentials, wrong host/actor and no
+offline mutation replay. Require independent review, exact-head native/security
+CI, and separate owner approval for installing or activating ru0 listeners,
+agents, network changes and cutover. Do not treat design agreement or green
+CI as production acceptance. Keep #116's currently authorized rollout stages
+and #92's canonical API migration distinct; create no second task queue.
 
 
 ## Session reconnect capacity
