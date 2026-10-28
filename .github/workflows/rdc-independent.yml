@@ -80,7 +80,7 @@ jobs:
           python3 -B ci/ubuntu_package.py --binary-dir .build/ci/release --dist .build/ubuntu-dist --sha "$SOURCE_SHA"
       - name: Test installed Ubuntu package in a disposable container
         run: |
-          docker run --rm -e CI_UBUNTU_DISPOSABLE=1 -v "$PWD:/workspace:ro" -w /workspace ubuntu:24.04 bash ci/ubuntu-package-smoke.sh
+          docker run --rm -e CI_UBUNTU_DISPOSABLE=1 -e SOURCE_SHA -v "$PWD:/workspace:ro" -w /workspace ubuntu:24.04 bash ci/ubuntu-package-smoke.sh
       - name: Retain unactivated Ubuntu package for exact-source inspection
         uses: actions/upload-artifact@v4
         with:
@@ -89,6 +89,34 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
+
+  ubuntu-release:
+    env:
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    needs: verify-offline
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: relayforge-ubuntu-source-${{ github.event.pull_request.head.sha || github.sha }}
+          path: .build/ubuntu-dist
+      - name: Independently verify downloaded Ubuntu package installation and removal
+        run: docker run --rm -e CI_UBUNTU_DISPOSABLE=1 -e SOURCE_SHA -v "$PWD:/workspace:ro" -w /workspace ubuntu:24.04 bash ci/ubuntu-package-smoke.sh
+      - name: Bind successful independent checks to package bytes
+        env:
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: python3 -B ci/ubuntu_release.py .build/ubuntu-dist "$SOURCE_SHA"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: relayforge-ubuntu-verified-${{ github.event.pull_request.head.sha || github.sha }}
+          path: .build/ubuntu-dist/*
+          retention-days: 7
+          if-no-files-found: error
 
   arch-source:
     runs-on: ubuntu-22.04

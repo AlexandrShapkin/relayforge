@@ -29,6 +29,7 @@ def inspect_runs(sha, get=api):
         raise ValueError('full source SHA required')
     selected = {}
     for workflow, jobs in REQUIRED.items():
+        jobs = jobs | ({'ubuntu-release'} if workflow == 'rdc-independent.yml' and ubuntu_assets(sha) else set())
         runs = get(f'actions/workflows/{workflow}/runs?head_sha={sha}&event=push&per_page=100')['workflow_runs']
         candidates = [r for r in runs if r['head_sha'] == sha and r['head_branch'] == 'main'
                       and r['event'] == 'push' and r['repository']['full_name'] == REPO
@@ -139,6 +140,57 @@ def source_names(sha):
             f'relayforge-{version}.r{revision}.g{sha[:12]}-1-x86_64.pkg.tar.zst')
 
 
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def verify_ubuntu(directory, sha, package):
+    """Verify exact tested bytes and the independent installed-package receipt."""
+    source = json.loads((directory / 'ubuntu-source.json').read_text())
+    receipt = json.loads((directory / 'ubuntu-verification.json').read_text())
+    if (source['source_sha'] != sha or source['activation_allowed'] is not False
+            or source['distribution'] != 'ubuntu-24.04'
+            or source['package_architecture'] != 'amd64'
+            or package != f"relayforge_{source['pkgver']}_amd64.deb"
+            or set(source['binaries_sha256']) != {'relayforge-agent', 'relayforge-mcp'}
+            or any(not re.fullmatch('[0-9a-f]{64}', v)
+                   for v in source['binaries_sha256'].values())):
+        raise ValueError('Ubuntu source identity mismatch')
+    expected = {'schema_version': 1, 'source_sha': sha, 'package': package,
+                'sha256': digest(directory / package), 'distribution': 'ubuntu-24.04',
+                'architecture': 'amd64', 'installed_checks': 'PASS', 'activation_allowed': False}
+    if receipt != expected:
+        raise ValueError('Ubuntu independent verification mismatch')
+    sums = {}
+    for line in (directory / 'ubuntu-SHA256SUMS').read_text().splitlines():
+        checksum, name = line.split('  ')
+        if name in sums or name not in {package, 'source.json'}:
+            raise ValueError('invalid Ubuntu input inventory')
+        sums[name] = checksum
+    if sums != {package: expected['sha256'], 'source.json': digest(directory / 'ubuntu-source.json')}:
+        raise ValueError('Ubuntu tested checksum mismatch')
+    return {package, 'ubuntu-source.json', 'ubuntu-verification.json', 'ubuntu-SHA256SUMS'}
+
+
+def ubuntu_assets(sha):
+    # Historical releases keep their original matrix; never infer it from assets.
+    if not command('git', 'ls-tree', sha, '--', 'ci/ubuntu_release.py'):
+        return set()
+    _, arch = source_names(sha)
+    version = arch.removeprefix('relayforge-').removesuffix('-1-x86_64.pkg.tar.zst')
+    return {f'relayforge_{version}_amd64.deb', 'ubuntu-source.json',
+            'ubuntu-verification.json', 'ubuntu-SHA256SUMS'}
+
+
+def verify_ubuntu_release(directory, sha):
+    names = ubuntu_assets(sha)
+    if names:
+        package, = (n for n in names if n.endswith('.deb'))
+        if verify_ubuntu(directory, sha, package) != names:
+            raise ValueError('Ubuntu release inventory mismatch')
+    return names
+
+
 def tunnel_assets(sha):
     """Read historical package contract from committed source, not Release claims."""
     path = 'packaging/arch/tunnel-client/upstream.json'
@@ -177,7 +229,7 @@ def verify_provenance(directory):
 
 def verify_published(release, sha, tag, package, get=api):
     """Durable authenticated evidence; never consult ephemeral Actions artifacts."""
-    names = ASSETS | {package} | tunnel_assets(sha)
+    names = ASSETS | {package} | tunnel_assets(sha) | ubuntu_assets(sha)
     if release['tag_name'] != tag or release['target_commitish'] != sha:
         raise ValueError('existing release source conflict')
     assets = release['assets']
@@ -210,6 +262,7 @@ def verify_published(release, sha, tag, package, get=api):
         identity = json.loads((directory / 'source.json').read_text())
         lifecycle = json.loads((directory / 'lifecycle.json').read_text())
         verify_tunnel(directory, sha, identity, lifecycle, sums)
+        verify_ubuntu_release(directory, sha)
         # Validate historical records without regenerating them using today's
         # build environment defaults or requiring the old run/artifact APIs.
         if (identity['source_sha'] != sha or identity['tag'] != tag
@@ -263,6 +316,7 @@ def release_files(directory, sha, runs):
     if lifecycle['source_sha'] != sha or lifecycle['package'] != expected or lifecycle['sha256'] != sums[expected] or lifecycle['lifecycle'] != 'PASS':
         raise ValueError('installed lifecycle evidence mismatch')
     extra = verify_tunnel(directory, sha, identity, lifecycle, sums)
+    extra = extra | verify_ubuntu_release(directory, sha)
     record = {'schema_version': 1, 'source_sha': sha, 'build_sha': sha,
               'package': expected, 'package_sha256': sums[expected], 'required_runs': runs,
               'run_urls': [f'https://github.com/{REPO}/actions/runs/{r}' for r in runs.values()],
@@ -341,7 +395,7 @@ def publish(directory, sha, runs):
     identity, names = release_files(directory, sha, runs)
     tag = identity['tag']
     expected_tag, package = source_names(sha)
-    if tag != expected_tag or names != ASSETS | {package} | tunnel_assets(sha):
+    if tag != expected_tag or names != ASSETS | {package} | tunnel_assets(sha) | ubuntu_assets(sha):
         raise ValueError('tested artifact source naming mismatch')
     verify_provenance(directory)
     # A source SHA must be in protected-by-process main history, even if newer main exists.
@@ -381,7 +435,7 @@ def publish(directory, sha, runs):
                      '-f', f'object={sha}', '-f', 'type=commit')
     api('git/refs', '-X', 'POST', '-f', f'ref=refs/tags/{tag}', '-f', f"sha={tag_object['sha']}")
     notes = directory / 'notes.md'
-    notes.write_text(f'''RelayForge {tag} — canonical Arch Linux x86_64 package.
+    notes.write_text(f'''RelayForge {tag} — verified Linux packages (see attached target inventory).
 
 {narrative}
 
@@ -399,7 +453,10 @@ User-data purge requires a separate reviewed plan and terminal confirmation.
 Compatibility: provisional 0.1 source protocol; no general shell, automatic
 deployment or live readiness claim. Physical authenticated tunnel/recovery gates
 remain host-only. Existing Issue #89 evidence is not retroactively accepted.
-Ubuntu/Debian packages are future work. Arch snapshot/toolchain details and CI
+Ubuntu 24.04 amd64 packages, when required by the source matrix, have separate
+installed verification receipts. Verify the signed checksum inventory before
+installing with apt; see the Ubuntu packaging guide. No service activation or
+Ubuntu tunnel-client installation is authorized. Arch snapshot/toolchain details and CI
 provenance are attached. These are CI-tested bytes, not reproducible-build proof.
 ''')
     subprocess.run(['gh', 'release', 'create', tag, '--repo', REPO, '--target', sha,
@@ -427,6 +484,16 @@ def record_urls(runs):
 def download_tested(destination, sha, runs):
     subprocess.run(['gh', 'run', 'download', str(runs['rdc-independent.yml']), '--repo', REPO,
                     '--name', f'relayforge-arch-source-{sha}', '--dir', str(destination)], check=True)
+    if ubuntu_assets(sha):
+        with tempfile.TemporaryDirectory(prefix='relayforge-ubuntu-') as tmp:
+            subprocess.run(['gh', 'run', 'download', str(runs['rdc-independent.yml']), '--repo', REPO,
+                            '--name', f'relayforge-ubuntu-verified-{sha}', '--dir', tmp], check=True)
+            for path in Path(tmp).iterdir():
+                name = {'source.json': 'ubuntu-source.json',
+                        'SHA256SUMS': 'ubuntu-SHA256SUMS'}.get(path.name, path.name)
+                if name not in ubuntu_assets(sha) or not path.is_file() or path.is_symlink():
+                    raise ValueError('unexpected Ubuntu artifact inventory')
+                (destination / name).write_bytes(path.read_bytes())
     # Validate actual tested bytes before any provenance publication.
     (destination / 'BUILD-SHA256SUMS').write_bytes((destination / 'SHA256SUMS').read_bytes())
     release_files(destination, sha, runs)

@@ -190,3 +190,14 @@ authenticated tunnel acceptance and independent rollback tests require their
 own attended scope. Issue #89 remains open until approved authenticated artifact
 behavior passes on that installation. Failed historical R3 provenance remains
 failed; source packaging does not relabel it or erase its evidence.
+
+
+## Ubuntu release extension (Issue #116)
+
+Source revisions containing `ci/ubuntu_release.py` additionally require the
+independent `ubuntu-release` job and publish the verified Ubuntu 24.04 amd64
+`.deb` and namespaced source/checksum/verification records in the same immutable
+release. See [Ubuntu packaging](ubuntu-packaging.md). Historical Arch-only
+releases keep their committed-source inventory and authenticated provenance
+requirements. Arch package, tunnel-client and installed lifecycle gates remain
+mandatory. This extension does not authorize deployment or service activation.

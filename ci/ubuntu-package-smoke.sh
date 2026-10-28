@@ -28,6 +28,9 @@ import json
 from pathlib import Path
 import subprocess
 record = json.loads(Path('source.json').read_text())
+import os
+if os.environ.get('SOURCE_SHA'):
+    assert record['source_sha'] == os.environ['SOURCE_SHA']
 assert record['activation_allowed'] is False
 assert record['distribution'] == 'ubuntu-24.04'
 packages = list(Path('.').glob('relayforge_*.deb'))
@@ -91,6 +94,7 @@ import subprocess
 import tarfile
 
 record = json.loads(Path('/usr/share/relayforge/source.json').read_text())
+assert record == json.loads(Path('source.json').read_text()), 'installed source differs from tested identity'
 pkg, = Path('.').glob('relayforge_*.deb')
 archive = subprocess.check_output(['dpkg-deb', '--fsys-tarfile', str(pkg)])
 with tarfile.open(fileobj=io.BytesIO(archive)) as stream:

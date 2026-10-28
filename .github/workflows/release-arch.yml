@@ -1,4 +1,4 @@
-name: Publish tested Arch package
+name: Publish tested Linux packages
 on:
   workflow_run:
     workflows: [Rust checks, RDC-independent development verification]
@@ -58,6 +58,7 @@ jobs:
         with:
           subject-path: |
             dist/**/*.pkg.tar.zst
+            dist/**/*.deb
             dist/**/SHA256SUMS
       - name: Verify exact-head gate and publish without overwriting
         env:

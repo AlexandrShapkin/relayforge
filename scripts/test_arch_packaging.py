@@ -25,6 +25,9 @@ purge = module('user_data', 'packaging/user_data.py')
 
 class GateTests(unittest.TestCase):
     def setUp(self):
+        ubuntu = patch.object(release, 'ubuntu_assets', return_value=set())
+        ubuntu.start()
+        self.addCleanup(ubuntu.stop)
         extras = patch.object(release, 'tunnel_assets', return_value=set())
         extras.start()
         self.addCleanup(extras.stop)
