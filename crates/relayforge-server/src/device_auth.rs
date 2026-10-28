@@ -83,6 +83,7 @@ impl DeviceChallenge {
 pub struct VerifiedDevice {
     device_id: String,
     session_nonce: String,
+    expires_at: Instant,
 }
 
 impl VerifiedDevice {
@@ -94,6 +95,10 @@ impl VerifiedDevice {
     /// coordinator's existing exact-session replay protections.
     pub fn session_nonce(&self) -> &str {
         &self.session_nonce
+    }
+
+    pub fn expires_at(&self) -> Instant {
+        self.expires_at
     }
 }
 
@@ -260,6 +265,7 @@ impl DeviceAuthenticator {
         Ok(VerifiedDevice {
             device_id: device_id.into(),
             session_nonce: nonce_hex(nonce),
+            expires_at: pending.expires_at,
         })
     }
 
