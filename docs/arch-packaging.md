@@ -201,3 +201,56 @@ release. See [Ubuntu packaging](ubuntu-packaging.md). Historical Arch-only
 releases keep their committed-source inventory and authenticated provenance
 requirements. Arch package, tunnel-client and installed lifecycle gates remain
 mandatory. This extension does not authorize deployment or service activation.
+
+## CI and independent handoff enforcement (Issue #110)
+
+The trusted `Independent review handoff` workflow publishes the commit status
+`Independent technical ACCEPT` before merge. It reads only owner-authored PR
+comments, never a mutable PR description or PR executable code. After an actual
+independent review, the owner relays the report and these standalone lines:
+
+```
+Independent technical ACCEPT: FULL_PR_HEAD_SHA
+Independent technical ACCEPT base: FULL_REVIEWED_MAIN_BASE_SHA
+```
+
+Head changes, base changes, comment edits/deletion and a subsequent exact-head
+REJECT invalidate the status. This attests a separately performed review; it
+cannot prove the external review occurred and does not grant merge authority.
+The implementing session must never manufacture the handoff. Historical release
+handoffs retain their existing exact-head contract and audit trail.
+
+**Manual GitHub administration required:** main was unprotected at inspection.
+Require pull requests, strict up-to-date branches, and required statuses `test`,
+`verify-offline`, `arch-source`, `ubuntu-release`, `sandbox-integration`, and
+`Independent technical ACCEPT` (bind to GitHub Actions where supported). Disable
+force pushes/deletion and bypass, including administrator bypass where feasible.
+Keep the owner merge-authority decision separate. Bootstrap this new trusted
+workflow only after independent exact-head review: it cannot execute as a new
+`pull_request_target` workflow until installed on main. Do not count absence of
+its status during bootstrap as acceptance. Protection/settings changes need
+separate owner administration; this source change does not configure them.
+Strict up-to-date protection is required to close base-change/status race windows.
+
+Branch pushes with a matching same-repository open main PR at the exact SHA
+skip duplicate suites; the PR event runs full checks. Other branch pushes, tags
+(Rust), main and explicit dispatch retain their coverage. Opening a PR after
+push discovery can still cause two full suites; safety takes precedence over
+eliminating that race. Fork PRs run full PR checks. PR base edits rerun PR checks.
+No path filters or test assertions were removed. Required status enforcement
+must use PR checks, not interpret skipped branch jobs as verification.
+
+Only pinned `just 1.40.0` installation is cached, keyed by OS, architecture and
+full compiler identity; only main push saves the cache. Main cannot restore
+fork/PR branch cache scopes. Version is checked on every restore. This preserves
+the locked-source build on misses and avoids adding a binary download trust root.
+Workspace/package outputs are deliberately not cached across trust boundaries:
+installed package, sandbox, native and release provenance verification remain
+independent. Cache contents are an optimization, never release artifacts.
+
+Both required workflow completion events remain release triggers, but only the
+latest successful completion (including rerun attempt identity) scans release
+history. Earlier/pending/failed peers defer; a successful retry can recover.
+Every elected scan retains both exact-main workflow/job checks, oldest-first
+backlog handling, authenticated historical assets and immutable idempotency.
+This source task does not rerun publishers or publish backlog releases.

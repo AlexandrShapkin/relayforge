@@ -315,7 +315,17 @@ unsafe extern "C" {
     fn flock(fd: std::os::raw::c_int, operation: std::os::raw::c_int) -> std::os::raw::c_int;
 }
 
-fn approval_lock(parent: &File) -> Result<File, String> {
+struct ApprovalLock(File);
+
+impl Drop for ApprovalLock {
+    fn drop(&mut self) {
+        // A concurrent fork may retain a duplicate of this open file description
+        // until exec. Closing our descriptor alone need not release the lock.
+        unsafe { flock(self.0.as_raw_fd(), 8) };
+    }
+}
+
+fn approval_lock(parent: &File) -> Result<ApprovalLock, String> {
     let file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -337,7 +347,7 @@ fn approval_lock(parent: &File) -> Result<File, String> {
     if unsafe { flock(file.as_raw_fd(), 2 | 4) } != 0 {
         return Err("artifact approval busy".into());
     }
-    Ok(file)
+    Ok(ApprovalLock(file))
 }
 
 // Called only by the existing one-time, physical-owner-approved change executor.
@@ -780,6 +790,22 @@ mod tests {
         assert_eq!(fs::read(&config).unwrap(), before);
         assert!(f.call("artifact.read", "issue77/AUTHORIZATION.md").is_err());
         assert!(revoke_root(&f.home, "issue77").is_err());
+    }
+
+    #[test]
+    fn approval_unlock_does_not_wait_for_inherited_descriptor_close() {
+        let f = Fixture::new();
+        let config = config_directory(&f.home).unwrap();
+        let lock = approval_lock(&config).unwrap();
+        // dup shares the open file description, just like inheritance at fork.
+        let inherited = lock.0.try_clone().unwrap();
+        assert!(approval_lock(&config).is_err());
+        drop(lock);
+        let next = approval_lock(&config).unwrap();
+        drop(inherited);
+        assert!(approval_lock(&config).is_err());
+        drop(next);
+        assert!(approval_lock(&config).is_ok());
     }
 
     #[test]
