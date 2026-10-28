@@ -43,8 +43,14 @@ pub enum DeviceAuthError {
 /// connection*. Never construct this from a request body, peer header,
 /// reusable key or network-supplied nonce. This type does not itself verify
 /// TLS; there is no network-facing adapter in this source-only stage.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct TransportBinding([u8; 32]);
+
+impl std::fmt::Debug for TransportBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TransportBinding([REDACTED])")
+    }
+}
 
 impl TransportBinding {
     pub fn from_tls_exporter(output: [u8; 32]) -> Self {
@@ -101,12 +107,22 @@ impl DeviceChallenge {
 
 /// Successful one-time proof, scoped to the transport connection that
 /// carried the challenge. This is not host-resource or actor authorization.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub struct VerifiedDevice {
     device_id: String,
     session_nonce: String,
     binding: TransportBinding,
     expires_at: Instant,
+}
+
+impl std::fmt::Debug for VerifiedDevice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VerifiedDevice")
+            .field("device_id", &self.device_id)
+            .field("session_nonce", &"[REDACTED]")
+            .field("binding", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
 }
 
 impl VerifiedDevice {
@@ -411,6 +427,13 @@ mod tests {
             verifier.complete("thinkpad", next.nonce(), sig.as_ref(), &binding(), now),
             Err(DeviceAuthError::InvalidSignature)
         );
+    }
+
+    #[test]
+    fn tls_exporter_is_redacted_from_debug_output() {
+        let binder = TransportBinding::from_tls_exporter([0x5a; 32]);
+        let display = format!("{binder:?}");
+        assert_eq!(display, "TransportBinding([REDACTED])");
     }
 
     #[test]
