@@ -425,41 +425,83 @@ mod tests {
 
     #[test]
     fn cryptographic_device_proof_can_bind_a_route_without_caller_nonce() {
-        let now = Instant::now();
-        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
-        let device_key = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
-        let mut public_key = [0; 32];
-        public_key.copy_from_slice(device_key.public_key().as_ref());
-        let mut verifier = DeviceAuthenticator::new(
-            "relayforge.ru0",
-            [TrustedDevice {
-                device_id: "device_a".into(),
-                public_key,
-            }],
-            2,
-            Duration::from_secs(30),
-        )
-        .unwrap();
-        let challenge = verifier.begin("device_a", now).unwrap();
-        let signed = device_key.sign(challenge.signing_bytes());
-        let verified = verifier
-            .complete("device_a", challenge.nonce(), signed.as_ref(), now)
+        for device_id in ["a", "Device_09-z", &"x".repeat(128)] {
+            let now = Instant::now();
+            let pkcs8 = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
+            let device_key = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+            let mut public_key = [0; 32];
+            public_key.copy_from_slice(device_key.public_key().as_ref());
+            let mut verifier = DeviceAuthenticator::new(
+                "relayforge.ru0",
+                [TrustedDevice {
+                    device_id: device_id.into(),
+                    public_key,
+                }],
+                2,
+                Duration::from_secs(30),
+            )
             .unwrap();
-        let nonce = verified.session_nonce().to_owned();
+            let challenge = verifier.begin(device_id, now).unwrap();
+            let signed = device_key.sign(challenge.signing_bytes());
+            let verified = verifier
+                .complete(device_id, challenge.nonce(), signed.as_ref(), now)
+                .unwrap();
+            let nonce = verified.session_nonce().to_owned();
 
-        let mut r = router();
-        let advertised = advertisement(V1);
-        r.attach_verified(verified, &advertised, &advertised, now)
-            .unwrap();
-        let target = r
-            .prepare_after_gateway_authorization("device_a", &header("r1"), now)
-            .unwrap();
-        assert_eq!(r.validate_for_dispatch(&target, &nonce, now), Ok(()));
-        // A different connection nonce is rejected, even for the same device.
-        assert_eq!(
-            r.validate_for_dispatch(&target, NONCE1, now),
-            Err(RouteError::Offline)
-        );
+            let mut r = router();
+            let advertised = advertisement(V1);
+            r.attach_verified(verified, &advertised, &advertised, now)
+                .unwrap();
+            let target = r
+                .prepare_after_gateway_authorization(device_id, &header("r1"), now)
+                .unwrap();
+            assert_eq!(r.validate_for_dispatch(&target, &nonce, now), Ok(()));
+            // A different connection nonce is rejected, even for the same device.
+            assert_eq!(
+                r.validate_for_dispatch(&target, NONCE1, now),
+                Err(RouteError::Offline)
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_device_ids_are_rejected_before_proof_issuance() {
+        let now = Instant::now();
+        for device_id in [
+            "",
+            "device.example",
+            "device:example",
+            "device/example",
+            "device example",
+            "dévice",
+            &"x".repeat(129),
+        ] {
+            assert!(matches!(
+                DeviceAuthenticator::new(
+                    "coordinator.example:443",
+                    [TrustedDevice {
+                        device_id: device_id.into(),
+                        public_key: [0; 32]
+                    }],
+                    2,
+                    Duration::from_secs(30),
+                ),
+                Err(crate::device_auth::DeviceAuthError::InvalidDevice)
+            ));
+            let mut verifier =
+                DeviceAuthenticator::new("coordinator.example:443", [], 2, Duration::from_secs(30))
+                    .unwrap();
+            assert!(matches!(
+                verifier.begin(device_id, now),
+                Err(crate::device_auth::DeviceAuthError::UnknownDevice)
+            ));
+            let mut r = router();
+            let a = advertisement(V1);
+            assert_eq!(
+                r.attach_authenticated(device_id, NONCE1, &a, &a, now),
+                Err(RouteError::Session(SessionError::InvalidIdentity))
+            );
+        }
     }
 
     #[test]

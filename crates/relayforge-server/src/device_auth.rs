@@ -124,9 +124,9 @@ pub struct DeviceAuthenticator {
     challenge_ttl: Duration,
 }
 
-fn valid_id(value: &str, max_len: usize) -> bool {
+fn valid_coordinator_id(value: &str) -> bool {
     !value.is_empty()
-        && value.len() <= max_len
+        && value.len() <= 128
         && value
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
@@ -153,7 +153,7 @@ impl DeviceAuthenticator {
         max_pending: usize,
         challenge_ttl: Duration,
     ) -> Result<Self, DeviceAuthError> {
-        if !valid_id(coordinator_id, 128)
+        if !valid_coordinator_id(coordinator_id)
             || !(1..=MAX_DEVICES).contains(&max_pending)
             || challenge_ttl.is_zero()
             || challenge_ttl > Duration::from_secs(120)
@@ -162,7 +162,7 @@ impl DeviceAuthenticator {
         }
         let mut devices = HashMap::new();
         for device in trusted {
-            if !valid_id(&device.device_id, 128) {
+            if !crate::session::valid_device_id(&device.device_id) {
                 return Err(DeviceAuthError::InvalidDevice);
             }
             if devices.len() >= MAX_DEVICES {
