@@ -20,7 +20,7 @@ const MAX_DEVICES: usize = 1024;
 const DOMAIN: &[u8] = b"relayforge-agent-session-proof-v1\0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DeviceAuthError {
+pub enum DeviceAuthError {
     InvalidConfiguration,
     InvalidDevice,
     DuplicateDevice,
@@ -38,7 +38,7 @@ pub(crate) enum DeviceAuthError {
 /// One owner-approved public key, loaded from trusted persistence.
 /// Constructing this value is NOT itself permission to enroll a device.
 #[derive(Debug, Clone)]
-pub(crate) struct TrustedDevice {
+pub struct TrustedDevice {
     pub device_id: String,
     pub public_key: [u8; 32],
 }
@@ -57,7 +57,7 @@ struct PendingChallenge {
 
 /// A challenge must be answered with an Ed25519 signature from the enrolled key.
 #[derive(Debug, Clone)]
-pub(crate) struct DeviceChallenge {
+pub struct DeviceChallenge {
     device_id: String,
     nonce: [u8; NONCE_LEN],
     signing_bytes: Vec<u8>,
@@ -80,7 +80,7 @@ impl DeviceChallenge {
 /// Successful one-time proof, scoped to the transport connection that
 /// carried the challenge. This is not host-resource or actor authorization.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct VerifiedDevice {
+pub struct VerifiedDevice {
     device_id: String,
 }
 
@@ -94,7 +94,7 @@ impl VerifiedDevice {
 /// most once. Restarting loses pending challenges (fail closed). Device
 /// revocations are NOT durable here; production must reload authoritative,
 /// durable revocation state and terminate existing sessions upon revocation.
-pub(crate) struct DeviceAuthenticator {
+pub struct DeviceAuthenticator {
     coordinator_id: String,
     devices: HashMap<String, DeviceRecord>,
     pending: HashMap<String, PendingChallenge>,
@@ -410,7 +410,10 @@ mod tests {
             verifier.begin("one", now),
             Err(DeviceAuthError::AlreadyPending)
         ));
-        assert_eq!(verifier.begin("two", now), Err(DeviceAuthError::Capacity));
+        assert!(matches!(
+            verifier.begin("two", now),
+            Err(DeviceAuthError::Capacity)
+        ));
         verifier.begin("two", now + Duration::from_secs(10)).unwrap();
         assert!(matches!(
             DeviceAuthenticator::new(
