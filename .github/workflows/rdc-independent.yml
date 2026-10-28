@@ -40,6 +40,7 @@ jobs:
           echo "run=$run" >> "$GITHUB_OUTPUT"
 
   verify-offline:
+    name: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main' && 'branch-verify-offline' || 'verify-offline' }}
     needs: coverage
     if: needs.coverage.outputs.run == 'true'
     runs-on: ubuntu-24.04
@@ -58,12 +59,15 @@ jobs:
           components: clippy, rustfmt
       - name: Identify pinned just compiler cache
         id: just-key
-        run: echo "compiler=$(rustc -Vv | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache/restore@v4
+        run: |
+          echo "compiler=$(rustc -Vv | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          . /etc/os-release
+          echo "image=$ID-$VERSION_ID" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         id: just-cache
         with:
           path: ${{ runner.temp }}/just
-          key: just-1.40.0-${{ runner.os }}-${{ runner.arch }}-${{ steps.just-key.outputs.compiler }}-v1
+          key: just-1.40.0-${{ runner.os }}-${{ steps.just-key.outputs.image }}-${{ runner.arch }}-${{ steps.just-key.outputs.compiler }}-v1
       - name: Install pinned just for recipe regression tests
         run: |
           if [[ '${{ steps.just-cache.outputs.cache-hit }}' != true ]]; then
@@ -71,7 +75,7 @@ jobs:
           fi
           test "$("$RUNNER_TEMP/just/bin/just" --version)" = "just 1.40.0"
           echo "$RUNNER_TEMP/just/bin" >> "$GITHUB_PATH"
-      - uses: actions/cache/save@v4
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.just-cache.outputs.cache-hit != 'true'
         with:
           path: ${{ runner.temp }}/just
@@ -132,6 +136,7 @@ jobs:
 
 
   ubuntu-release:
+    name: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main' && 'branch-ubuntu-release' || 'ubuntu-release' }}
     env:
       SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     needs: verify-offline
@@ -160,6 +165,7 @@ jobs:
           if-no-files-found: error
 
   arch-source:
+    name: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main' && 'branch-arch-source' || 'arch-source' }}
     needs: coverage
     if: needs.coverage.outputs.run == 'true'
     runs-on: ubuntu-22.04
@@ -210,6 +216,7 @@ jobs:
           docker rm -f arch-installed arch-build || true
 
   sandbox-integration:
+    name: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main' && 'branch-sandbox-integration' || 'sandbox-integration' }}
     needs: coverage
     if: needs.coverage.outputs.run == 'true'
     # Noble's restricted userns policy denies bwrap's loopback RTM_NEWADDR.
@@ -243,3 +250,28 @@ jobs:
         env:
           RELAYFORGE_CI_SYSTEMD_SYSTEM: "1"
         run: python3 -B scripts/test_tunnel_artifact_isolation.py .build/ci-sandbox/release/relayforge-mcp
+
+  verification:
+    name: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main' && 'Branch RDC verification' || 'RDC verification' }}
+    if: always()
+    needs: [coverage, verify-offline, ubuntu-release, arch-source, sandbox-integration]
+    runs-on: ubuntu-24.04
+    env:
+      RESULTS: ${{ toJSON(needs) }}
+      EVENT: ${{ github.event_name }}
+      REF: ${{ github.ref }}
+    steps:
+      - name: Fail closed on missing or failed verification
+        run: |
+          python3 - <<'PYVERIFY'
+          import json, os
+          results = json.loads(os.environ['RESULTS'])
+          coverage = results.pop('coverage')
+          assert coverage['result'] == 'success', 'coverage discovery failed'
+          duplicate = coverage['outputs'].get('run') == 'false'
+          if duplicate:
+              assert os.environ['EVENT'] == 'push' and os.environ['REF'].startswith('refs/heads/') and os.environ['REF'] != 'refs/heads/main'
+              assert all(job['result'] == 'skipped' for job in results.values())
+          else:
+              assert all(job['result'] == 'success' for job in results.values()), 'required verification failed or skipped'
+          PYVERIFY

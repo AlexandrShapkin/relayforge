@@ -70,6 +70,10 @@ def accepted_merge(sha, get=api):
                 or pr['base']['repo']['full_name'] != REPO or pr['merge_commit_sha'] != sha):
             continue
         head = pr['head']['sha']
+        # Activate the base-bound policy only after it exists in the merge's
+        # first parent. Historical immutable releases keep their original gate.
+        parent = command('git', 'rev-parse', f'{sha}^1')
+        base_bound = bool(command('git', 'ls-tree', parent, '--', 'ci/review_handoff.py'))
         comments = get(f"issues/{pr['number']}/comments?per_page=100")
         # Fail closed on pagination rather than overlooking a later revocation.
         if len(comments) >= 100:
@@ -79,7 +83,9 @@ def accepted_merge(sha, get=api):
         handoffs = [c for c in comments if c['user']['login'] == REPO.split('/')[0]
                     and (marker in c['body'].splitlines() or refusal in c['body'].splitlines())]
         if (handoffs and marker in handoffs[-1]['body'].splitlines()
-                and refusal not in handoffs[-1]['body'].splitlines()):
+                and refusal not in handoffs[-1]['body'].splitlines()
+                and (not base_bound or f'Independent technical ACCEPT base: {parent}'
+                     in handoffs[-1]['body'].splitlines())):
             return True
     return False
 
@@ -104,6 +110,12 @@ def elected_trigger(sha, event, get=api):
         completed.append(latest)
     winner = max(completed, key=lambda r: (r['updated_at'], r['id']))
     return (event['id'], event['run_attempt']) == (winner['id'], winner['run_attempt'])
+
+
+def release_plan(sha, event):
+    if not elected_trigger(sha, event):
+        return []
+    return pending_main(sha, main_history(), all_releases())
 
 
 def main_history():
@@ -534,8 +546,7 @@ if __name__ == '__main__':
             or event['repository']['full_name'] != REPO):
         raise SystemExit('only exact-source main push may release')
     if args.command == 'gate':
-        plan = (pending_main(args.sha, main_history(), all_releases())
-                if elected_trigger(args.sha, event) else [])
+        plan = release_plan(args.sha, event)
         with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
             output.write(f'ready={str(bool(plan)).lower()}\n')
             output.write('plan=' + json.dumps(plan, separators=(',', ':')) + '\n')

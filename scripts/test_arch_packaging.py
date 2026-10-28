@@ -97,7 +97,8 @@ class GateTests(unittest.TestCase):
                                     {'tag_name': 'v0.1.2', 'target_commitish': self.sha, 'assets': []},
                                     self.sha, 'v0.1.2')
 
-    def test_independent_accept_must_match_merged_pr_head(self):
+    @patch.object(release, 'command', return_value='')
+    def test_independent_accept_must_match_merged_pr_head(self, _command):
         head = 'b' * 40
         pr = {'number': 111, 'merged_at': 'now', 'merge_commit_sha': self.sha,
               'base': {'ref': 'main', 'repo': {'full_name': release.REPO}}, 'head': {'sha': head}}

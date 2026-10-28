@@ -13,7 +13,7 @@ permissions:
   issues: read
   statuses: write
 concurrency:
-  group: review-handoff-${{ github.event.pull_request.number || github.event.issue.number || 'main' }}
+  group: review-handoff-repository
   cancel-in-progress: false
 jobs:
   handoff:
@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       # Only trusted base/default source. Never fetch or execute the PR head.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.pull_request.base.sha || github.sha }}
           persist-credentials: false

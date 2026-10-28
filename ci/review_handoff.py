@@ -29,29 +29,58 @@ def accepted(comments, head, base=None):
             and (base is None or f'Independent technical ACCEPT base: {base}' in lines))
 
 
+def status(sha, state, description, get=api):
+    if not re.fullmatch('[0-9a-f]{40}', sha or ''):
+        raise ValueError('merge identity unavailable; no acceptance can be issued')
+    get(f'statuses/{sha}', '-f', f'context={CONTEXT}', '-f', f'state={state}',
+        '-f', f'description={description}')
+
+
+def evaluate(pr, get=api):
+    # The synthetic merge SHA binds both head AND base. Never issue a success on
+    # the head SHA, where it could survive a base change. A missing/changed merge
+    # identity has no successful status and blocks the required merge check.
+    merge = pr.get('merge_commit_sha')
+    status(merge, 'pending', 'Rechecking independent review handoff', get)
+    try:
+        head, base = pr['head']['sha'], pr['base']['sha']
+        path = f"issues/{pr['number']}/comments?per_page=100"
+        comments = get(path)
+        latest = get(f"pulls/{pr['number']}")
+        current = get(path)
+        final = get(f"pulls/{pr['number']}")
+        identity = lambda p: (p['head']['sha'], p['base']['sha'], p.get('merge_commit_sha'))
+        if identity(pr) != identity(latest) or identity(pr) != identity(final):
+            raise ValueError('PR head/base/merge identity changed; retry required')
+        ok = comments == current and accepted(current, head, base)
+        status(merge, 'success' if ok else 'failure',
+               'Independent review matches HEAD and base' if ok else
+               'Missing, changed, revoked or stale independent review handoff', get)
+        return ok
+    except Exception:
+        status(merge, 'failure', 'Review re-evaluation failed; retry required', get)
+        raise
+
+
 def main():
     event = json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text())
     if os.environ['GITHUB_REPOSITORY'] != REPO:
         raise SystemExit('wrong repository')
     number = (event.get('pull_request') or event.get('issue') or {}).get('number')
-    # Main changes invalidate acceptance of the old base for every open PR.
     prs = ([api(f'pulls/{number}')] if number else
            api('pulls?state=open&base=main&per_page=100'))
-    if not number and len(prs) >= 100:
-        raise SystemExit('open PR pagination requires reconciliation')
+    failures = []
     for pr in prs:
         if pr['state'] != 'open' or pr['base']['ref'] != 'main':
             continue
-        head, base = pr['head']['sha'], pr['base']['sha']
-        comments = api(f"issues/{pr['number']}/comments?per_page=100")
-        ok = accepted(comments, head, base)
-        latest = api(f"pulls/{pr['number']}")
-        if (latest['head']['sha'], latest['base']['sha']) != (head, base):
-            raise SystemExit('PR identity changed during review check; retry required')
-        api(f'statuses/{head}', '-f', f'context={CONTEXT}', '-f',
-            f"state={'success' if ok else 'failure'}", '-f',
-            'description=' + ('Owner handoff matches independent review HEAD and base' if ok else
-                             'Missing, revoked, stale HEAD/base independent review handoff'))
+        try:
+            evaluate(pr)
+        except Exception as error:
+            failures.append(f"PR {pr['number']}: {type(error).__name__}")
+    if not number and len(prs) >= 100:
+        failures.append('open PR pagination requires reconciliation')
+    if failures:
+        raise SystemExit('; '.join(failures))
 
 
 if __name__ == '__main__':
