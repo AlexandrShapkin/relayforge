@@ -42,13 +42,24 @@ struct ConnectedAgent {
 
 /// Describes a validated dispatch target, not authorization to access
 /// anything on that host. The agent independently checks every operation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DispatchTarget {
     device_id: String,
     request_id: String,
     wire_version: WireVersion,
     // Private binding to the authenticated connection that consumed this request ID.
     session_nonce: String,
+}
+
+impl std::fmt::Debug for DispatchTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DispatchTarget")
+            .field("device_id", &self.device_id)
+            .field("request_id", &self.request_id)
+            .field("wire_version", &self.wire_version)
+            .field("session_nonce", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl DispatchTarget {
@@ -471,6 +482,10 @@ mod tests {
                 .prepare_after_gateway_authorization(device_id, &header("r1"), now)
                 .unwrap();
             assert_eq!(r.validate_for_dispatch(&target, &nonce, now), Ok(()));
+            for debug in [format!("{target:?}"), format!("{target:#?}")] {
+                assert!(debug.contains("[REDACTED]"));
+                assert!(!debug.contains(&nonce));
+            }
             // A different connection nonce is rejected, even for the same device.
             assert_eq!(
                 r.validate_for_dispatch(&target, NONCE1, now),
