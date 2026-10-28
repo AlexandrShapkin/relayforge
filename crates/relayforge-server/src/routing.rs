@@ -94,11 +94,13 @@ impl SessionRouter {
     ) -> Result<(), RouteError> {
         let contract = negotiate(coordinator, agent)?;
         // Dead/expired connections never remain usable or block reconnection.
-        self.agents.retain(|_, connection| now < connection.expires_at);
+        self.agents
+            .retain(|_, connection| now < connection.expires_at);
         if self.agents.contains_key(device_id) {
             return Err(RouteError::AlreadyConnected);
         }
-        self.sessions.register_authenticated(device_id, nonce, now)?;
+        self.sessions
+            .register_authenticated(device_id, nonce, now)?;
         self.agents.insert(
             device_id.to_owned(),
             ConnectedAgent {
@@ -295,14 +297,8 @@ mod tests {
         let a = advertisement(V1);
         r.attach_authenticated("device_a", NONCE1, &a, &a, now)
             .unwrap();
-        r.attach_authenticated(
-            "device_a",
-            NONCE2,
-            &a,
-            &a,
-            now + Duration::from_secs(30),
-        )
-        .unwrap();
+        r.attach_authenticated("device_a", NONCE2, &a, &a, now + Duration::from_secs(30))
+            .unwrap();
         assert_eq!(
             r.prepare_after_gateway_authorization(
                 "device_a",
