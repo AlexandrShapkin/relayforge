@@ -45,6 +45,8 @@ pub struct DispatchTarget {
     device_id: String,
     request_id: String,
     wire_version: WireVersion,
+    // Private binding to the authenticated connection that consumed this request ID.
+    session_nonce: String,
 }
 
 impl DispatchTarget {
@@ -133,7 +135,30 @@ impl SessionRouter {
             device_id: device_id.to_owned(),
             request_id: header.request_id.clone(),
             wire_version: agent.contract.wire_version(),
+            session_nonce: agent.nonce.clone(),
         })
+    }
+
+    /// Revalidate immediately before sending on the *same* authenticated transport
+    /// connection identified by `connection_nonce`. A target prepared on an old
+    /// session must never be sent via a newer connection for the same device.
+    /// The adapter must not resolve the device ID again after this check.
+    /// This is a session-binding check, not actor or resource authorization.
+    pub fn validate_for_dispatch(
+        &self,
+        target: &DispatchTarget,
+        connection_nonce: &str,
+        now: Instant,
+    ) -> Result<(), RouteError> {
+        let agent = self.agents.get(&target.device_id).ok_or(RouteError::Offline)?;
+        if now >= agent.expires_at
+            || agent.nonce != target.session_nonce
+            || agent.nonce != connection_nonce
+            || agent.contract.wire_version() != target.wire_version
+        {
+            return Err(RouteError::Offline);
+        }
+        Ok(())
     }
 
     /// Drops the active device route and revokes its session. It is safe for
@@ -308,6 +333,43 @@ mod tests {
             .unwrap()
             .device_id(),
             "device_a"
+        );
+    }
+
+    #[test]
+    fn prepared_targets_cannot_cross_authenticated_reconnections_or_expiry() {
+        let now = Instant::now();
+        let mut r = router();
+        let a = advertisement(V1);
+        r.attach_authenticated("device_a", NONCE1, &a, &a, now)
+            .unwrap();
+        let old = r
+            .prepare_after_gateway_authorization("device_a", &header("r1"), now)
+            .unwrap();
+        assert_eq!(r.validate_for_dispatch(&old, NONCE1, now), Ok(()));
+        assert_eq!(r.validate_for_dispatch(&old, NONCE2, now), Err(RouteError::Offline));
+
+        r.disconnect("device_a");
+        assert_eq!(r.validate_for_dispatch(&old, NONCE1, now), Err(RouteError::Offline));
+        r.attach_authenticated("device_a", NONCE2, &a, &a, now)
+            .unwrap();
+        // A previous target cannot be delivered through device_a's new session.
+        assert_eq!(r.validate_for_dispatch(&old, NONCE2, now), Err(RouteError::Offline));
+        let current = r
+            .prepare_after_gateway_authorization("device_a", &header("r1"), now)
+            .unwrap();
+        assert_eq!(r.validate_for_dispatch(&current, NONCE2, now), Ok(()));
+        assert_eq!(
+            r.validate_for_dispatch(&current, NONCE2, now + Duration::from_secs(30)),
+            Err(RouteError::Offline)
+        );
+        // Expiry permits a fresh connection but cannot revive the old target.
+        let fresh_nonce = "fedcba9876543210fedcba9876543210";
+        r.attach_authenticated("device_a", fresh_nonce, &a, &a, now + Duration::from_secs(30))
+            .unwrap();
+        assert_eq!(
+            r.validate_for_dispatch(&current, fresh_nonce, now + Duration::from_secs(30)),
+            Err(RouteError::Offline)
         );
     }
 
