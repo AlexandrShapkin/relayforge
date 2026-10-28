@@ -10,5 +10,6 @@ mod tests {
     }
 }
 
+pub mod device_auth;
 pub mod routing;
 pub mod session;
