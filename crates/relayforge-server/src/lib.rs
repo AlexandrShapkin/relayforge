@@ -11,3 +11,4 @@ mod tests {
 }
 
 pub mod session;
+pub mod routing;
