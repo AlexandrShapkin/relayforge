@@ -6,7 +6,6 @@
 //! no untrusted network input may populate it. Only the authenticated transport
 //! should deliver the fresh challenge and its response on the same connection.
 
-use subtle::ConstantTimeEq;
 use ring::{
     rand::{SecureRandom, SystemRandom},
     signature::{UnparsedPublicKey, ED25519},
@@ -15,6 +14,7 @@ use std::{
     collections::HashMap,
     time::{Duration, Instant},
 };
+use subtle::ConstantTimeEq;
 
 const NONCE_LEN: usize = 32;
 const MAX_DEVICES: usize = 1024;
