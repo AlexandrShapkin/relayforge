@@ -319,7 +319,7 @@ mod tests {
     #[test]
     fn wrong_key_and_cross_coordinator_replay_denied() {
         let now = Instant::now();
-        let (device, _owner) = key("thinkpad");
+        let (device, owner) = key("thinkpad");
         let (_, attacker) = key("attacker");
         let mut verifier = auth(device);
         let challenge = verifier.begin("thinkpad", now).unwrap();
@@ -334,7 +334,7 @@ mod tests {
         );
         let next = verifier.begin("thinkpad", now).unwrap();
         let mismatched = signing_bytes("another.coordinator", "thinkpad", next.nonce());
-        let sig = attacker.sign(&mismatched);
+        let sig = owner.sign(&mismatched);
         assert_eq!(
             verifier.complete("thinkpad", next.nonce(), sig.as_ref(), now),
             Err(DeviceAuthError::InvalidSignature)
