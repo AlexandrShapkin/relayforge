@@ -1,0 +1,456 @@
+//! Cryptographic proof of an enrolled device's private key (source-only).
+//!
+//! This is NOT an enrollment authority, Keycloak verifier, certificate issuer,
+//! durable trust store, transport listener or permission grant. The trusted key
+//! inventory must come from an independently owner-approved, revocable store;
+//! no untrusted network input may populate it. Only the authenticated transport
+//! should deliver the fresh challenge and its response on the same connection.
+
+use ring::{
+    rand::{SecureRandom, SystemRandom},
+    signature::{UnparsedPublicKey, ED25519},
+};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
+
+const NONCE_LEN: usize = 32;
+const MAX_DEVICES: usize = 1024;
+const DOMAIN: &[u8] = b"relayforge-agent-session-proof-v1\0";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeviceAuthError {
+    InvalidConfiguration,
+    InvalidDevice,
+    DuplicateDevice,
+    UnknownDevice,
+    Revoked,
+    Capacity,
+    AlreadyPending,
+    NotPending,
+    InvalidChallenge,
+    Expired,
+    InvalidSignature,
+    RandomUnavailable,
+}
+
+/// One owner-approved public key, loaded from trusted persistence.
+/// Constructing this value is NOT itself permission to enroll a device.
+#[derive(Debug, Clone)]
+pub(crate) struct TrustedDevice {
+    pub device_id: String,
+    pub public_key: [u8; 32],
+}
+
+#[derive(Debug)]
+struct DeviceRecord {
+    public_key: [u8; 32],
+    revoked: bool,
+}
+
+#[derive(Debug)]
+struct PendingChallenge {
+    nonce: [u8; NONCE_LEN],
+    expires_at: Instant,
+}
+
+/// A challenge must be answered with an Ed25519 signature from the enrolled key.
+#[derive(Debug, Clone)]
+pub(crate) struct DeviceChallenge {
+    device_id: String,
+    nonce: [u8; NONCE_LEN],
+    signing_bytes: Vec<u8>,
+}
+
+impl DeviceChallenge {
+    pub fn device_id(&self) -> &str {
+        &self.device_id
+    }
+
+    pub fn nonce(&self) -> &[u8; NONCE_LEN] {
+        &self.nonce
+    }
+
+    pub fn signing_bytes(&self) -> &[u8] {
+        &self.signing_bytes
+    }
+}
+
+/// Successful one-time proof, scoped to the transport connection that
+/// carried the challenge. This is not host-resource or actor authorization.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct VerifiedDevice {
+    device_id: String,
+}
+
+impl VerifiedDevice {
+    pub fn device_id(&self) -> &str {
+        &self.device_id
+    }
+}
+
+/// In-memory proof state. Every pending challenge expires and is consumed at
+/// most once. Restarting loses pending challenges (fail closed). Device
+/// revocations are NOT durable here; production must reload authoritative,
+/// durable revocation state and terminate existing sessions upon revocation.
+pub(crate) struct DeviceAuthenticator {
+    coordinator_id: String,
+    devices: HashMap<String, DeviceRecord>,
+    pending: HashMap<String, PendingChallenge>,
+    max_pending: usize,
+    challenge_ttl: Duration,
+}
+
+fn valid_id(value: &str, max_len: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max_len
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
+}
+
+fn signing_bytes(coordinator_id: &str, device_id: &str, nonce: &[u8; NONCE_LEN]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(DOMAIN.len() + coordinator_id.len() + device_id.len() + 44);
+    out.extend_from_slice(DOMAIN);
+    for part in [
+        coordinator_id.as_bytes(),
+        device_id.as_bytes(),
+        nonce.as_slice(),
+    ] {
+        out.extend_from_slice(&(part.len() as u32).to_be_bytes());
+        out.extend_from_slice(part);
+    }
+    out
+}
+
+impl DeviceAuthenticator {
+    pub fn new(
+        coordinator_id: &str,
+        trusted: impl IntoIterator<Item = TrustedDevice>,
+        max_pending: usize,
+        challenge_ttl: Duration,
+    ) -> Result<Self, DeviceAuthError> {
+        if !valid_id(coordinator_id, 128)
+            || !(1..=MAX_DEVICES).contains(&max_pending)
+            || challenge_ttl.is_zero()
+            || challenge_ttl > Duration::from_secs(120)
+        {
+            return Err(DeviceAuthError::InvalidConfiguration);
+        }
+        let mut devices = HashMap::new();
+        for device in trusted {
+            if !valid_id(&device.device_id, 128) {
+                return Err(DeviceAuthError::InvalidDevice);
+            }
+            if devices.len() >= MAX_DEVICES {
+                return Err(DeviceAuthError::Capacity);
+            }
+            if devices
+                .insert(
+                    device.device_id,
+                    DeviceRecord {
+                        public_key: device.public_key,
+                        revoked: false,
+                    },
+                )
+                .is_some()
+            {
+                return Err(DeviceAuthError::DuplicateDevice);
+            }
+        }
+        Ok(Self {
+            coordinator_id: coordinator_id.into(),
+            devices,
+            pending: HashMap::new(),
+            max_pending,
+            challenge_ttl,
+        })
+    }
+
+    /// Only use with records already approved through the owner enrollment
+    /// process. Challenges do not authorize a device or grant capabilities.
+    pub fn begin(
+        &mut self,
+        device_id: &str,
+        now: Instant,
+    ) -> Result<DeviceChallenge, DeviceAuthError> {
+        match self.devices.get(device_id) {
+            None => return Err(DeviceAuthError::UnknownDevice),
+            Some(record) if record.revoked => return Err(DeviceAuthError::Revoked),
+            Some(_) => {}
+        }
+        self.pending.retain(|_, p| now < p.expires_at);
+        if self.pending.contains_key(device_id) {
+            return Err(DeviceAuthError::AlreadyPending);
+        }
+        if self.pending.len() >= self.max_pending {
+            return Err(DeviceAuthError::Capacity);
+        }
+        let mut nonce = [0; NONCE_LEN];
+        SystemRandom::new()
+            .fill(&mut nonce)
+            .map_err(|_| DeviceAuthError::RandomUnavailable)?;
+        self.pending.insert(
+            device_id.into(),
+            PendingChallenge {
+                nonce,
+                expires_at: now + self.challenge_ttl,
+            },
+        );
+        Ok(DeviceChallenge {
+            device_id: device_id.into(),
+            nonce,
+            signing_bytes: signing_bytes(&self.coordinator_id, device_id, &nonce),
+        })
+    }
+
+    /// Consume the matching nonce before checking its signature: failed proof
+    /// cannot be retried. An incorrect nonce does not consume the valid
+    /// challenge, and never authenticates a device.
+    pub fn complete(
+        &mut self,
+        device_id: &str,
+        nonce: &[u8; NONCE_LEN],
+        signature: &[u8],
+        now: Instant,
+    ) -> Result<VerifiedDevice, DeviceAuthError> {
+        let record = self
+            .devices
+            .get(device_id)
+            .ok_or(DeviceAuthError::UnknownDevice)?;
+        if record.revoked {
+            return Err(DeviceAuthError::Revoked);
+        }
+        let pending = self
+            .pending
+            .get(device_id)
+            .ok_or(DeviceAuthError::NotPending)?;
+        if &pending.nonce != nonce {
+            return Err(DeviceAuthError::InvalidChallenge);
+        }
+        let pending = self.pending.remove(device_id).ok_or(DeviceAuthError::NotPending)?;
+        if now >= pending.expires_at {
+            return Err(DeviceAuthError::Expired);
+        }
+        let payload = signing_bytes(&self.coordinator_id, device_id, nonce);
+        UnparsedPublicKey::new(&ED25519, record.public_key)
+            .verify(&payload, signature)
+            .map_err(|_| DeviceAuthError::InvalidSignature)?;
+        Ok(VerifiedDevice {
+            device_id: device_id.into(),
+        })
+    }
+
+    /// Synchronous in-memory invalidation only. Persist the revocation and
+    /// disconnect currently active sessions in the future trusted adapter.
+    pub fn revoke(&mut self, device_id: &str) -> Result<(), DeviceAuthError> {
+        let record = self
+            .devices
+            .get_mut(device_id)
+            .ok_or(DeviceAuthError::UnknownDevice)?;
+        record.revoked = true;
+        self.pending.remove(device_id);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ring::signature::{Ed25519KeyPair, KeyPair};
+
+    fn key(id: &str) -> (TrustedDevice, Ed25519KeyPair) {
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
+        let pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+        let mut public_key = [0; 32];
+        public_key.copy_from_slice(pair.public_key().as_ref());
+        (
+            TrustedDevice {
+                device_id: id.into(),
+                public_key,
+            },
+            pair,
+        )
+    }
+
+    fn auth(device: TrustedDevice) -> DeviceAuthenticator {
+        DeviceAuthenticator::new("relayforge.ru0", [device], 2, Duration::from_secs(30)).unwrap()
+    }
+
+    #[test]
+    fn genuine_one_time_proof_authenticates_only_registered_device() {
+        let now = Instant::now();
+        let (device, keypair) = key("thinkpad");
+        let mut verifier = auth(device);
+        let challenge = verifier.begin("thinkpad", now).unwrap();
+        assert_eq!(challenge.device_id(), "thinkpad");
+        let sig = keypair.sign(challenge.signing_bytes());
+        let verified = verifier
+            .complete("thinkpad", challenge.nonce(), sig.as_ref(), now)
+            .unwrap();
+        assert_eq!(verified.device_id(), "thinkpad");
+        assert!(matches!(
+            verifier.complete("thinkpad", challenge.nonce(), sig.as_ref(), now),
+            Err(DeviceAuthError::NotPending)
+        ));
+    }
+
+    #[test]
+    fn unauthenticated_unknown_or_wrong_device_denied() {
+        let now = Instant::now();
+        let (device, keypair) = key("thinkpad");
+        let mut verifier = auth(device);
+        assert!(matches!(
+            verifier.begin("unknown", now),
+            Err(DeviceAuthError::UnknownDevice)
+        ));
+        let challenge = verifier.begin("thinkpad", now).unwrap();
+        let sig = keypair.sign(challenge.signing_bytes());
+        assert!(matches!(
+            verifier.complete("unknown", challenge.nonce(), sig.as_ref(), now),
+            Err(DeviceAuthError::UnknownDevice)
+        ));
+        assert!(verifier
+            .complete("thinkpad", challenge.nonce(), sig.as_ref(), now)
+            .is_ok());
+    }
+
+    #[test]
+    fn wrong_key_and_cross_coordinator_replay_denied() {
+        let now = Instant::now();
+        let (device, _owner) = key("thinkpad");
+        let (_, attacker) = key("attacker");
+        let mut verifier = auth(device);
+        let challenge = verifier.begin("thinkpad", now).unwrap();
+        let bad = attacker.sign(challenge.signing_bytes());
+        assert_eq!(
+            verifier.complete("thinkpad", challenge.nonce(), bad.as_ref(), now),
+            Err(DeviceAuthError::InvalidSignature)
+        );
+        assert_eq!(
+            verifier.complete("thinkpad", challenge.nonce(), bad.as_ref(), now),
+            Err(DeviceAuthError::NotPending)
+        );
+        let next = verifier.begin("thinkpad", now).unwrap();
+        let mismatched = signing_bytes("another.coordinator", "thinkpad", next.nonce());
+        let sig = attacker.sign(&mismatched);
+        assert_eq!(
+            verifier.complete("thinkpad", next.nonce(), sig.as_ref(), now),
+            Err(DeviceAuthError::InvalidSignature)
+        );
+    }
+
+    #[test]
+    fn expired_pending_proof_is_never_accepted() {
+        let now = Instant::now();
+        let (device, pair) = key("thinkpad");
+        let mut verifier = auth(device);
+        let challenge = verifier.begin("thinkpad", now).unwrap();
+        let sig = pair.sign(challenge.signing_bytes());
+        assert_eq!(
+            verifier.complete(
+                "thinkpad",
+                challenge.nonce(),
+                sig.as_ref(),
+                now + Duration::from_secs(30)
+            ),
+            Err(DeviceAuthError::Expired)
+        );
+    }
+
+    #[test]
+    fn revocation_blocks_pending_and_new_proofs() {
+        let now = Instant::now();
+        let (device, pair) = key("thinkpad");
+        let mut verifier = auth(device);
+        let challenge = verifier.begin("thinkpad", now).unwrap();
+        let sig = pair.sign(challenge.signing_bytes());
+        verifier.revoke("thinkpad").unwrap();
+        assert_eq!(
+            verifier.complete("thinkpad", challenge.nonce(), sig.as_ref(), now),
+            Err(DeviceAuthError::Revoked)
+        );
+        assert!(matches!(
+            verifier.begin("thinkpad", now),
+            Err(DeviceAuthError::Revoked)
+        ));
+    }
+
+    #[test]
+    fn invalid_nonce_does_not_consume_valid_challenge() {
+        let now = Instant::now();
+        let (device, pair) = key("thinkpad");
+        let mut verifier = auth(device);
+        let challenge = verifier.begin("thinkpad", now).unwrap();
+        let sig = pair.sign(challenge.signing_bytes());
+        assert_eq!(
+            verifier.complete("thinkpad", &[0; NONCE_LEN], sig.as_ref(), now),
+            Err(DeviceAuthError::InvalidChallenge)
+        );
+        assert!(verifier
+            .complete("thinkpad", challenge.nonce(), sig.as_ref(), now)
+            .is_ok());
+    }
+
+    #[test]
+    fn bounded_pending_challenges_and_duplicate_device_ids() {
+        let now = Instant::now();
+        let (one, _) = key("one");
+        let (two, _) = key("two");
+        let mut verifier = DeviceAuthenticator::new(
+            "relayforge.ru0",
+            [one.clone(), two],
+            1,
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        verifier.begin("one", now).unwrap();
+        assert!(matches!(
+            verifier.begin("one", now),
+            Err(DeviceAuthError::AlreadyPending)
+        ));
+        assert_eq!(verifier.begin("two", now), Err(DeviceAuthError::Capacity));
+        verifier.begin("two", now + Duration::from_secs(10)).unwrap();
+        assert!(matches!(
+            DeviceAuthenticator::new(
+                "relayforge.ru0",
+                [one.clone(), one],
+                2,
+                Duration::from_secs(10)
+            ),
+            Err(DeviceAuthError::DuplicateDevice)
+        ));
+    }
+
+    #[test]
+    fn identity_and_ttl_configuration_fail_closed() {
+        let (device, _) = key("thinkpad");
+        assert!(matches!(
+            DeviceAuthenticator::new("", [device.clone()], 2, Duration::from_secs(10)),
+            Err(DeviceAuthError::InvalidConfiguration)
+        ));
+        assert!(matches!(
+            DeviceAuthenticator::new("ru0", [device.clone()], 0, Duration::from_secs(10)),
+            Err(DeviceAuthError::InvalidConfiguration)
+        ));
+        assert!(matches!(
+            DeviceAuthenticator::new("ru0", [device], 2, Duration::from_secs(121)),
+            Err(DeviceAuthError::InvalidConfiguration)
+        ));
+    }
+
+    #[test]
+    fn key_is_bound_to_protocol_domain_and_coordinator() {
+        let nonce = [7; NONCE_LEN];
+        assert_ne!(
+            signing_bytes("ru0", "device", &nonce),
+            signing_bytes("srv0", "device", &nonce)
+        );
+        assert_ne!(
+            signing_bytes("ru0", "device", &nonce),
+            signing_bytes("ru0", "device2", &nonce)
+        );
+        assert!(signing_bytes("ru0", "device", &nonce).starts_with(DOMAIN));
+    }
+}
