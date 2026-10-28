@@ -771,6 +771,7 @@ dependencies = [
  "relayforge-policy",
  "relayforge-protocol",
  "ring",
+ "subtle",
 ]
 
 [[package]]
