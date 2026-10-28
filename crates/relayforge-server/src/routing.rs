@@ -98,6 +98,9 @@ impl SessionRouter {
         agent: &Advertisement,
         now: Instant,
     ) -> Result<(), RouteError> {
+        if now >= verified.expires_at() {
+            return Err(RouteError::Session(SessionError::Expired));
+        }
         self.attach_authenticated(
             verified.device_id(),
             verified.session_nonce(),
@@ -456,6 +459,36 @@ mod tests {
         assert_eq!(
             r.validate_for_dispatch(&target, NONCE1, now),
             Err(RouteError::Offline)
+        );
+    }
+
+    #[test]
+    fn old_verified_token_cannot_be_attached_after_challenge_expiry() {
+        let now = Instant::now();
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
+        let pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+        let mut public_key = [0; 32];
+        public_key.copy_from_slice(pair.public_key().as_ref());
+        let mut authenticator = DeviceAuthenticator::new(
+            "relayforge.ru0",
+            [TrustedDevice {
+                device_id: "device_a".into(),
+                public_key,
+            }],
+            2,
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let challenge = authenticator.begin("device_a", now).unwrap();
+        let sig = pair.sign(challenge.signing_bytes());
+        let verified = authenticator
+            .complete("device_a", challenge.nonce(), sig.as_ref(), now)
+            .unwrap();
+        let mut r = router();
+        let a = advertisement(V1);
+        assert_eq!(
+            r.attach_verified(verified, &a, &a, now + Duration::from_secs(5)),
+            Err(RouteError::Session(SessionError::Expired))
         );
     }
 
