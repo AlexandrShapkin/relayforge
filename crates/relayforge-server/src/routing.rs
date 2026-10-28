@@ -5,6 +5,7 @@
 //! an MCP actor is authorized to contact a device or operate on host resources.
 //! Only a future verified gateway/transport adapter may call its public API.
 
+use crate::device_auth::VerifiedDevice;
 use crate::session::{SessionError, Sessions};
 use relayforge_protocol::wire::{
     negotiate, Advertisement, Negotiated, RequestHeader, WireError, WireVersion,
@@ -83,10 +84,36 @@ impl SessionRouter {
         }
     }
 
+    /// Register an agent only after its owner-enrolled private key has
+    /// answered a one-time challenge. Reuse the nonce that was signed;
+    /// do not substitute a coordinator-generated or caller-selected nonce.
+    ///
+    /// The network adapter must still bind the challenge and response to
+    /// the same verified TLS connection and check owner enrollment/revocation.
+    /// This only proves device identity, never per-resource/actor permission.
+    pub fn attach_verified(
+        &mut self,
+        verified: VerifiedDevice,
+        coordinator: &Advertisement,
+        agent: &Advertisement,
+        now: Instant,
+    ) -> Result<(), RouteError> {
+        if now >= verified.expires_at() {
+            return Err(RouteError::Session(SessionError::Expired));
+        }
+        self.attach_authenticated(
+            verified.device_id(),
+            verified.session_nonce(),
+            coordinator,
+            agent,
+            now,
+        )
+    }
+
     /// Called only after independent cryptographic device authentication.
     /// The session nonce must be fresh CSPRNG output from the transport.
     /// Capability advertisement is not permission or proof of identity.
-    pub fn attach_authenticated(
+    fn attach_authenticated(
         &mut self,
         device_id: &str,
         nonce: &str,
@@ -176,7 +203,12 @@ impl SessionRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::device_auth::{DeviceAuthenticator, TrustedDevice};
     use relayforge_protocol::wire::{OperationSchema, WireVersion};
+    use ring::{
+        rand::SystemRandom,
+        signature::{Ed25519KeyPair, KeyPair},
+    };
 
     const V1: WireVersion = WireVersion { major: 1, minor: 0 };
     const V2: WireVersion = WireVersion { major: 2, minor: 0 };
@@ -388,6 +420,117 @@ mod tests {
         assert_eq!(
             r.validate_for_dispatch(&current, fresh_nonce, now + Duration::from_secs(30)),
             Err(RouteError::Offline)
+        );
+    }
+
+    #[test]
+    fn cryptographic_device_proof_can_bind_a_route_without_caller_nonce() {
+        for device_id in ["a", "Device_09-z", &"x".repeat(128)] {
+            let now = Instant::now();
+            let pkcs8 = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
+            let device_key = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+            let mut public_key = [0; 32];
+            public_key.copy_from_slice(device_key.public_key().as_ref());
+            let mut verifier = DeviceAuthenticator::new(
+                "relayforge.ru0",
+                [TrustedDevice {
+                    device_id: device_id.into(),
+                    public_key,
+                }],
+                2,
+                Duration::from_secs(30),
+            )
+            .unwrap();
+            let challenge = verifier.begin(device_id, now).unwrap();
+            let signed = device_key.sign(challenge.signing_bytes());
+            let verified = verifier
+                .complete(device_id, challenge.nonce(), signed.as_ref(), now)
+                .unwrap();
+            let nonce = verified.session_nonce().to_owned();
+
+            let mut r = router();
+            let advertised = advertisement(V1);
+            r.attach_verified(verified, &advertised, &advertised, now)
+                .unwrap();
+            let target = r
+                .prepare_after_gateway_authorization(device_id, &header("r1"), now)
+                .unwrap();
+            assert_eq!(r.validate_for_dispatch(&target, &nonce, now), Ok(()));
+            // A different connection nonce is rejected, even for the same device.
+            assert_eq!(
+                r.validate_for_dispatch(&target, NONCE1, now),
+                Err(RouteError::Offline)
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_device_ids_are_rejected_before_proof_issuance() {
+        let now = Instant::now();
+        for device_id in [
+            "",
+            "device.example",
+            "device:example",
+            "device/example",
+            "device example",
+            "dévice",
+            &"x".repeat(129),
+        ] {
+            assert!(matches!(
+                DeviceAuthenticator::new(
+                    "coordinator.example:443",
+                    [TrustedDevice {
+                        device_id: device_id.into(),
+                        public_key: [0; 32]
+                    }],
+                    2,
+                    Duration::from_secs(30),
+                ),
+                Err(crate::device_auth::DeviceAuthError::InvalidDevice)
+            ));
+            let mut verifier =
+                DeviceAuthenticator::new("coordinator.example:443", [], 2, Duration::from_secs(30))
+                    .unwrap();
+            assert!(matches!(
+                verifier.begin(device_id, now),
+                Err(crate::device_auth::DeviceAuthError::UnknownDevice)
+            ));
+            let mut r = router();
+            let a = advertisement(V1);
+            assert_eq!(
+                r.attach_authenticated(device_id, NONCE1, &a, &a, now),
+                Err(RouteError::Session(SessionError::InvalidIdentity))
+            );
+        }
+    }
+
+    #[test]
+    fn old_verified_token_cannot_be_attached_after_challenge_expiry() {
+        let now = Instant::now();
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).unwrap();
+        let pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+        let mut public_key = [0; 32];
+        public_key.copy_from_slice(pair.public_key().as_ref());
+        let mut authenticator = DeviceAuthenticator::new(
+            "relayforge.ru0",
+            [TrustedDevice {
+                device_id: "device_a".into(),
+                public_key,
+            }],
+            2,
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let challenge = authenticator.begin("device_a", now).unwrap();
+        let sig = pair.sign(challenge.signing_bytes());
+        let verified = authenticator
+            .complete("device_a", challenge.nonce(), sig.as_ref(), now)
+            .unwrap();
+        let mut r = router();
+        let a = advertisement(V1);
+        assert_eq!(
+            r.attach_verified(verified, &a, &a, now + Duration::from_secs(5)),
+            Err(RouteError::Session(SessionError::Expired))
         );
     }
 
