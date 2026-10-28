@@ -208,7 +208,9 @@ The trusted `Independent review handoff` workflow publishes the status
 `Independent technical ACCEPT` on the synthetic PR merge SHA before merge.
 It never issues success on the head SHA: a changed base yields a different
 merge identity, which has no acceptance. All handoff writes are serialized
-repository-wide, with pending/failure on reevaluation and repeated identity
+repository-wide; every event sweeps all open main PRs so GitHub concurrency
+coalescing cannot lose another PR’s revocation. The gate uses pending/failure
+on reevaluation and repeated identity
 and comment reads before success. It reads only owner-authored PR
 comments, never a mutable PR description or PR executable code. After an actual
 independent review, the owner relays the report and these standalone lines:

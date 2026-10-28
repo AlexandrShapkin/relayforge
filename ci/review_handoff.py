@@ -63,12 +63,13 @@ def evaluate(pr, get=api):
 
 
 def main():
-    event = json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text())
+    json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text())
     if os.environ['GITHUB_REPOSITORY'] != REPO:
         raise SystemExit('wrong repository')
-    number = (event.get('pull_request') or event.get('issue') or {}).get('number')
-    prs = ([api(f'pulls/{number}')] if number else
-           api('pulls?state=open&base=main&per_page=100'))
+    # GitHub concurrency keeps only one pending run. Sweep all open PRs on
+    # every event so coalescing comments for different PRs cannot lose a
+    # revocation. No event-supplied head or comment body is trusted.
+    prs = api('pulls?state=open&base=main&per_page=100')
     failures = []
     for pr in prs:
         if pr['state'] != 'open' or pr['base']['ref'] != 'main':
@@ -77,7 +78,7 @@ def main():
             evaluate(pr)
         except Exception as error:
             failures.append(f"PR {pr['number']}: {type(error).__name__}")
-    if not number and len(prs) >= 100:
+    if len(prs) >= 100:
         failures.append('open PR pagination requires reconciliation')
     if failures:
         raise SystemExit('; '.join(failures))

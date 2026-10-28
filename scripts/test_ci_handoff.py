@@ -256,3 +256,21 @@ class ElectionPlanTests(unittest.TestCase):
                 patch.object(release, 'pending_main', return_value=plan) as pending:
             self.assertEqual(release.release_plan(commits[-1], {}), plan)
             pending.assert_called_once_with(commits[-1], commits, [])
+
+
+class CoalescingTests(unittest.TestCase):
+    def test_comment_event_sweeps_other_prs_too(self):
+        import json
+        import os
+        import tempfile
+        from unittest.mock import patch
+        prs = [dict(number=i, state='open', base={'ref': 'main'}) for i in [1, 2]]
+        with tempfile.TemporaryDirectory() as tmp:
+            event = Path(tmp) / 'event.json'
+            event.write_text(json.dumps({'issue': {'number': 2}, 'action': 'deleted'}))
+            with patch.dict(os.environ, GITHUB_EVENT_PATH=str(event), GITHUB_REPOSITORY=release.REPO), \
+                    patch.object(review, 'api', return_value=prs) as api, \
+                    patch.object(review, 'evaluate', return_value=True) as evaluate:
+                review.main()
+                api.assert_called_once_with('pulls?state=open&base=main&per_page=100')
+                self.assertEqual([call.args[0]['number'] for call in evaluate.call_args_list], [1, 2])
