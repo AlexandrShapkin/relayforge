@@ -246,7 +246,10 @@ impl DeviceAuthenticator {
         if &pending.nonce != nonce {
             return Err(DeviceAuthError::InvalidChallenge);
         }
-        let pending = self.pending.remove(device_id).ok_or(DeviceAuthError::NotPending)?;
+        let pending = self
+            .pending
+            .remove(device_id)
+            .ok_or(DeviceAuthError::NotPending)?;
         if now >= pending.expires_at {
             return Err(DeviceAuthError::Expired);
         }
@@ -433,7 +436,9 @@ mod tests {
             verifier.begin("two", now),
             Err(DeviceAuthError::Capacity)
         ));
-        verifier.begin("two", now + Duration::from_secs(10)).unwrap();
+        verifier
+            .begin("two", now + Duration::from_secs(10))
+            .unwrap();
         assert!(matches!(
             DeviceAuthenticator::new(
                 "relayforge.ru0",
