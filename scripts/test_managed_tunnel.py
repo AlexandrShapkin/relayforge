@@ -193,7 +193,8 @@ class SupplyChainTests(unittest.TestCase):
             original = ''.join(f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n'
                                for p in sorted(directory.iterdir()))
             (directory / 'SHA256SUMS').write_text(original)
-            with patch.object(release, 'tunnel_assets', return_value={tunnel}):
+            with patch.object(release, 'tunnel_assets', return_value={tunnel}), \
+                    patch.object(release, 'ubuntu_assets', return_value=set()):
                 _, assets = release.release_files(directory, sha, {'tests.yml': 1})
                 self.assertEqual(assets, release.ASSETS | {package, tunnel})
                 self.assertIn(tunnel, (directory / 'SHA256SUMS').read_text())

@@ -1,7 +1,7 @@
 # Ubuntu 24.04 source package (Issue #116)
 
 This is **source/CI preparation**, not an authorization to deploy on ru0.
-The Arch package and immutable Arch-only release publisher remain unchanged.
+The immutable publisher retains all Arch gates and adds a source-versioned Ubuntu release contract.
 
 ci/ubuntu_package.py consumes relayforge-mcp and relayforge-agent binaries
 compiled by the **same exact-head** Ubuntu 24.04 CI verification job. It refuses a
@@ -24,14 +24,33 @@ CI installs the assembled .deb with dpkg -i inside disposable Ubuntu 24.04,
 validates inventory and no maintainer scripts, executes the installed restricted
 stdio MCP/agent and negative authorization tests, verifies all units and package
 ownership, and purges only owned files while preserving an unrelated user file.
-The .deb remains a short-lived CI artifact, **not** a published Release asset.
-The main release publisher intentionally continues to publish only verified
-Arch packages until independently reviewed Ubuntu release/provenance gates exist.
+A separate `ubuntu-release` job downloads those exact package bytes and repeats
+installed-package, restricted MCP, negative authorization and removal checks in
+a fresh disposable Ubuntu container. It binds success to the package SHA-256 and
+full source SHA in `ubuntu-verification.json`; it never rebuilds the package.
+
+For source revisions containing `ci/ubuntu_release.py`, immutable release
+publication requires this additional successful job alongside every existing
+Rust, security, sandbox and Arch gate and independent exact-head PR acceptance.
+The publisher downloads only the independently verified Ubuntu artifact from the
+accepted exact-main run. It validates its original checksums, source identity,
+architecture and receipt before generating provenance. The `.deb`, namespaced
+`ubuntu-source.json`, `ubuntu-SHA256SUMS` and `ubuntu-verification.json` join the
+existing release inventory. The attested top-level `SHA256SUMS` authenticates all
+of these files; the `.deb` also receives package provenance. No package execution
+occurs in the privileged publisher.
+
+Historical source without this contract retains its original Arch-only inventory
+and provenance validation. Existing releases are never retrofitted or overwritten;
+historical validation needs authenticated Release assets, not expired CI artifacts.
+Missing unpublished artifacts, provenance, independent review or successful checks
+block publication and require reconciliation. This source task grants no manual
+release publication, deployment or service activation authority.
 
 ## Before any future ru0 activation
 
-1. Add Ubuntu artifacts to the immutable exact-source release publication and
-   provenance policy without weakening historical Arch-release reconciliation.
+1. Obtain independent exact-head acceptance and successful mandatory CI for
+   the Ubuntu release/provenance stage; owner authorization to merge remains separate.
 2. Independently review a tested Ubuntu deployment/rollback path and official
    tunnel-client installation, separate from Arch pacman commands.
 3. Provision Keycloak through its own restricted HTTPS endpoint, with backed-up
