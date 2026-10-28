@@ -113,6 +113,78 @@ them.
   tests for wrong device, revoked key, expired approval and cross-session
   replay.
 
+## Evolvable agent wire contract
+
+**Requirement:** future changes to either the message structure **or** supported
+operations must not require coordinated upgrades of all agents, a new network
+transport, or a new public MCP verb. This is a **strict, schema-first,
+transport-neutral application contract**, not permission to accept arbitrary
+JSON or caller-defined commands.
+
+- **Separate compatibility dimensions:** a stable wire envelope has a
+  negotiated protocol major/minor version; each typed resource kind,
+  operation/view or domain command has a separately versioned payload schema.
+  Do not confuse the existing `relayforge-protocol::PROTOCOL_VERSION` pilot
+  with a finished interoperable wire schema. Minor wire revisions only add
+  compatible optional features; breaking parsing/meaning requires a new major
+  and an explicit migration path.
+- **Canonical envelope:** define and validate a bounded message type
+  (handshake/request/response/error/cancel/heartbeat), request/correlation ID,
+  negotiated wire version, typed operation identifier, per-operation schema
+  version, deadline/budget and payload length. Server-authenticated device
+  identity and authenticated/delegated actor authority are bound to the
+  session; fields inside the payload are never credentials. Use a single
+  envelope over QUIC reliable streams and WSS, with transport-specific
+  framing kept below the application protocol.
+- **Capability negotiation:** an authenticated handshake advertises
+  explicitly supported protocol versions, resource kinds, operations/views,
+  schema versions and relevant limits. The coordinator selects the actual
+  intersection for each registered host; an agent is never assumed to
+  support a command because some other agent does. No common compatible
+  version means a clear `unsupported_version` error, not a downgrade to an
+  insecure transport or a more permissive operation.
+- **Adding functionality:** register a new typed resource provider, view
+  or bounded domain command and its schema in the shared Rust contract
+  registry. Keep the ADR-0001 logical `discover/read/create/update/delete/
+  execute` model; do not add an MCP tool for every new device capability.
+  Unsupported operations return `unsupported_capability` and are not
+  attempted through a generic shell/exec fallback.
+- **Evolving structures:** additive fields must be optional with
+  documented defaults that preserve existing meaning. Define required
+  fields, limits and a bounded, explicitly namespaced extension mechanism
+  only for **non-authoritative optional metadata**. Unknown required fields,
+  unknown operation identifiers, new authorization-sensitive fields,
+  unnegotiated semantics and invalid payload variants **fail closed**.
+  Never silently drop or reinterpret a field that could change target,
+  permissions, scope or execution behavior. Renames/removals/semantic
+  changes require a new schema version or a new operation and a compatibility
+  adapter.
+- **Backwards-compatible rollout:** a newer coordinator must continue to
+  support the explicitly retained older schema versions during a documented
+  transition; newly installed agents can coexist with older verified ones.
+  Maintain bounded compatibility adapters at a single schema boundary
+  rather than scattering version checks across resource handlers or
+  weakening host-local grants. Removal of a version requires measured
+  consumer migration and an independently reviewed release.
+- **Code and safety:** maintain one source of truth for schema definitions,
+  generated/derived serializers and validators where appropriate, plus
+  cross-version fixtures. Every new capability declares its supported
+  actions, input/output schemas, size/time bounds, authorization class
+  and required device-local approval. Discovery never grants permission.
+  Requests are fully validated **before** entering host-local providers;
+  success/error envelopes preserve accurate origin and state.
+
+**Required compatibility tests before live acceptance:**
+new coordinator ↔ older agent, older coordinator ↔ new agent, newly added
+optional result fields, new resource kind and command, unsupported major
+version, missing required fields, unrecognized security-sensitive extensions,
+malformed/oversized payloads, downgrade/replay attempts, mixed QUIC/WSS and
+disconnect/reconnect. Confirm old permitted reads still work, unknown actions
+fail, and no version combination widens existing grants. Schema format
+(JSON/CBOR/Protobuf) and exact field IDs are **not yet selected**: choose the
+minimal maintained codec after the first source pilot, without relaxing these
+invariants or inventing an unnecessary protocol framework.
+
 ## Session lifecycle
 
 1. Enroll a device with an out-of-band, single-use authorization ceremony.
