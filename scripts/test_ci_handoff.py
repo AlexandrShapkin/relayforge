@@ -143,6 +143,188 @@ class ReevaluationTests(unittest.TestCase):
             review.evaluate(self.pr, api)
         self.assertIn('state=failure', self.writes[-1][1])
 
+    def test_null_identity_then_valid_identity(self):
+        pending = dict(self.pr, merge_commit_sha=None)
+        def unavailable(path, *args):
+            self.fail('unevaluable PR must not read review or write status')
+        self.assertIsNone(review.evaluate(pending, unavailable))
+        self.assertEqual(self.writes, [])
+        self.assertTrue(review.evaluate(self.pr, self.api))
+        self.assertIn('state=success', self.writes[-1][1])
+
+    def test_scheduled_reconciliation_uses_real_retry_and_evaluation(self):
+        import os
+        import tempfile
+        from unittest.mock import patch
+        # All scenarios enter main(), with real evaluate() and no wall-clock wait.
+        for scenario in ('recover', 'persistent', 'refresh_error', 'comments_error', 'stale'):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as tmp:
+                self.writes.clear()
+                event = Path(tmp) / 'event.json'
+                event.write_text('{"schedule":"7,22,37,52 * * * *"}')
+                null = dict(self.pr, number=64, state='open',
+                            base=dict(self.pr['base'], ref='main'), merge_commit_sha=None)
+                valid = dict(null, number=1, merge_commit_sha=self.merge)
+                reads = 0
+                def api(path, *args):
+                    nonlocal reads
+                    if path.startswith('pulls?'):
+                        return [null, valid]
+                    if path == 'pulls/64':
+                        reads += 1
+                        if scenario == 'refresh_error':
+                            raise OSError('refresh unavailable')
+                        if scenario == 'persistent' or reads == 1:
+                            return null.copy()
+                        recovered = dict(null, merge_commit_sha='d' * 40)
+                        if scenario == 'stale' and reads >= 3:
+                            recovered['base'] = dict(recovered['base'], sha='e' * 40)
+                        return recovered
+                    if path == 'pulls/1':
+                        return valid.copy()
+                    if path.startswith('issues/64/') and scenario == 'comments_error':
+                        raise OSError('comments unavailable')
+                    return self.api(path, *args)
+                evaluate = review.evaluate
+                with patch.dict(os.environ, GITHUB_EVENT_PATH=str(event),
+                                GITHUB_REPOSITORY=review.REPO, GITHUB_EVENT_NAME='schedule'), \
+                        patch.object(review, 'api', side_effect=api), \
+                        patch.object(review, 'evaluate', side_effect=lambda pr: evaluate(pr, api)), \
+                        patch.object(review.time, 'sleep') as pause:
+                    if scenario in ('refresh_error', 'comments_error', 'stale'):
+                        with self.assertRaisesRegex(SystemExit, 'PR 64:'):
+                            review.main()
+                    else:
+                        review.main()
+                    self.assertEqual([c.args[0] for c in pause.call_args_list],
+                                     [2] if scenario == 'refresh_error' else [2, 5])
+                successes = [path for path, args in self.writes if 'state=success' in args]
+                self.assertIn(f'statuses/{self.merge}', successes)
+                self.assertEqual(f'statuses/{"d" * 40}' in successes, scenario == 'recover')
+                if scenario in ('persistent', 'refresh_error'):
+                    self.assertEqual(reads, 1 if scenario == 'refresh_error' else 2)
+                    self.assertTrue(all(path == f'statuses/{self.merge}' for path, _ in self.writes))
+                if scenario in ('comments_error', 'stale'):
+                    self.assertIn('state=failure', self.writes[-1][1])
+
+    def test_later_scheduled_sweep_recovers_after_exhausted_budget(self):
+        import os
+        import tempfile
+        from unittest.mock import patch
+        pr = dict(self.pr, state='open', base=dict(self.pr['base'], ref='main'))
+        current = dict(pr, merge_commit_sha=None)
+        def api(path, *args):
+            if path.startswith('pulls?'):
+                return [current.copy()]
+            if path.startswith('pulls/'):
+                return current.copy()
+            return self.api(path, *args)
+        evaluate = review.evaluate
+        with tempfile.TemporaryDirectory() as tmp:
+            event = Path(tmp) / 'event.json'
+            event.write_text('{}')
+            with patch.dict(os.environ, GITHUB_EVENT_PATH=str(event), GITHUB_REPOSITORY=review.REPO), \
+                    patch.object(review, 'api', side_effect=api), \
+                    patch.object(review, 'evaluate', side_effect=lambda pr: evaluate(pr, api)), \
+                    patch.object(review.time, 'sleep') as pause:
+                review.main()
+                self.assertEqual(pause.call_count, 2)
+                self.assertEqual(self.writes, [])
+                current = pr
+                review.main()
+                self.assertEqual(pause.call_count, 2)
+                self.assertIn('state=success', self.writes[-1][1])
+
+    def test_identity_changes_at_either_revalidation_fail_closed(self):
+        for field in ('head', 'base', 'merge_commit_sha'):
+            for read in (1, 2):
+                with self.subTest(field=field, read=read):
+                    self.writes.clear()
+                    count = 0
+                    def api(path, *args):
+                        nonlocal count
+                        if path.startswith('pulls/'):
+                            count += 1
+                            if count == read:
+                                value = {'sha': 'd' * 40} if field != 'merge_commit_sha' else None
+                                return dict(self.pr, **{field: value})
+                        return self.api(path, *args)
+                    with self.assertRaises(ValueError):
+                        review.evaluate(self.pr, api)
+                    self.assertIn('state=failure', self.writes[-1][1])
+                    self.assertFalse(any('state=success' in args for _, args in self.writes))
+
+    def test_missing_rejected_or_stale_review_fails(self):
+        for comments in ([], self.comments + [{'user': {'login': 'AlexandrShapkin'},
+                'body': f'Independent technical REJECT: {self.head}'}],
+                [{'user': {'login': 'AlexandrShapkin'}, 'body':
+                  f'Independent technical ACCEPT: {self.head}\nIndependent technical ACCEPT base: {"d" * 40}'}]):
+            with self.subTest(comments=comments):
+                self.comments = comments
+                self.assertFalse(review.evaluate(self.pr, self.api))
+                self.assertIn('state=failure', self.writes[-1][1])
+
+    def test_transient_api_failure_then_retry(self):
+        def api(path, *args):
+            if path.startswith('pulls/'):
+                raise OSError('transient API failure')
+            return self.api(path, *args)
+        with self.assertRaises(OSError):
+            review.evaluate(self.pr, api)
+        self.assertIn('state=failure', self.writes[-1][1])
+        self.assertTrue(review.evaluate(self.pr, self.api))
+
+    def test_status_write_failures_propagate(self):
+        for state in ('pending', 'success', 'failure'):
+            with self.subTest(state=state):
+                self.writes.clear()
+                def api(path, *args):
+                    if f'state={state}' in args:
+                        raise OSError('status write failed')
+                    if state == 'failure' and path.startswith('issues/'):
+                        return []
+                    return self.api(path, *args)
+                with self.assertRaises(OSError):
+                    review.evaluate(self.pr, api)
+                self.assertFalse(any('state=success' in args for _, args in self.writes))
+
+    def test_mixed_population_sweep(self):
+        import os
+        import tempfile
+        from unittest.mock import patch
+        for broken in (False, True):
+            with self.subTest(api_failure=broken), tempfile.TemporaryDirectory() as tmp:
+                self.writes.clear()
+                event = Path(tmp) / 'event.json'
+                event.write_text('{}')
+                prs = [dict(self.pr, number=n, state='open', base=dict(self.pr['base'], ref='main'),
+                            merge_commit_sha=None if n in (64, 66, 76) else str(n) * 40)
+                       for n in (64, 1, 66, 2, 76, 3)]
+                def api(path, *args):
+                    if path.startswith('pulls?'):
+                        return prs
+                    if path.startswith('pulls/'):
+                        return next(pr for pr in prs if pr['number'] == int(path.split('/')[1]))
+                    if path.startswith('issues/2/'):
+                        if broken:
+                            raise OSError('transient API failure')
+                        return []
+                    return self.api(path, *args)
+                evaluate = review.evaluate
+                with patch.dict(os.environ, GITHUB_EVENT_PATH=str(event), GITHUB_REPOSITORY=review.REPO), \
+                        patch.object(review, 'api', side_effect=api), \
+                        patch.object(review.time, 'sleep'), \
+                        patch.object(review, 'evaluate', side_effect=lambda pr: evaluate(pr, api)):
+                    if broken:
+                        with self.assertRaisesRegex(SystemExit, 'PR 2: OSError'):
+                            review.main()
+                    else:
+                        review.main()
+                self.assertEqual([(path, next(a for a in args if a.startswith('state=')))
+                                  for path, args in self.writes],
+                    [(f'statuses/{str(n) * 40}', f'state={state}')
+                     for n in (1, 2, 3) for state in ('pending', 'failure' if n == 2 else 'success')])
+
     def test_new_release_policy_requires_first_parent_base(self):
         from unittest.mock import patch
         pr = dict(self.pr, merged_at='now', merge_commit_sha=self.merge,
@@ -274,3 +456,20 @@ class CoalescingTests(unittest.TestCase):
                 review.main()
                 api.assert_called_once_with('pulls?state=open&base=main&per_page=100')
                 self.assertEqual([call.args[0]['number'] for call in evaluate.call_args_list], [1, 2])
+
+
+class ReconciliationWorkflowTests(unittest.TestCase):
+    def test_schedule_trust_concurrency_and_lightweight_job(self):
+        text = (ROOT / '.github/workflows/review-handoff.yml').read_text()
+        self.assertIn("cron: '7,22,37,52 * * * *'", text)
+        self.assertIn("github.event_name == 'schedule' && 'refs/heads/main'", text)
+        self.assertIn('github.event.pull_request.base.sha || github.sha', text)
+        self.assertIn('group: review-handoff-repository', text)
+        self.assertIn('cancel-in-progress: false', text)
+        self.assertIn('timeout-minutes: 5', text)
+        self.assertEqual(text.count('      - uses:'), 1)
+        self.assertEqual(text.count('        run:'), 1)
+        self.assertIn('run: python3 -B ci/review_handoff.py', text)
+        self.assertNotIn('pull_request.head', text)
+        for name in ('tests.yml', 'rdc-independent.yml', 'release-arch.yml'):
+            self.assertNotIn('  schedule:', (ROOT / '.github/workflows' / name).read_text())
