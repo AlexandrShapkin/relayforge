@@ -1,3 +1,7 @@
+> P0 runtime notice: old build/hot-swap instructions below are historical where
+> inconsistent with [runtime artifacts](runtime-artifacts.md). Never compile to
+> legacy `target/release`; no source-only action authorizes activation.
+
 # Development continuity when Remote Desktop Commander quota is exhausted
 
 This repository intentionally supports a **development path that does not need
@@ -22,15 +26,18 @@ device**.
    and a SHA-256 digest as GitHub Actions artifacts. The digest detects
    accidental changes; it is **not** a cryptographic publisher signature.
    Artifacts expire after seven days. These are untrusted CI build products
-   until separately reviewed and verified for their target host.
+   until separately reviewed and verified for their target host. Arch CI also
+   constructs and tests the canonical pacman package; see the
+   [package/release contract](arch-packaging.md).
 6. After merging, use the Actions tab to invoke
    `RDC-independent development verification` via `workflow_dispatch`
    when an independent main-branch build or packaging run is needed.
 
 **The CI workflow cannot and must not automatically deploy** a release to
 ThinkPad or a VPS. It never receives SSH credentials, API keys, ADB keys,
-router configuration or device secrets. GitHub's `GITHUB_TOKEN` is read-only
-(`contents: read`). No self-hosted runner and no production machine is
+router configuration or device secrets. Build/test jobs use read-only GitHub permissions. The separate trusted
+[Arch release gate](arch-packaging.md) alone may publish packages after both
+exact-main workflows pass; it cannot deploy them. No self-hosted runner and no production machine is
 required for the builds.
 
 ## Existing infrastructure diagnosis without RDC
@@ -177,22 +184,11 @@ only after a subprocess or large file has already exhausted memory. Retained
 limits: 64 KiB per command stream and 48 KiB per tracked source file.
 Excess output is denied; timeout and output caps are not permission grants.
 
-The established no-RDC update sequence is:
-
-1. Make and validate changes in GitHub, then merge to `main`.
-2. Invoke `repo.sync`, await completion through `task.status` and `task.logs`,
-   and verify the new checkout is clean.
-3. Invoke `build.start`, await `Result=success` and `ExecMainStatus=0`.
-4. On a hot-stdio deployment, leave the tunnel running and invoke
-   `capabilities` or another MCP operation: the persistent parent loads the
-   new release binary for each request. Verify `relayforge_workstation_status`
-   continues to report a recent authenticated poll.
-5. After the one-time transition to hot-stdio, `tunnel.restart` is refused
-   by new workers. A manual restart is reserved for explicit transport
-   maintenance, with an independent recovery path.
-
-This path still depends on GitHub, ChatGPT and the Secure MCP Tunnel for
-connectivity and identity, but it consumes no Remote Desktop Commander quota.
+The previous build-to-live update sequence is **retired after incident #77**.
+`repo.sync` and `build.start` are source/isolated-build operations only. Neither
+activates code. See [runtime artifacts](runtime-artifacts.md) for the independent
+artifact store, explicit operator approval, verified rollback and separately
+approved parent migration. Installed legacy code is not repaired by this text.
 
 ## Collision-safe workstation background operations
 
@@ -212,60 +208,18 @@ success; scheduling is not proof of successful execution.
 
 A restarted tunnel still needs live authenticated poll verification.
 
-## Stable tunnel stdio parent and worker hot swap
+## Stable parent and isolated runtime (source proposal; Issue #77)
 
-The `--readonly-stdio` entrypoint is now a long-lived JSON-RPC relay rather
-than the tool executor. It preserves the Secure MCP Tunnel stdio connection
-while spawning the **fixed** released MCP binary with `--readonly-worker`
-for each incoming request. Each worker uses the identical remote allowlist
-and processes one request only. The caller cannot provide the executable,
-environment, shell or worker arguments. Notifications remain silent. Failed,
-timed-out, malformed or oversized new worker replies fall back to the
-parent's already-running restricted executable (`/proc/self/exe`) for the
-same request; if that also fails, the parent returns a generic MCP error.
-The fallback does not use a user-supplied executable and does not weaken
-the tunnel's operation allowlist. This protects the current live connection
-from a bad on-disk upgrade, but **does not survive a parent restart**.
-A durable on-disk last-known-good release and boot recovery remain future work.
+The revised parent spawns its own pinned `/proc/<parent-pid>/exe` image for every
+request. It never opens mutable Cargo output or the `current` selector for a
+new worker. Versioned runtime artifacts, new launchers/jobs and controlled
+restart are specified in [runtime artifacts](runtime-artifacts.md).
 
-Consequently a new local Cargo release build replaces the **next** worker
-without disconnecting the tunnel or requiring a plugin reconnect. The
-`tools/list` response can reflect newly deployed operations without
-restarting the control-plane session; the ChatGPT client may still require
-a manual Refresh tools when the displayed parameter schema changes.
-
-**One-time transition:** an already running legacy `--readonly-stdio`
-process does not learn this behaviour merely by replacing its executable.
-After verifying CI and compiling the new binary, the tunnel must be
-restarted once (or the parent upgraded through a separate planned handoff)
-to activate hot-stdio. Future normal source builds must not restart it.
-Before the one-time transition, verify a rollback/recovery channel.
-
-This is a session-continuity improvement, not a guarantee of permanent
-tunnel connectivity: the OpenAI control plane, ThinkPad networking, and
-user service must still be running. It does not remove ChatGPT or GitHub
-provider dependencies. The optional `--readonly-worker` command is
-restricted to tunnel policy; never substitute the unrestricted default
-stdio mode.
-
-### One-time activation with rollback
-
-`deploy/relayforge-hot-activate.sh EXPECTED_MAIN_SHA` is a **local-user-only**
-one-time bootstrap after the reviewed merge is present on ThinkPad. It refuses
-a different commit or dirty tracked checkout, locates the currently running
-restricted legacy MCP and saves its **mapped executable** from
-`/proc/<pid>/exe` into private local state (not the possibly already-rebuilt
-on-disk release), runs a fresh locked release build and offline MCP smoke
-tests, restarts the tunnel once, and requires a **fresh** authenticated
-control-plane poll. If compilation, testing or tunnel recovery fails, it
-restores the previous MCP binary and attempts to restart the service.
-A verified new worker is also copied into local state as an initial
-last-known-good artifact. This is a recovery best effort, not a substitute
-for human physical recovery after a machine/network failure.
-
-Do not execute this bootstrap through an MCP approval-bypass mechanism or
-give it API credentials. The operator must review the exact merge and
-authorize the one-time service restart separately.
+The old deployed parent still uses the legacy build path until an independently
+approved local migration/reconnect. The old `relayforge-hot-activate.sh` now
+refuses all actions: it must not compile/install/restart. Historical successful
+hot swaps and rollback filenames do not authorize another deployment or prove
+that a retained binary is v8. There is no proven zero-downtime handoff in this PR.
 
 ## Live diagnostics without RDC or a tunnel restart
 
@@ -434,8 +388,9 @@ reachable after applying each step.
 
 ### Tunnel hardening and SSH retirement
 
-The permanent MCP tunnel runs with `ProtectHome=read-only`. It cannot and
-must not write `~/.ssh` directly. A retirement action therefore starts the
+The candidate tunnel permits real HOME access for owner-authorized operations.
+SSH retirement still uses the existing bounded worker rather than an arbitrary
+write API. A retirement action starts the
 same installed RelayForge binary in a short-lived, bounded **user** systemd
 service, using `--retire-ssh-worker config|known_hosts` with no arbitrary
 path, script or host input. MCP receives only a sanitized structured result.
@@ -456,81 +411,137 @@ the local operator to review and install on ThinkPad, then execute real
 fault-injection tests. It does not recover a powered-off or offline
 laptop and is not full remote break-glass access.
 
+## Owner-approved artifact reports (API revision 9; activation separate)
 
-## Four-project workstation inventory (proposed API revision 9; Issue #75)
+`artifact.read` and `artifact.list` use `path` as `<root-id>/<relative-path>`
+(or just `<root-id>` for listing). There is no root-management MCP operation.
+Missing local configuration denies access. The existing mutation grants do not
+approve artifact reads, and artifact configuration grants no mutations.
 
-The source-only `projects.inventory` operation extends the existing
-`relayforge_workstation_develop` request schema. It accepts **only**
-`{"operation":"projects.inventory"}` and never accepts project names,
-arbitrary paths, commands, scripts or nested parameters from a caller.
-A compiled-in registry inspects these names under the same local
-`~/Projects/` directory only: `codex-smart`, `relayforge`,
-`assistant-hub`, `rustcraft`. It denies unsafe/non-owned/symlinked
-checkout roots. Missing projects remain `unavailable`, not healthy.
+The local owner may separately approve a private 0600, singly linked UTF-8 JSON
+file at `~/.config/relayforge/artifact-roots.json`, containing only, for example:
 
-For each present Git checkout the operation gathers a full HEAD SHA, branch,
-unverified cleanliness/untracked fields, cached
-`origin/main` SHA, local branch count, bounded worktree summary, free disk
-space and presence of fixed familiar artifact-directory candidates. It
-returns only a **read-only** list of the repository's native verification
-entrypoints; **it does not run those commands**. A normal source-only task is
-still validated by native GitHub-hosted PR CI. No artifact or worktree is
-declared stale or authorized for cleanup based on name or age.
+```json
+{"roots":{"activation":"/home/user/Projects/relayforge/.build/issue77-development-activation-20261022"}}
+```
 
-**Important:** The local `origin/main` ref is not a fresh remote check. The
-operation explicitly returns `remote_main_verified=false`; compare against
-a fresh independently retrieved GitHub `main` SHA before deciding whether
-a local checkout is current. Do not assume an unavailable project is on this
-workstation. This v9 implementation remains source-only until independently
-reviewed, merged and separately installed under existing local operator
-authority. The currently deployed v8 cannot serve `projects.inventory`.
+This is an example for attended configuration, not an instruction to create a
+grant during source development. Up to eight root IDs may select **one directory**
+below `~/Projects/relayforge/.build/` or
+`~/.local/state/relayforge/artifacts/`; HOME, entire projects and arbitrary host
+roots are refused. Ancestors are pinned without following symlinks. Root/subdirs
+and files must belong to the invoking user and be non-writable by group/others;
+system ancestors of HOME may be root-owned. Files must have one hardlink.
+Configuration ancestors must also be owner-controlled; configuration is re-read
+on each call. Revocation affects subsequent calls, not an already pinned read.
 
-### Source-only safety and rollout boundary
+Only non-hidden ASCII relative names and `.md`, `.txt`, `.json`, `.jsonl`, `.log` reports
+are eligible. Depth is capped at four components below the root; files are
+limited to 48 KiB of UTF-8 without binary control characters. Sensitive names,
+credential extensions and common credential markers are denied. These checks
+are defense in depth, **not a general secret detector**: owners must review and
+approve report-only roots and their contents, including future sibling reports.
+Listing examines at most 64 entries, returns sorted eligible report names and
+fails closed on unsafe eligible entries or overflow; it does not recurse or
+paginate. Reads return `utf8_text` and `byte_length`. Errors use fixed artifact
+categories (`artifact denied`, `artifact path denied`, `artifact root denied`,
+`artifact too large`, `artifact list too large`, or text/authorization denial),
+never host errors or rejected contents. The existing private audit is required
+and records only operation/time, never paths or file bodies. No shell, writes
+to artifacts, services, selectors or source-edit permission are added.
 
-Inventory pins directory descriptors while walking home, `Projects`, checkout
-and `.git`. It does not invoke Git or interpret Git configuration. A present
-`commondir` is refused; a redirect added after the check has no effect because
-all metadata reads stay relative to pinned descriptors. Symlinked HEAD, refs,
-packed refs and metadata-directory components are never followed. Shared
-(hard-linked) metadata files are refused. Git config
-includes, alternate object stores and worktree `gitdir` targets are never read.
+Minimum attended activation after independent exact-head review/CI:
 
-HEAD, cached remote refs, branch counts and worktree registration counts use
-bounded, no-follow reads of ordinary SHA-1 file refs/packed refs. Unsupported,
-unreadable or excessive metadata stays unverified/null. These observations
-are not an atomic snapshot and do not prove referenced objects exist. Only
-fixed `/usr/bin/df` is executed, with a clean environment and bounded output.
+1. The owner separately authorizes the existing verified artifact installation
+   and pinned-parent migration procedure in [runtime artifacts](runtime-artifacts.md).
+   This feature does not replace that procedure or establish rollback evidence.
+2. Locally review the intended AUTHORIZATION.md and sibling reports, directory
+   ownership/modes and the exact JSON root map; separately approve installing
+   that configuration with mode 0600. Do not reuse a mutation grant as consent.
+3. Through the authenticated MCP connection, call `capabilities`: require API 9,
+   `artifacts.configured=true`, `read_only=true`, `source_edit=false` and unchanged
+   shell/file restrictions. Call `artifact.read` with
+   `activation/AUTHORIZATION.md`, then `artifact.list` with `activation`.
+4. Confirm unknown root, `../`, absolute path, sensitive filename and symlink
+   reads fail. Preserve the sanitized receipt. Source/offline success is not
+   evidence of this live authenticated acceptance.
+5. Revoke by removing the locally approved root map entry/file; confirm new
+   reads fail. Any runtime rollback follows the separately approved procedure.
 
-`tracked_clean`, `untracked_count` and worktree `prunable` remain **null**:
-working-file/index inspection and content-sensitive `git status` are deliberately
-not performed. This avoids clean/smudge/process filters even if configuration
-changes concurrently. Use separate trusted local Git tooling for those facts;
-there is no fallback through inventory. Native check names are text only.
+### Physical-owner-approved artifact root actions (source only)
 
-The v9 inventory requires a Linux host with `/proc` descriptor access and
-ordinary owned checkout directories with a `.git` **directory**. A root
-checkout using a linked-worktree `.git` file is deliberately `unavailable`:
-that file can redirect metadata outside the fixed registry. Registered
-worktrees of an ordinary checkout are still counted without reading their
-contents or exposing their paths. Missing/unreadable roots are `unavailable`;
-Metadata failures are `unverified`/null, never a clean or fresh result.
+The existing audited, single-use approval protocol is reached through
+`relayforge_workstation_develop` using `operation=artifact.root.prepare`
+and `parameters={name, directory}`; it returns a pending approval ID. The
+existing `relayforge_change_commit` accepts that ID after physical-owner
+approval. `operation=artifact.root.revoke.prepare` prepares revocation through
+the same flow. Its internal change actions are `artifact.root.add` and
+`artifact.root.remove`; an unchanged, externally typed change-prepare tool
+cannot accept new host/action enums. Example parameters for addition:
+`host=workstation`, `name=issue77` and the single **directory name**
+`issue77-development-activation-20261022`. No absolute path, generic HOME
+directory, credentials, or arbitrary write can be supplied. The separate
+`artifact.root.remove` action revokes an approved alias.
 
-Regression tests use temporary fixtures only: unknown names/traversal,
-symlinked ancestors/metadata/artifact parents, permission denial, unsafe
-modes, redirected metadata, missing/corrupt repositories, path replacement,
-unchanged index and unique untracked data, and nonexecution of repo helpers.
-No production permissions or services are changed by these tests.
+The **local operator**, not ChatGPT or an MCP caller, must still confirm the
+exact alias and directory in a physical terminal using the existing
+`--approve-change <approval_id>` gate. After that approval, the remote caller
+can commit the one-time action. This removes manual JSON editing and individual
+read/check commands, **not** the requirement for human approval of new file
+access. Requests expire after five minutes; an approved commit window is three
+minutes. Replays are denied, and grant/revocation events are audited.
 
-Deployment remains a separate owner-approved step after independent technical
-ACCEPT and exact-head CI. Pin the reviewed full commit, retain the installed
-v8 rollback reference, and follow the existing local installation/verification
-procedure. Verify the reported API revision and read-only inventory on the
-host after that approval; CI does not establish live four-project coverage.
-No tunnel restart, permission change or v9 installation is authorized by this
-source-only PR.
+New aliases are stored as owner-private `0600` records under
+`~/.config/relayforge/artifact-approved-roots/` (directory `0700`). The
+existing `artifact-roots.json` is **not** changed, preserving the exact pinned
+root-map bytes of the attended API9 activation. On every read, the runtime
+rechecks grant records, their ownership, modes, names and directory constraints;
+invalid grants fail closed. Each grant authorizes **all policy-eligible present
+and future reports** in one fixed `.build` directory, so the operator must
+review that scope before approval. Revocation affects subsequent requests.
 
-Existing `repo.sync`, `build.start`, job sandbox, transfer, tunnel and
-recovery protections are unchanged. No automatic source writes, system
-services, deletion, remote sync or additional permissions are introduced.
-Run read-only inventory before considering any cleanup; assess each item
-individually using verified Git state and independent authorization.
+**Ambiguous outcome:** an add/remove operation that changes the visible grant
+but fails a post-publication directory fsync returns `indeterminate`, never
+`failed`. A worker killed after claiming a grant leaves `outcome_unknown`,
+not a retryable request. The agent must query the read-only
+`artifact.root.inspect` operation with `parameters={name:"issue77"}`, and
+then `artifact.read` for a permitted report to reconcile current live access;
+this does **not** establish power-loss durability. Neither case permits automatic
+replay with the same approval ID. If uncertainty remains, stop and preserve
+audit records for owner review.
+
+This feature remains **source only** until exact-head CI, independent security
+review, separately approved candidate installation, and an authenticated live
+test against the originally requested handoff. It is not an authority to change
+the current live runtime or local grants during source development.
+
+Offline verification (disposable HOME/config only):
+`python3 -B scripts/offline_artifact_acceptance.py <isolated-built-mcp>`.
+
+## Internal four-project inventory provider (#75 / #92)
+
+`workstation_projects::ProjectInventoryProvider` adapts the retained #76 reader
+as a static, typed, read-only Rust provider, following ADR-0001. It is not
+registered in MCP discovery or dispatch; `projects.inventory` is denied and
+existing MCP API revision 9 and operations remain unchanged. The internal
+`InventoryRead` contract accepts only `view: inventory`, rejects unknown fields,
+and returns `InventoryObservation` schema version 1 with typed project,
+worktree and artifact observations. The local adapter supplies trusted home
+context; callers cannot select a host, path, project, command or mutation.
+There is no generic dispatcher, host router or new filesystem backend.
+
+The fixed projects remain codex-smart, relayforge, assistant-hub and rustcraft.
+The existing Linux descriptor-pinned, no-follow traversal and bounded metadata
+reader are reused. Inventory never executes Git, interprets config/filters,
+commondir, alternates or registered worktree gitdir targets, or reads index or
+working-file contents. Only fixed, bounded df diagnostics run. Linked-worktree
+roots with .git files remain unavailable. Symlink/hardlink metadata, unsafe
+ownership/modes and excessive or unsupported metadata fail closed.
+
+Missing or denied roots are unavailable; unreadable/corrupt HEAD is unverified.
+Tracked cleanliness, untracked counts and prunability remain null/unverified;
+cached origin/main is never fresh remote proof. Observation time is the start
+of a non-atomic local read, not a snapshot or authenticated host identity.
+Artifact candidates never authorize deletion; check names are text only.
+Future host binding, discovery and public resource contracts belong to #92;
+this provider grants no host access and makes no installation/live claim.

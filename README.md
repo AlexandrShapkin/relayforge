@@ -39,16 +39,19 @@ The canonical development branch is `main`. Use short-lived branches
 from `main` and pull requests. The [RDC-independent development playbook](docs/development-without-rdc.md)
 describes how to edit, test, build and review RelayForge entirely through
 the connected GitHub integration, without ThinkPad or Remote Desktop Commander.
-Run all checks before merging:
+Build output is isolated from runtime; `just verify` uses `.build/verification`.
+See [runtime artifacts and migration](docs/runtime-artifacts.md). Source builds
+never authorize installation. Run all checks before merging:
 
 ```sh
+export CARGO_TARGET_DIR="$PWD/.build/verification"
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 cargo build --release --locked -p relayforge-agent -p relayforge-mcp
 ```
 
-Use `target/release/relayforge-mcp --readonly-stdio` for local read-only
+Use `.build/verification/release/relayforge-mcp --readonly-stdio` for local read-only
 MCP testing. Standard output is JSON-RPC protocol only; launch wrappers
 must not print status banners there. Keep the Secure MCP Tunnel launcher
 restricted to `--readonly-stdio`; do not use the unrestricted local pilot
@@ -69,3 +72,7 @@ archives or production runtime settings.
 
 See [MCP clients](docs/mcp-clients.md) and the
 [remaining roadmap](docs/roadmap.md).
+
+Arch Linux distribution and explicit opt-in setup: [pacman lifecycle](docs/arch-packaging.md). Package installation does not activate services or grant device access.
+
+Opt-in external-provider OAuth over loopback HTTP: [configuration and source/live acceptance boundaries](docs/oauth-http.md). Existing stdio remains the working transport.

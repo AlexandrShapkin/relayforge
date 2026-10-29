@@ -6,11 +6,17 @@ use serde_json::{json, Value};
 use std::{
     fs::{self, DirBuilder, OpenOptions},
     io::{Read, Write},
-    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+    os::{
+        fd::AsRawFd,
+        unix::{
+            fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+            process::CommandExt,
+        },
+    },
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 pub(crate) const MAX_JOBS: usize = 12;
@@ -18,6 +24,10 @@ pub(crate) const MAX_SCRIPT: usize = 2048;
 pub(crate) const MAX_LOG: usize = 64 * 1024;
 const NOFOLLOW: i32 = 0x20000; // O_NOFOLLOW, Linux.
 const PREFIX: &str = "relayforge-job-";
+
+unsafe extern "C" {
+    fn fcntl(fd: i32, command: i32, ...) -> i32;
+}
 
 fn current_uid() -> Result<u32, String> {
     let status = fs::read_to_string("/proc/self/status").map_err(|_| "identity unavailable")?;
@@ -201,6 +211,35 @@ pub(crate) fn sandbox_stage(
     script: &Path,
     previous: Option<&Path>,
 ) -> Result<StageResult, String> {
+    sandbox_stage_inner(home, script, previous, None)
+}
+
+pub(crate) fn sandbox_stage_until(
+    home: &Path,
+    script: &Path,
+    expires_at: u64,
+) -> Result<StageResult, String> {
+    sandbox_stage_inner(home, script, None, Some(expires_at))
+}
+
+fn sandbox_stage_inner(
+    home: &Path,
+    script: &Path,
+    previous: Option<&Path>,
+    expires_at: Option<u64>,
+) -> Result<StageResult, String> {
+    let deadline = expires_at
+        .map(|expires| {
+            let wall = UNIX_EPOCH + Duration::from_secs(expires);
+            let remaining = wall
+                .duration_since(SystemTime::now())
+                .map_err(|_| "task authorization expired")?;
+            Ok::<_, String>((
+                wall,
+                Instant::now() + remaining.min(Duration::from_secs(600)),
+            ))
+        })
+        .transpose()?;
     let repo = home.join("Projects/relayforge");
     let mut args = vec![
         "--unshare-all".to_string(),
@@ -229,11 +268,21 @@ pub(crate) fn sandbox_stage(
         "--dir".into(),
         "/job".into(),
     ];
-    args.extend(sandbox_file_mounts(&repo)?);
+    let job = script.parent().ok_or("job path unavailable")?;
+    let _development_records = if fs::symlink_metadata(job.join("development.json")).is_ok() {
+        let (mounts, records) = crate::workstation_development::mounts(job)?;
+        args.extend(mounts);
+        Some(records) // Keep descriptors pinned until the sandbox has exited.
+    } else {
+        args.extend(sandbox_file_mounts(&repo)?);
+        args.extend([
+            "--ro-bind".into(),
+            script.to_string_lossy().to_string(),
+            "/job/script.sh".into(),
+        ]);
+        None
+    };
     args.extend([
-        "--ro-bind".into(),
-        script.to_string_lossy().to_string(),
-        "/job/script.sh".into(),
         "--chdir".into(),
         "/workspace".into(),
         "--clearenv".into(),
@@ -249,7 +298,12 @@ pub(crate) fn sandbox_stage(
         "--norc".into(),
         "/job/script.sh".into(),
     ]);
-    let mut process = Command::new("/usr/bin/bwrap")
+    let inherited: Vec<i32> = _development_records
+        .as_ref()
+        .map(|files| files.iter().map(AsRawFd::as_raw_fd).collect())
+        .unwrap_or_default();
+    let mut command = Command::new("/usr/bin/bwrap");
+    command
         .args(&args)
         .stdin(match previous {
             Some(path) => {
@@ -273,18 +327,54 @@ pub(crate) fn sandbox_stage(
             None => Stdio::null(),
         })
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|_| "sandbox unavailable")?;
+        .stderr(Stdio::piped());
+    // Only these already validated, read-only task records cross exec. fcntl
+    // runs in the forked child, is async-signal-safe, and changes no parent FD.
+    // Bubblewrap copies them into private read-only mounts then closes them.
+    unsafe {
+        command.pre_exec(move || {
+            for fd in &inherited {
+                if *fd < 3 || fcntl(*fd, 2, 0) < 0 {
+                    // F_SETFD, clear FD_CLOEXEC
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
+    let mut process = command.spawn().map_err(|_| "sandbox unavailable")?;
     let out = process.stdout.take().ok_or("stdout unavailable")?;
     let err = process.stderr.take().ok_or("stderr unavailable")?;
     let stdout = thread::spawn(move || capped(out));
     let stderr = thread::spawn(move || capped(err));
-    let status = process.wait().map_err(|_| "job wait failed")?;
+    // This watchdog runs outside the sandbox. Killing our owned bwrap child
+    // triggers --die-with-parent in its trusted PID-1 reaper; Linux then kills
+    // every namespace descendant, even setsid children with cleared PDEATHSIG.
+    // Never use --as-pid-1: the separate trusted reaper is part of this boundary.
+    let (status, expired) = if let Some((wall, monotonic)) = deadline {
+        loop {
+            if SystemTime::now() >= wall || Instant::now() >= monotonic {
+                process
+                    .kill()
+                    .map_err(|_| "sandbox deadline termination unverified")?;
+                break (process.wait().map_err(|_| "job wait failed")?, true);
+            }
+            if let Some(status) = process.try_wait().map_err(|_| "job status unavailable")? {
+                break (status, false);
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    } else {
+        (process.wait().map_err(|_| "job wait failed")?, false)
+    };
     let (out, out_limit) = stdout.join().map_err(|_| "stdout reader failed")??;
     let (err, err_limit) = stderr.join().map_err(|_| "stderr reader failed")??;
     Ok(StageResult {
-        exit_code: status.code().unwrap_or(128),
+        exit_code: if expired {
+            124
+        } else {
+            status.code().unwrap_or(128)
+        },
         stdout: out,
         stderr: err,
         stdout_truncated: out_limit,
@@ -294,6 +384,9 @@ pub(crate) fn sandbox_stage(
 
 fn run_job(home: &Path, id: &str) -> Result<i32, String> {
     let dir = job_dir(home, id)?;
+    if fs::symlink_metadata(dir.join("development.json")).is_ok() {
+        return crate::workstation_development::run_worker(home, id);
+    }
     if read_text(&dir, "chain.count", 16)?.is_some() {
         return crate::workstation_chain::run(home, id);
     }
@@ -337,6 +430,11 @@ fn run_worker_at(home: &Path, id: &str) -> i32 {
     if !valid_id(id) {
         return 2;
     }
+    // A worker invocation is single-use, including after a crash. Never replay
+    // scripts just because a terminal receipt was not durably published.
+    if claim_worker(home, id).is_err() {
+        return 2;
+    }
     match run_job(home, id) {
         Ok(code) => code,
         Err(_) => {
@@ -357,6 +455,23 @@ fn run_worker_at(home: &Path, id: &str) -> i32 {
             1
         }
     }
+}
+
+fn claim_worker(home: &Path, id: &str) -> Result<(), String> {
+    let dir = job_dir(home, id)?;
+    for terminal in ["result.json", "stopped"] {
+        match fs::symlink_metadata(dir.join(terminal)) {
+            Ok(_) => return Err("job already terminal".into()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(_) => return Err("job state unavailable".into()),
+        }
+    }
+    // create_new arbitrates concurrent invocations. Retain even an incomplete
+    // claim: an ambiguous attempt requires inspection, never automatic replay.
+    write_private(&dir, "worker.claim", b"single-use\n")?;
+    fs::File::open(&dir)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| "worker claim unavailable".to_string())
 }
 
 fn unit_state(id: &str) -> Result<Option<String>, String> {
@@ -439,7 +554,7 @@ pub(crate) fn schedule_worker(home: &Path, id: &str, limit: u32) -> Result<(), S
     if !valid_id(id) || !(600..=3600).contains(&limit) {
         return Err("worker schedule denied".into());
     }
-    let binary = home.join("Projects/relayforge/target/release/relayforge-mcp");
+    let binary = crate::runtime::current_image(home)?;
     if !binary.is_file() {
         return Err("worker binary unavailable".into());
     }
@@ -457,6 +572,12 @@ pub(crate) fn schedule_worker(home: &Path, id: &str, limit: u32) -> Result<(), S
             &unit,
             "--property=Type=exec",
             &max,
+            "--property=MemoryMax=512M",
+            "--property=TasksMax=64",
+            "--property=CPUQuota=100%",
+            "--property=LimitFSIZE=8M",
+            "--property=NoNewPrivileges=yes",
+            "--property=UMask=0077",
             "--",
             path,
             "--sandbox-job-worker",
@@ -526,6 +647,10 @@ fn job_remove(home: &Path, id: &str) -> Result<String, String> {
         "stderr.log",
         "result.json",
         "stopped",
+        "worker.claim",
+        "development.json",
+        "development.run",
+        "development.authority.json",
     ];
     let chain_steps = if read_text(&dir, "chain.count", 16)?.is_some() {
         Some(crate::workstation_chain::chain_count(&dir)?)
@@ -663,6 +788,43 @@ mod tests {
         assert_eq!(status["failure_kind"], "worker_failed");
         assert!(!status.to_string().contains("private"));
         assert!(read_text(&job, "result.json", 2048).unwrap().is_some());
+        let receipt = fs::read(job.join("result.json")).unwrap();
+        assert_eq!(run_worker_at(&home, id), 2);
+        assert_eq!(fs::read(job.join("result.json")).unwrap(), receipt);
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn concurrent_worker_claims_allow_one_attempt_and_crashes_cannot_replay() {
+        let home = std::env::temp_dir().join(format!(
+            "relayforge-worker-claim-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let state = home.join(".local/state/relayforge");
+        fs::create_dir_all(&state).unwrap();
+        fs::set_permissions(&state, fs::Permissions::from_mode(0o700)).unwrap();
+        let jobs = root(&home, true).unwrap().unwrap();
+        let id = "relayforge-job-1792390000-a1b2c3";
+        let job = jobs.join(id);
+        DirBuilder::new().mode(0o700).create(&job).unwrap();
+        write_private(&job, "script.sh", b"echo must-not-replay").unwrap();
+        let winners = thread::scope(|scope| {
+            let attempts: Vec<_> = (0..8)
+                .map(|_| scope.spawn(|| claim_worker(&home, id).is_ok()))
+                .collect();
+            attempts
+                .into_iter()
+                .map(|t| usize::from(t.join().unwrap()))
+                .sum::<usize>()
+        });
+        assert_eq!(winners, 1);
+        assert_eq!(run_worker_at(&home, id), 2);
+        assert!(!job.join("result.json").exists());
+        assert!(!job.join("stdout.log").exists());
         fs::remove_dir_all(home).unwrap();
     }
 

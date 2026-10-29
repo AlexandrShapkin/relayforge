@@ -17,12 +17,8 @@ docs-check:
 # Native full offline verification: Rust checks AND recovery, release build,
 # denied MCP smoke, without hardware. Real-device proof stays separate.
 verify: docs-check
-    bash -n deploy/relayforge-hot-activate.sh
-    bash -n deploy/install-local-recovery.sh
-    python3 -B -m py_compile deploy/relayforge-local-recover.py scripts/test_local_recovery.py
-    python3 -B scripts/test_local_recovery.py
-    cargo fmt --all -- --check
-    cargo clippy --workspace --all-targets --locked -- -D warnings
-    cargo test --workspace --locked
-    cargo build --release --locked -p relayforge-agent -p relayforge-mcp
-    python3 -B scripts/offline_mcp_smoke.py target/release/relayforge-mcp
+    python3 -B scripts/verify.py
+
+# Explicit source build only: no installation, pointer update or service action.
+release-build:
+    cargo build --release --locked --target-dir .build/release -p relayforge-agent -p relayforge-mcp

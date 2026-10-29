@@ -1,0 +1,15 @@
+{
+  "config_version": 1,
+  "control_plane": {
+    "tunnel_id": "REPLACE_WITH_SEPARATE_TEST_TUNNEL_ID",
+    "api_key": "env:CONTROL_PLANE_API_KEY"
+  },
+  "mcp": {
+    "server_urls": [{"channel": "main", "url": "http://127.0.0.1:8766/mcp"}],
+    "oauth_trusted_origins": ["https://auth.example.com"],
+    "startup_wait_timeout": "30s"
+  },
+  "harpoon": {"allow_plaintext_http": true},
+  "health": {"listen_addr": "127.0.0.1:0"},
+  "log": {"level": "info", "format": "json"}
+}

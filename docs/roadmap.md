@@ -15,6 +15,13 @@ universal remote administration product.
 - Authorized ADB diagnostics and mock-tested Android health.
 - Bounded backup/archive and calendar/monitoring artifact evidence.
 
+## Runtime safety prerequisite
+
+Build/runtime separation and explicit artifact migration are tracked by
+[Issue #77](https://github.com/AlexandrShapkin/relayforge/issues/77), with the
+source/installation boundary in [runtime artifacts](runtime-artifacts.md).
+No live migration follows from source CI or acceptance alone.
+
 ## Outstanding work
 
 1. Validate Android health parsing against physically authorized devices.

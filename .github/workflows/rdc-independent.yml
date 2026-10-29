@@ -3,32 +3,90 @@ name: RDC-independent development verification
 # All commands execute on a disposable GitHub-hosted runner.
 # No ThinkPad, VPS, RouterOS or Android connection is required.
 on:
+  push:
+    branches: ['**']
   pull_request:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
   workflow_dispatch:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
-  group: rdc-independent-${{ github.workflow }}-${{ github.ref }}
+  group: rdc-independent-${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.ref }}
   cancel-in-progress: true
 
 jobs:
+
+  coverage:
+    runs-on: ubuntu-24.04
+    outputs:
+      run: ${{ steps.coverage.outputs.run }}
+    steps:
+      - id: coverage
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+        run: |
+          # API failure fails the workflow; never silently omit verification.
+          run=true
+          if [[ "$EVENT" == push && "$REF" == refs/heads/* && "$REF" != refs/heads/main ]]; then
+            matches=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls?state=open&per_page=100" --jq ".[] | select(.base.ref == \"main\" and .head.repo.full_name == \"$GITHUB_REPOSITORY\" and .head.ref == \"${REF#refs/heads/}\" and .head.sha == \"$SHA\") | .number")
+            if [[ -n "$matches" ]]; then run=false; fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
   verify-offline:
-    runs-on: ubuntu-latest
+    name: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main' && 'branch-verify-offline' || 'verify-offline' }}
+    needs: coverage
+    if: needs.coverage.outputs.run == 'true'
+    runs-on: ubuntu-24.04
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.build/ci
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      - name: Identify pinned just compiler cache
+        id: just-key
+        run: |
+          echo "compiler=$(rustc -Vv | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          . /etc/os-release
+          echo "image=$ID-$VERSION_ID" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        id: just-cache
+        with:
+          path: ${{ runner.temp }}/just
+          key: just-1.40.0-${{ runner.os }}-${{ steps.just-key.outputs.image }}-${{ runner.arch }}-${{ steps.just-key.outputs.compiler }}-v1
+      - name: Install pinned just for recipe regression tests
+        run: |
+          if [[ '${{ steps.just-cache.outputs.cache-hit }}' != true ]]; then
+            cargo install just --version 1.40.0 --locked --root "$RUNNER_TEMP/just" --target-dir "$RUNNER_TEMP/just-build"
+          fi
+          test "$("$RUNNER_TEMP/just/bin/just" --version)" = "just 1.40.0"
+          echo "$RUNNER_TEMP/just/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.just-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/just
+          key: ${{ steps.just-cache.outputs.cache-primary-key }}
       - name: Validate recovery bootstrap syntax
         run: bash -n deploy/relayforge-hot-activate.sh
       - name: Verify independent recovery guard without hardware
         run: |
           bash -n deploy/install-local-recovery.sh
           python3 -m py_compile deploy/relayforge-local-recover.py scripts/test_local_recovery.py
-          python3 scripts/test_local_recovery.py
+          python3 -B -m unittest discover -s scripts -p 'test_*.py'
       - name: Format
         run: cargo fmt --all -- --check
       - name: Check Rust
@@ -38,10 +96,20 @@ jobs:
       - name: Build Linux release binaries
         run: cargo build --release --locked -p relayforge-agent -p relayforge-mcp
       - name: Confirm restricted MCP operation without devices
-        run: python3 scripts/offline_mcp_smoke.py target/release/relayforge-mcp
+        run: python3 scripts/offline_mcp_smoke.py .build/ci/release/relayforge-mcp
+      - name: Verify owner-approved artifact reads in a disposable home
+        run: python3 -B scripts/offline_artifact_acceptance.py .build/ci/release/relayforge-mcp
       - name: Package CI-only binaries
         run: |
-          tar -C target/release -czf /tmp/relayforge-ci-linux-x86_64.tar.gz relayforge-agent relayforge-mcp
+          python3 - <<'PYMETA'
+          import hashlib, json, pathlib, subprocess
+          binary = pathlib.Path(".build/ci/release/relayforge-mcp")
+          commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          record = {"schema_version": 1, "commit": commit,
+                    "sha256": hashlib.sha256(binary.read_bytes()).hexdigest(), "binary": "relayforge-mcp"}
+          binary.with_name("manifest.json").write_text(json.dumps(record) + "\n")
+          PYMETA
+          tar -C .build/ci/release -czf /tmp/relayforge-ci-linux-x86_64.tar.gz relayforge-agent relayforge-mcp manifest.json
           sha256sum /tmp/relayforge-ci-linux-x86_64.tar.gz > /tmp/relayforge-ci-linux-x86_64.tar.gz.sha256
       - name: Retain disposable build for manual inspection only
         uses: actions/upload-artifact@v4
@@ -52,3 +120,158 @@ jobs:
             /tmp/relayforge-ci-linux-x86_64.tar.gz.sha256
           retention-days: 7
           if-no-files-found: error
+      - name: Build exact-source non-activating Ubuntu package
+        run: |
+          python3 -B ci/ubuntu_package.py --binary-dir .build/ci/release --dist .build/ubuntu-dist --sha "$SOURCE_SHA"
+      - name: Test installed Ubuntu package in a disposable container
+        run: |
+          docker run --rm -e CI_UBUNTU_DISPOSABLE=1 -e SOURCE_SHA -v "$PWD:/workspace:ro" -w /workspace ubuntu:24.04 bash ci/ubuntu-package-smoke.sh
+      - name: Retain unactivated Ubuntu package for exact-source inspection
+        uses: actions/upload-artifact@v4
+        with:
+          name: relayforge-ubuntu-source-${{ github.event.pull_request.head.sha || github.sha }}
+          path: .build/ubuntu-dist/*
+          retention-days: 7
+          if-no-files-found: error
+
+
+  ubuntu-release:
+    name: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main' && 'branch-ubuntu-release' || 'ubuntu-release' }}
+    env:
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    needs: verify-offline
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: relayforge-ubuntu-source-${{ github.event.pull_request.head.sha || github.sha }}
+          path: .build/ubuntu-dist
+      - name: Independently verify downloaded Ubuntu package installation and removal
+        run: docker run --rm -e CI_UBUNTU_DISPOSABLE=1 -e SOURCE_SHA -v "$PWD:/workspace:ro" -w /workspace ubuntu:24.04 bash ci/ubuntu-package-smoke.sh
+      - name: Bind successful independent checks to package bytes
+        env:
+          SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: python3 -B ci/ubuntu_release.py .build/ubuntu-dist "$SOURCE_SHA"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: relayforge-ubuntu-verified-${{ github.event.pull_request.head.sha || github.sha }}
+          path: .build/ubuntu-dist/*
+          retention-days: 7
+          if-no-files-found: error
+
+  arch-source:
+    name: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main' && 'branch-arch-source' || 'arch-source' }}
+    needs: coverage
+    if: needs.coverage.outputs.run == 'true'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    env:
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Build pinned disposable Arch environment
+        run: docker build -t relayforge-arch-ci -f ci/arch-container.Dockerfile .
+      - name: Build package as non-root (no host HOME or credentials mounted)
+        run: |
+          docker create --name arch-build relayforge-arch-ci sleep infinity
+          docker cp . arch-build:/workspace
+          docker start arch-build
+          docker exec arch-build chown -R builder:builder /workspace
+          docker exec -u builder -w /workspace -e XDG_CACHE_HOME=/workspace/.build/gh-cache -e SOURCE_SHA="$SOURCE_SHA" -e CARGO_TARGET_DIR=/workspace/.build/ci-arch arch-build bash ci/arch-source.sh
+      - name: Test actual installed package with disposable systemd and bubblewrap
+        run: |
+          docker commit arch-build relayforge-arch-tested
+          docker run -d --name arch-installed --privileged --cgroupns=private --tmpfs /run --tmpfs /tmp -e GITHUB_ACTIONS=true relayforge-arch-tested /sbin/init
+          for attempt in $(seq 1 60); do
+            if docker exec arch-installed systemctl is-active --quiet multi-user.target; then break; fi
+            sleep 1
+          done
+          docker exec arch-installed systemctl is-active --quiet multi-user.target
+          docker network disconnect bridge arch-installed
+          docker exec arch-installed touch /run/relayforge-disposable-ci
+          docker exec -w /workspace -e GITHUB_ACTIONS=true arch-installed python3 -B ci/arch-lifecycle.py
+      - name: Export verified bytes and lifecycle evidence
+        run: |
+          mkdir -p .build/arch-dist
+          docker cp arch-installed:/workspace/.build/arch-dist/. .build/arch-dist/
+      - name: Retain exact-source pacman package and operational evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: relayforge-arch-source-${{ github.event.pull_request.head.sha || github.sha }}
+          path: .build/arch-dist/*
+          retention-days: 7
+          if-no-files-found: error
+      - name: Remove only this job's disposable containers
+        if: always()
+        run: |
+          docker rm -f arch-installed arch-build || true
+
+  sandbox-integration:
+    name: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main' && 'branch-sandbox-integration' || 'sandbox-integration' }}
+    needs: coverage
+    if: needs.coverage.outputs.run == 'true'
+    # Noble's restricted userns policy denies bwrap's loopback RTM_NEWADDR.
+    # Do not relax AppArmor or networking. Build the exact source on Jammy
+    # for its libc; full workspace checks above retain the current Ubuntu.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.build/ci-sandbox
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install disposable-runner sandbox dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+      - name: Build exact-head sandbox worker for this runner
+        run: cargo build --release --locked -p relayforge-mcp
+      - name: Exercise real sandbox development fixture without grants or devices
+        run: python3 -B scripts/offline_development_workflow.py .build/ci-sandbox/release/relayforge-mcp
+      - name: Exercise expiring task authorization and editable sandbox workspace
+        run: python3 -B scripts/offline_authorized_development.py .build/ci-sandbox/release/relayforge-mcp
+      - name: Exercise hardened HTTP and stdio and scheduled rollback
+        # System manager on this disposable hosted runner supports namespace
+        # hardening that the hosted user manager rejects (EXIT_NAMESPACE 226).
+        # The fixture still executes as the unprivileged runner UID.
+        timeout-minutes: 9
+        env:
+          RELAYFORGE_CI_SYSTEMD_SYSTEM: "1"
+        run: python3 -B scripts/test_tunnel_artifact_isolation.py .build/ci-sandbox/release/relayforge-mcp
+
+  verification:
+    name: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main' && 'Branch RDC verification' || 'RDC verification' }}
+    if: always()
+    needs: [coverage, verify-offline, ubuntu-release, arch-source, sandbox-integration]
+    runs-on: ubuntu-24.04
+    env:
+      RESULTS: ${{ toJSON(needs) }}
+      EVENT: ${{ github.event_name }}
+      REF: ${{ github.ref }}
+    steps:
+      - name: Fail closed on missing or failed verification
+        run: |
+          python3 - <<'PYVERIFY'
+          import json, os
+          results = json.loads(os.environ['RESULTS'])
+          coverage = results.pop('coverage')
+          assert coverage['result'] == 'success', 'coverage discovery failed'
+          duplicate = coverage['outputs'].get('run') == 'false'
+          if duplicate:
+              assert os.environ['EVENT'] == 'push' and os.environ['REF'].startswith('refs/heads/') and os.environ['REF'] != 'refs/heads/main'
+              assert all(job['result'] == 'skipped' for job in results.values())
+          else:
+              assert all(job['result'] == 'success' for job in results.values()), 'required verification failed or skipped'
+          PYVERIFY

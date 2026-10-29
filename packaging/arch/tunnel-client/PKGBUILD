@@ -1,0 +1,60 @@
+# Official upstream binary distribution; independent of RelayForge's version.
+pkgname=tunnel-client
+pkgver=0.0.18
+pkgrel=1
+pkgdesc='Official OpenAI Secure MCP Tunnel client (opt-in)'
+arch=('x86_64')
+url='https://github.com/openai/tunnel-client'
+license=('Apache-2.0')
+depends=('glibc' 'ca-certificates')
+makedepends=('python' 'github-cli')
+options=('!strip' '!debug')
+source=('tunnel-client-v0.0.18-linux-amd64.zip' 'SHA256SUMS.txt'
+        'tunnel-client-v0.0.18-provenance.sigstore.json' 'upstream.json')
+noextract=('tunnel-client-v0.0.18-linux-amd64.zip')
+sha256sums=(
+    '3c82307316acd93c88a384b62af1d81d3f4cb0efa975f9c0bfaef922866a04c4'
+    '63f9996246424301c8b0680c943c67d0ea7fe2f0853a234649104f8062c67329'
+    'c7ae172ff3a12b14eabb7996f1e77e58def625c00f9b6f807dc82bbd5f6ee346'
+    '35fe729c951112e82ae0644f0e5cdac79293f8caff86aad0f7bb00e1ba4addc4'
+)
+
+prepare() {
+    # Reverify provenance even when this recipe is built outside the CI wrapper.
+    local sha=274a5588414819f063d27100a4fb1096aae3830f
+    for artifact in "tunnel-client-v$pkgver-linux-amd64.zip" SHA256SUMS.txt; do
+        gh attestation verify "$srcdir/$artifact" \
+            --bundle "$srcdir/tunnel-client-v$pkgver-provenance.sigstore.json" \
+            --repo openai/tunnel-client \
+            --signer-workflow openai/tunnel-client/.github/workflows/release.yml \
+            --source-ref "refs/tags/v$pkgver" --source-digest "$sha" --signer-digest "$sha" \
+            --deny-self-hosted-runners || return 1
+    done
+    python - <<'PYZIP'
+import zipfile
+from pathlib import Path
+with zipfile.ZipFile('tunnel-client-v0.0.18-linux-amd64.zip') as z:
+    expected = {'tunnel-client', 'cloudflared', 'cloudflared-manifest.json', 'LICENSE', 'NOTICE',
+                'tunnel-client-v0.0.18-linux-amd64-licenses.txt',
+                'tunnel-client-v0.0.18-linux-amd64.spdx.json'}
+    if set(z.namelist()) != expected or len(z.namelist()) != len(expected):
+        raise ValueError('unexpected upstream archive inventory')
+    for name in expected:
+        Path(name).write_bytes(z.read(name))
+PYZIP
+}
+
+package() {
+    cd "$srcdir"
+    # Keep the upstream companion adjacent without conflicting with cloudflared.
+    install -Dm755 tunnel-client "$pkgdir/usr/lib/tunnel-client/tunnel-client"
+    install -Dm755 cloudflared "$pkgdir/usr/lib/tunnel-client/cloudflared"
+    install -d "$pkgdir/usr/bin"
+    ln -s ../lib/tunnel-client/tunnel-client "$pkgdir/usr/bin/tunnel-client"
+    for name in LICENSE NOTICE *-licenses.txt; do
+        install -Dm644 "$name" "$pkgdir/usr/share/licenses/tunnel-client/$name"
+    done
+    for name in cloudflared-manifest.json *spdx.json upstream.json SHA256SUMS.txt *sigstore.json; do
+        install -Dm644 "$name" "$pkgdir/usr/share/tunnel-client/$name"
+    done
+}

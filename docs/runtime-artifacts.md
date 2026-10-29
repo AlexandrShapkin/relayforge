@@ -1,0 +1,215 @@
+# Build isolation and explicitly approved runtime migration (Issue #77)
+
+> Future normal distribution uses the [Arch package lifecycle](arch-packaging.md).
+> This legacy runtime/receipt contract remains binding for the existing installation
+> until a separately attended migration retires it; no existing evidence is relabeled.
+
+
+## Incident and scope
+
+On 2026-10-20 a verification release build replaced the executable selected
+by the deployed hot-stdio parent, activating unaccepted code. Compilation was
+not deployment approval. Source fixes and green CI do not migrate that parent.
+This PR does **not** install, activate, restart, roll back, modify grants or
+change installed units/launchers. The working installation must be preserved.
+
+## Development outputs are not runtime artifacts
+
+- Cargo's repository default is `.build/cargo` via `.cargo/config.toml`.
+- `just verify` fixes `CARGO_TARGET_DIR` and explicit compile target arguments
+  to `.build/verification`, overriding a stale inherited Cargo target setting.
+- `just release-build` uses explicit `.build/release`.
+- Workstation `build.start` uses explicit `.build/workstation`; it never deploys.
+- Hosted CI uses `.build/ci`, runs full native checks/smoke, then records the
+  actual checked-out full commit and MCP SHA-256 in `manifest.json`.
+- Offline smoke runs in a temporary HOME with no real grants/runtime sockets.
+
+Never specify the old `target/release` or a runtime store as `--target-dir` or
+`CARGO_TARGET_DIR`. Do not run Cargo from an older checkout/config with the
+legacy default while the old parent is live. Before migration, **only explicit
+isolated targets are permitted**, even on other branches. New defaults affect
+this source checkout, not the still-installed parent or other checkout copies.
+These protections prevent implicit deployment by normal commands; they are
+not a sandbox against malicious build scripts running with the same user ID.
+
+## Fixed store and version identity
+
+The proposed operator-owned store is outside all Git checkouts:
+
+```
+~/.local/libexec/relayforge/runtime/
+  artifacts/<FULL_COMMIT_SHA>-<MCP_SHA256>/
+    relayforge-mcp          # ordinary file, mode 0500
+    manifest.json          # ordinary file, mode 0400
+  current -> artifacts/<FULL_COMMIT_SHA>-<MCP_SHA256>
+  previous -> artifacts/<PREVIOUS_FULL_COMMIT_SHA>-<PREVIOUS_MCP_SHA256>
+```
+
+Directories are owned by the ordinary service user and not writable by group
+or others (runtime root 0700). Use new version directories; **never overwrite,
+chmod/write, delete or garbage-collect a selected/mapped artifact**. Preserve
+all working images and historical backups. The `current` link is the only
+intentional selector symlink; artifact files and their directory components
+must not be symlinks. No automatic cleaner is introduced.
+
+A manifest has exactly:
+`{"schema_version":1,"commit":"40 lowercase hex","sha256":"64 lowercase hex","binary":"relayforge-mcp"}`.
+A CI manifest binds metadata to bytes; it is **not a signature or independent
+acceptance**. Obtain expected SHA/digest from the independently reviewed full
+source and trusted exact-head CI artifact. An arbitrary manifest, branch name,
+API revision or local checkout HEAD does not establish binary provenance.
+
+## Read-only preflight, not an installer
+
+`deploy/runtime_artifact.py verify --binary ABS_BINARY --manifest ABS_MANIFEST
+--commit FULL_SHA --sha256 EXPECTED_SHA256` validates pins, bounded regular
+files and the digest through no-follow descriptors. It never runs the binary.
+
+`plan` takes the same candidate inputs and **all** corresponding
+`--rollback-binary`, `--rollback-manifest`, `--rollback-commit`,
+`--rollback-sha256`, and `--rollback-receipt` inputs. It refuses absent,
+unverified, identical or mismatched rollback. A separately recorded rollback
+receipt must exactly identify commit/digest and have
+`restricted_worker_ok=true` and `live_health_ok=true`. Those fields record
+independently obtained operator evidence, never grant execution authority.
+Identical executable bytes cannot serve as a distinct rollback by assigning
+them a different source commit. Installed-runtime checks require the canonical
+`current/relayforge-mcp` input, a private 0700 store, owner-controlled version
+directories, and owner-held 0500 binary / 0400 manifest files. Symlinked version
+directories or metadata fail closed. These checks do not establish provenance
+or protect against a malicious process running as the artifact owner.
+
+Success returns `operator_approval_required=true`, `actions_performed=[]`.
+There is intentionally no `--apply` and no automatic installation/restart path.
+Do not feed plan output or repository text into an autonomous executor.
+
+`mcp-before-hot-activation` and `mcp-hot-last-good` are **unclassified historical
+backups**, not proven v8. The new watchdog never copies or executes them. If
+no suitable rollback with trustworthy pins and health evidence exists,
+activation is blocked. The currently working v9 may become a rollback baseline
+only through a separate explicit owner decision and verified provenance/probes;
+this document does not make that decision or relabel it as v8.
+
+## Separate operator-authorized migration procedure — DO NOT run in source work
+
+1. Obtain independent technical ACCEPT for the exact combined source (including
+   any separately accepted #76 changes) and successful full-head CI. Record
+   the actual build commit and MCP digest; validate the downloaded archive and
+   manifest. A P0 source build from main is not implicitly a v9 feature build.
+2. With local read-only process inspection identify the running parent/worker
+   inode, executable hash, loaded unit/launcher and current watchdog. Preserve
+   the mapped working image as a new artifact under independent operator
+   control; establish its true source identity, restricted-worker smoke and
+   actual tunnel health. Do not infer any of this from backup filenames.
+3. Obtain separate owner permission specifying candidate and rollback full
+   commit/digest, any baseline provenance exception, local operator identity,
+   exact files/services, a maintenance window and an independent recovery
+   channel. Existing workstation/self-recovery grants are **not** deployment
+   consent. No MCP/CI/repository flag can approve this step.
+4. The authenticated ordinary operator, in a local interactive terminal,
+   stages copies in **new** version directories, freezes their modes and
+   validates the staged bytes again. Never overwrite the current image or
+   old backups. Supply independent rollback receipt and run the read-only
+   `plan` against the frozen staged files; retain its output privately.
+5. Only within that approval, temporarily quiesce the old watchdog's binary
+   repair if necessary and update installed launcher/unit templates to their
+   reviewed runtime paths. Do not alter tunnel credentials, transport profile,
+   VPN, network policy or unrelated grants. Migrating the HTTP unit, if active,
+   requires its own explicit service scope.
+6. Record the verified baseline as `previous`. Prepare a sibling temporary
+   `current.next` symlink whose literal target is the validated
+   `artifacts/<commit>-<digest>` directory; atomically replace `current` in
+   that same private directory (Linux `rename`/`os.replace`) and fsync the
+   directory. Never follow/overwrite an unexpected selector or artifact.
+7. Perform only the separately approved controlled tunnel restart. Confirm
+   the loaded MCP executable hash/inode matches the selected artifact, fresh
+   authenticated control-plane polls, restricted MCP discovery/capabilities
+   and required operations. Record the actual checks/timestamps. Hash-only
+   validation or `systemctl active` alone is not a live health proof.
+8. On failure, use **only** the prevalidated baseline: atomically restore the
+   selector and perform the approved restart/health checks. Preserve the failed
+   candidate and diagnostic evidence. If baseline verification or recovery
+   fails, stop and use the independently prepared local recovery channel;
+   never substitute an older file by name. Successful migration/rollback must
+   be explicitly recorded before re-enabling a revised watchdog.
+
+### Old parent limitation and continuity
+
+The already-running old parent continues to reopen the old Cargo path. Source
+changes, selecting `current` or installing a new launcher do **not** change its
+mapped code. There is no proven zero-interruption transport handoff here.
+A controlled reconnect is necessary to start the new parent. An active MCP
+session must not be the sole operator/recovery channel for that action.
+Codex/GitHub source work can continue independently during the maintenance
+window. If uninterrupted tunnel operation itself is mandatory, migration is
+blocked until an existing, independently tested handoff is demonstrated or
+an interruption is separately approved; do not invent a bypass service.
+
+The new parent always spawns its **own mapped image** through
+`/proc/<parent-pid>/exe`; it never follows Cargo output or `current` for the
+next request. An intentional later activation also requires an approved
+restart. Background jobs require a frozen versioned runtime image. The revised
+watchdog may start an inactive tunnel with verified runtime bytes, but cannot
+promote/restore binaries. Its writable paths exclude both Cargo and runtime
+artifacts. Installing these source changes remains a separate action.
+
+## Self-contained attended activation (Issue #77)
+
+The HTTP and tunnel templates use `ProtectHome=false`, without home bind mounts
+or a scaffold. `ProtectSystem=full`, `PrivateTmp`, `NoNewPrivileges`, the tunnel
+address-family restrictions, polling and credentials remain unchanged. Real HOME
+access enables locally authorized operations; remote allowlists, per-operation
+grants and durable auditing still decide what MCP may do. A compromised service
+process has its ordinary user's HOME access; filesystem restrictions are not a
+replacement for the application authorization boundary.
+
+Artifact authorization begins at a pinned HOME descriptor owned by the exact
+process UID. Ancestors are traversed without symlinks and with safe permissions;
+their namespace-translated UIDs convey no authorization. HOME and every config,
+root and report descriptor retain strict ownership checks. UID 65534 is never
+an ownership exception. The old immutable candidate cannot implement this source
+correction; retain its bytes/pin and baseline alongside a new source-built pin.
+
+`deploy/attended_activation.py` is the reviewed source of the ignored package's
+`transition.py`; `deploy/activation_transaction.py` provides its durable journal.
+They are package templates, not an instruction to install or run them. After
+physical owner approval, the transition safely bootstraps the private lock,
+rechecks under that lock, creates missing 0700 directories and 0600 audit state
+without truncating existing files, stages immutable artifacts/reports, installs
+both pinned units and merges the approved artifact root without replacing other
+entries. It then selects/restarts the candidate and checks local health/artifacts.
+No development/source-edit grant is created or changed.
+
+`check` performs no installation. It lists safely creatable objects and rejects
+unsafe metadata/links, root collisions/capacity, busy existing locks, pending
+transactions, changed pins/configuration, unavailable tools/manager, insufficient
+space and read-only/unwritable destinations. Existing unsafe permissions are
+blockers, never silently repaired. Lingering must already be enabled for the
+ordinary user: changing host login policy requires its own authority.
+
+Before configuration or selector changes, a private fsynced journal records exact
+unit/root-map bytes, modes and both selectors, and a persistent calendar recovery
+timer is enabled and verified. The foreground acceptance budget is 20 minutes,
+with a 90-second recovery margin and attempt-specific physical-owner confirmation
+of fresh independent tunnel checks. HTTP success cannot confirm the tunnel.
+EOF, rejection, timeout or a crash restores the baseline. The independently
+scheduled recovery service uses the same lock, checks fixed pins/journal state,
+stops the pair, restores exact configuration/root-map/selectors, restarts and
+checks baseline health. It has a 180-second service limit and at most three
+starts per ten minutes. Failed recovery retains its journal and needs physical
+diagnosis; a powered-off host cannot recover until its user manager runs again.
+
+Partial writes and abandoned temporaries are preserved as evidence; only known
+before/after target states may be restored. Audit data, staged immutable images,
+historical receipts, and unrelated user files remain intact. Owner acceptance is
+fsynced before recovery is disarmed. An accepted attempt is never automatically
+rolled back. Explicit rollback names the exact attempt and requires fresh physical-owner
+approval. It may restore a committed attempt only while its recorded after-state
+is unchanged; it never guesses or overwrites a later deployment.
+
+Verification: `python3 -B -m unittest discover -s scripts -p 'test_*.py'` covers
+clean/preserved installs, partial failures, SIGKILL recovery and owner gates.
+`python3 -B scripts/test_tunnel_artifact_isolation.py <new-pinned-api9-binary>`
+exercises HTTP and readonly-stdio in disposable user services, including unmapped
+HOME/config/root/report denial and independent scheduled filesystem recovery.
+These checks grant no installation, activation, merge or deployment authority.

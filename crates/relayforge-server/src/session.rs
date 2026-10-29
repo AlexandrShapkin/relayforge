@@ -52,7 +52,7 @@ impl Sessions {
         nonce: &str,
         now: Instant,
     ) -> Result<(), SessionError> {
-        if !valid_id(device_id) {
+        if !valid_device_id(device_id) {
             return Err(SessionError::InvalidIdentity);
         }
         if !valid_id(nonce) || nonce.len() < 32 {
@@ -118,6 +118,11 @@ impl Sessions {
     pub fn revoke(&mut self, nonce: &str) {
         self.sessions.remove(nonce);
     }
+}
+
+/// Canonical device identity: 1–128 ASCII letters, digits, hyphens or underscores.
+pub(crate) fn valid_device_id(value: &str) -> bool {
+    valid_id(value)
 }
 
 fn valid_id(value: &str) -> bool {

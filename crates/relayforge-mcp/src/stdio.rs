@@ -333,23 +333,11 @@ pub fn serve_tunnel_worker(reader: impl BufRead, writer: impl Write) -> io::Resu
 }
 
 fn worker_binary() -> Result<PathBuf, ()> {
-    let home = PathBuf::from(std::env::var_os("HOME").ok_or(())?);
-    if !home.is_absolute() || home.as_os_str().len() > 256 {
-        return Err(());
-    }
-    let installed = home.join("Projects/relayforge/target/release/relayforge-mcp");
-    if installed.is_file() {
-        return Ok(installed);
-    }
-    // CI smoke tests run from a disposable checkout without the fixed
-    // ThinkPad home layout. This fallback cannot select arbitrary binaries:
-    // only the already running RelayForge executable is permitted.
-    let current = std::env::current_exe().map_err(|_| ())?;
-    if current
-        .file_name()
-        .is_some_and(|name| name == "relayforge-mcp")
-    {
-        Ok(current)
+    // Linux procfs pins the running parent image even after pathname replacement.
+    // Never reopen Cargo output, a mutable runtime pointer, or a caller path.
+    let parent = PathBuf::from(format!("/proc/{}/exe", std::process::id()));
+    if parent.is_file() {
+        Ok(parent)
     } else {
         Err(())
     }
@@ -394,13 +382,7 @@ fn call_worker(worker: &std::path::Path, input: &Value) -> Result<Value, ()> {
 
 fn worker_reply(input: &Value) -> Result<Value, ()> {
     let binary = worker_binary()?;
-    // The long-lived parent executable remains mapped even after Cargo
-    // atomically replaces the on-disk release. A failed new worker can fall
-    // back to the running parent's known-good restricted worker code without
-    // interrupting the tunnel. This fallback lasts only for this parent
-    // process lifetime, not across a machine or service restart.
-    let parent_exe = PathBuf::from(format!("/proc/{}/exe", std::process::id()));
-    call_worker(&binary, input).or_else(|_| call_worker(&parent_exe, input))
+    call_worker(&binary, input)
 }
 
 fn handle_hot_worker(input: &Value) -> Option<Value> {

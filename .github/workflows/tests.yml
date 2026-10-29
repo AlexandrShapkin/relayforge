@@ -1,14 +1,47 @@
 name: Rust checks
 on:
   push:
+    branches: ['**']
+    tags: ['**']
   pull_request:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
 permissions:
   contents: read
+  pull-requests: read
 jobs:
+
+  coverage:
+    runs-on: ubuntu-24.04
+    outputs:
+      run: ${{ steps.coverage.outputs.run }}
+    steps:
+      - id: coverage
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+        run: |
+          # API failure fails the workflow; never silently omit verification.
+          run=true
+          if [[ "$EVENT" == push && "$REF" == refs/heads/* && "$REF" != refs/heads/main ]]; then
+            matches=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls?state=open&per_page=100" --jq ".[] | select(.base.ref == \"main\" and .head.repo.full_name == \"$GITHUB_REPOSITORY\" and .head.ref == \"${REF#refs/heads/}\" and .head.sha == \"$SHA\") | .number")
+            if [[ -n "$matches" ]]; then run=false; fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
   test:
+    name: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main' && 'branch-test' || 'test' }}
+    needs: coverage
+    if: needs.coverage.outputs.run == 'true'
     runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.build/ci
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
       - name: Parse inert autonomy metadata (Python 3.11+)
         run: |
           python3 - <<'PY'
@@ -21,13 +54,64 @@ jobs:
           assert contract["execution"]["auto_merge"] is False
           assert contract["execution"]["auto_deploy"] is False
           PY
+      - name: Verify reviewed governance sources
+        run: python3 -B scripts/test_governance_sources.py
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      - name: Identify pinned just compiler cache
+        id: just-key
+        run: |
+          echo "compiler=$(rustc -Vv | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          . /etc/os-release
+          echo "image=$ID-$VERSION_ID" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        id: just-cache
+        with:
+          path: ${{ runner.temp }}/just
+          key: just-1.40.0-${{ runner.os }}-${{ steps.just-key.outputs.image }}-${{ runner.arch }}-${{ steps.just-key.outputs.compiler }}-v1
+      - name: Install pinned just for recipe regression tests
+        run: |
+          if [[ '${{ steps.just-cache.outputs.cache-hit }}' != true ]]; then
+            cargo install just --version 1.40.0 --locked --root "$RUNNER_TEMP/just" --target-dir "$RUNNER_TEMP/just-build"
+          fi
+          test "$("$RUNNER_TEMP/just/bin/just" --version)" = "just 1.40.0"
+          echo "$RUNNER_TEMP/just/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.just-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/just
+          key: ${{ steps.just-cache.outputs.cache-primary-key }}
+      - run: python3 -B -m unittest discover -s scripts -p 'test_*.py'
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       - name: Check shared developer interface syntax and offline status
         run: |
           python3 -B -m py_compile scripts/development_interface.py
           python3 -B scripts/development_interface.py relayforge status
+
+  verification:
+    name: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main' && 'Branch Rust verification' || 'Rust verification' }}
+    if: always()
+    needs: [coverage, test]
+    runs-on: ubuntu-24.04
+    env:
+      RESULTS: ${{ toJSON(needs) }}
+      EVENT: ${{ github.event_name }}
+      REF: ${{ github.ref }}
+    steps:
+      - name: Fail closed on missing or failed verification
+        run: |
+          python3 - <<'PYVERIFY'
+          import json, os
+          results = json.loads(os.environ['RESULTS'])
+          coverage = results.pop('coverage')
+          assert coverage['result'] == 'success', 'coverage discovery failed'
+          duplicate = coverage['outputs'].get('run') == 'false'
+          if duplicate:
+              assert os.environ['EVENT'] == 'push' and os.environ['REF'].startswith('refs/heads/') and os.environ['REF'] != 'refs/heads/main'
+              assert all(job['result'] == 'skipped' for job in results.values())
+          else:
+              assert all(job['result'] == 'success' for job in results.values()), 'required verification failed or skipped'
+          PYVERIFY

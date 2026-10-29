@@ -3,8 +3,8 @@
 //! host, credentials or arbitrary filesystem root. Mutations require a
 //! separate local operator-created, permission-checked opt-in file.
 use crate::{
-    workstation_dependency, workstation_jobs, workstation_projects, workstation_recovery,
-    workstation_retire, workstation_transfer,
+    workstation_artifacts, workstation_dependency, workstation_development, workstation_jobs,
+    workstation_recovery, workstation_retire, workstation_transfer,
 };
 use serde_json::{json, Value};
 use std::{
@@ -33,7 +33,7 @@ pub fn tool() -> Value {
             "content":{"type":"string","maxLength":49152},
             "task_id":{"type":"string","maxLength":32},
             "script":{"type":"string","maxLength":2048},
-            "parameters":{"type":"object","description":"Only job.chain.start (scripts array) and job.chain.output (step number); all other nested payloads denied."}
+            "parameters":{"type":"object","description":"Strict server-validated development, job.chain or artifact.root.prepare proposal; other nested payloads denied."}
         },"required":["operation"],"additionalProperties":false}})
 }
 
@@ -65,7 +65,7 @@ fn local_opt_in(home: &Path, name: &str, expected: &[u8]) -> bool {
     fs::read(&path).is_ok_and(|value| value == expected)
 }
 
-fn dev_enabled(home: &Path) -> bool {
+pub(crate) fn dev_enabled(home: &Path) -> bool {
     local_opt_in(home, OPT_IN, b"ALLOW_RELAYFORGE_DEVELOPMENT\n")
 }
 
@@ -133,7 +133,7 @@ pub(crate) fn read_capped<R: Read>(reader: R) -> Result<Vec<u8>, String> {
     Ok(output)
 }
 
-pub(crate) fn command(program: &str, args: &[&str], max_seconds: u32) -> Result<Output, String> {
+fn command(program: &str, args: &[&str], max_seconds: u32) -> Result<Output, String> {
     command_input(program, args, None, max_seconds)
 }
 
@@ -188,7 +188,7 @@ fn text_output(output: Output) -> Result<String, String> {
     .to_string())
 }
 
-pub(crate) fn git(repo: &Path, args: &[&str]) -> Result<Output, String> {
+fn git(repo: &Path, args: &[&str]) -> Result<Output, String> {
     let path = repo.to_str().ok_or("repository path invalid")?;
     let mut fixed = vec![
         "-c",
@@ -397,6 +397,8 @@ fn spawn_task(repo: &Path, kind: &str) -> Result<String, String> {
     }
     let repo_string = repo.to_str().ok_or("invalid repo path")?;
     let lock = task_lock(repo)?;
+    let build_target = repo.join(".build/workstation");
+    let build_target = build_target.to_str().ok_or("build target unavailable")?;
     let workdir = format!("--working-directory={repo_string}");
     let mut last_reason = "unavailable";
     for attempt in 1..=3 {
@@ -431,6 +433,8 @@ fn spawn_task(repo: &Path, kind: &str) -> Result<String, String> {
                 "build",
                 "--release",
                 "--locked",
+                "--target-dir",
+                build_target,
                 "-p",
                 "relayforge-mcp",
                 "-p",
@@ -626,15 +630,18 @@ pub fn execute(args: &Value) -> Result<String, String> {
             "api_revision": 9,
             "transport": "private_secure_mcp_tunnel",
             "operations": [
-                "capabilities", "projects.inventory", "repo.status", "repo.list", "repo.read",
+                "capabilities", "repo.status", "repo.list", "repo.read",
                 "repo.write", "repo.sync", "build.start",
                 "task.status", "task.logs", "task.list",
                 "tunnel.inspect", "tunnel.restart", "recovery.inspect",
                 "workspace.list", "workspace.read", "workspace.put",
-                "workspace.remove",
+                "workspace.remove", "artifact.list", "artifact.read",
+                "artifact.root.prepare", "artifact.root.revoke.prepare",
+                "artifact.root.inspect",
                 "job.start", "job.list", "job.status", "job.output",
                 "job.stop", "job.remove",
                 "job.chain.start", "job.chain.status", "job.chain.output",
+                "development.prepare", "development.run", "development.inspect",
                 "dependency.audit",
                 "ssh.retire.plan", "ssh.retire.config", "ssh.retire.known_hosts",
                 "shell.sandbox", "process.list", "user.services"
@@ -643,23 +650,99 @@ pub fn execute(args: &Value) -> Result<String, String> {
                 "development": dev_enabled(&home),
                 "source_edit": source_edit_enabled(&home)
             },
+            "artifacts": workstation_artifacts::discovery(&home),
             "arbitrary_host_shell": false,
             "arbitrary_host_files": false,
+            "development_tasks": {
+                "schema_version":1,
+                "repositories":["relayforge"],
+                "profiles":["python-stdlib-v1"],
+                "max_files":4,
+                "max_proposal_bytes":24576,
+                "task_grant_required":true,
+                "max_authorization_lifetime_seconds":3600,
+                "checkout_writes":false,
+                "publication":"external_github_only"
+            },
             "local_grants_required_for_mutations": true
         })
         .to_string());
     }
-    // Inventory must still work if the RelayForge checkout itself is missing.
-    // No user-supplied root, project or command is consulted.
-    if operation == "projects.inventory" {
-        if obj.len() != 1 {
-            return Err("operation or parameters denied".into());
-        }
-        let home = PathBuf::from(std::env::var_os("HOME").ok_or("home unavailable")?);
-        return workstation_projects::inventory(&home);
-    }
     let (home, repo) = home_and_repo()?;
     match operation {
+        "artifact.root.inspect" => {
+            if obj.len() != 2 {
+                return Err("artifact inspection parameters denied".into());
+            }
+            let params = obj
+                .get("parameters")
+                .and_then(Value::as_object)
+                .ok_or("artifact inspection parameters denied")?;
+            if params.len() != 1 {
+                return Err("artifact inspection parameters denied".into());
+            }
+            let name = params
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or("artifact root alias required")?;
+            audit(&home, operation)?;
+            workstation_artifacts::inspect_root(&home, name)
+        }
+        "artifact.root.prepare" => {
+            if obj.len() != 2 {
+                return Err("artifact approval parameters denied".into());
+            }
+            let params = obj
+                .get("parameters")
+                .and_then(Value::as_object)
+                .ok_or("artifact approval parameters denied")?;
+            if params.len() != 2 {
+                return Err("artifact approval parameters denied".into());
+            }
+            let name = params
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or("artifact root alias required")?;
+            let directory = params
+                .get("directory")
+                .and_then(Value::as_str)
+                .ok_or("artifact directory required")?;
+            crate::changes::prepare(&json!({"host":"workstation","action":"artifact.root.add",
+                "name":name,"directory":directory}))
+        }
+        "artifact.root.revoke.prepare" => {
+            if obj.len() != 2 {
+                return Err("artifact approval parameters denied".into());
+            }
+            let params = obj
+                .get("parameters")
+                .and_then(Value::as_object)
+                .ok_or("artifact approval parameters denied")?;
+            if params.len() != 1 {
+                return Err("artifact approval parameters denied".into());
+            }
+            let name = params
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or("artifact root alias required")?;
+            crate::changes::prepare(
+                &json!({"host":"workstation","action":"artifact.root.remove",
+                "name":name}),
+            )
+        }
+        "artifact.list" | "artifact.read" => {
+            audit(&home, operation)?;
+            workstation_artifacts::execute(&home, args)
+        }
+        "development.prepare" | "development.run" | "development.inspect" => {
+            if operation != "development.inspect" {
+                if !dev_enabled(&home) {
+                    return Err("local development opt-in missing".into());
+                }
+                audit(&home, operation)?;
+            }
+            workstation_development::execute(&home, &repo, args)
+        }
         "ssh.retire.plan" if obj.len() == 1 => workstation_retire::plan(&home),
         "ssh.retire.config" | "ssh.retire.known_hosts" if obj.len() == 1 => {
             if !dev_enabled(&home) {
@@ -1098,10 +1181,5 @@ mod tests {
         assert!(execute(&json!({"operation":"unknown"})).is_err());
         assert!(execute(&json!({"operation":"repo.read","path":"../../etc/passwd"})).is_err());
         assert!(execute(&json!({"operation":"repo.sync","cmd":"sh"})).is_err());
-        assert!(execute(&json!({"operation":"projects.inventory","path":"../outside"})).is_err());
-        assert!(
-            execute(&json!({"operation":"projects.inventory","parameters":{"shell":"id"}}))
-                .is_err()
-        );
     }
 }

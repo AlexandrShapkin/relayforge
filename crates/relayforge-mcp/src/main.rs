@@ -8,11 +8,24 @@ fn main() -> io::Result<()> {
             return Err(io::Error::other("unexpected arguments"));
         }
         relayforge_mcp::changes::approve_local(&id)
-    } else if std::env::args().nth(1).as_deref() == Some("--http") {
+    } else if matches!(
+        std::env::args().nth(1).as_deref(),
+        Some("--http" | "--http-oauth")
+    ) {
+        let oauth = std::env::args().nth(1).as_deref() == Some("--http-oauth");
+        if std::env::args().nth(2).is_some() {
+            return Err(io::Error::other("unexpected arguments"));
+        }
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?
-            .block_on(relayforge_mcp::http::run_from_env())
+            .block_on(async {
+                if oauth {
+                    relayforge_mcp::http::run_oauth_from_env().await
+                } else {
+                    relayforge_mcp::http::run_from_env().await
+                }
+            })
     } else if std::env::args().nth(1).as_deref() == Some("--sandbox-job-worker") {
         let id = std::env::args()
             .nth(2)

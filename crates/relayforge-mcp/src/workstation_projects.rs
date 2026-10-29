@@ -2,6 +2,8 @@
 //! not supplied from GitHub Issues, repository TOML or arbitrary MCP strings.
 //! No git fetch/pull, delete, install, host shell or task execution.
 use crate::workstation_dev::{read_capped, unsafe_uid};
+use serde::{Deserialize, Serialize};
+#[cfg(test)]
 use serde_json::{json, Value};
 use std::{
     fs::{self, File, OpenOptions},
@@ -275,10 +277,16 @@ fn branch_count(repo: &Repository) -> Option<usize> {
     Some(names.len())
 }
 
-fn worktree_counts(repo: &Repository) -> Value {
+fn worktree_counts(repo: &Repository) -> WorktreeObservation {
     let path = fd_path(&repo.metadata).join("worktrees");
     if fs::symlink_metadata(&path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
-        return json!({"status":"observed","count":1,"locked":0,"prunable":Value::Null,"cleanup_authorized":false});
+        return WorktreeObservation {
+            status: ObservationStatus::Observed,
+            count: Some(1),
+            locked: Some(0),
+            prunable: None,
+            cleanup_authorized: false,
+        };
     }
     let observed = (|| {
         let directory = open_directory(&path)?;
@@ -305,10 +313,20 @@ fn worktree_counts(repo: &Repository) -> Value {
         Some((count, locked))
     })();
     match observed {
-        Some((count, locked)) => {
-            json!({"status":"observed","count":count,"locked":locked,"prunable":Value::Null,"cleanup_authorized":false})
-        }
-        None => json!({"status":"unverified","cleanup_authorized":false}),
+        Some((count, locked)) => WorktreeObservation {
+            status: ObservationStatus::Observed,
+            count: Some(count),
+            locked: Some(locked),
+            prunable: None,
+            cleanup_authorized: false,
+        },
+        None => WorktreeObservation {
+            status: ObservationStatus::Unverified,
+            count: None,
+            locked: None,
+            prunable: None,
+            cleanup_authorized: false,
+        },
     }
 }
 
@@ -324,7 +342,7 @@ fn free_kib(root: &Path) -> Option<u64> {
     available.parse::<u64>().ok()
 }
 
-fn artifact_snapshot(root: &File) -> Value {
+fn artifact_snapshot(root: &File) -> Vec<ArtifactCandidate> {
     let mut found = Vec::new();
     for relative in ARTIFACTS {
         let (parent, name) = relative.rsplit_once('/').unwrap_or(("", relative));
@@ -342,15 +360,15 @@ fn artifact_snapshot(root: &File) -> Value {
         };
         // Deliberately report no size when a directory can contain unique
         // user data or nested symlinks. Even familiar names aren't deletion grants.
-        found.push(json!({
-            "path":relative,
-            "directory":meta.is_dir() && !meta.file_type().is_symlink(),
-            "symlink":meta.file_type().is_symlink(),
-            "cleanup_authorized":false,
-            "stale":Value::Null
-        }));
+        found.push(ArtifactCandidate {
+            path: relative,
+            directory: meta.is_dir() && !meta.file_type().is_symlink(),
+            symlink: meta.file_type().is_symlink(),
+            cleanup_authorized: false,
+            stale: None,
+        });
     }
-    json!(found)
+    found
 }
 
 fn checks(project: &str) -> &'static [&'static str] {
@@ -363,59 +381,229 @@ fn checks(project: &str) -> &'static [&'static str] {
     }
 }
 
-fn one(home: &Path, project: &str) -> Value {
-    let Some(root) = project_root(home, project) else {
-        return json!({"project":project,"status":"unavailable",
-            "remote_main_verified":false,"build_executed":false});
+/// Internal read contract only; this is not registered as an MCP operation.
+/// No host, root, project selector, command, or mutation parameters are accepted.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InventoryRead {
+    pub view: InventoryView,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InventoryView {
+    Inventory,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ObservationStatus {
+    Observed,
+    Unavailable,
+    Unverified,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProjectObservation {
+    pub project: &'static str,
+    pub status: ObservationStatus,
+    pub head: Option<String>,
+    pub branch: Option<String>,
+    pub on_main: Option<bool>,
+    pub tracked_clean: Option<bool>,
+    pub untracked_count: Option<usize>,
+    pub local_branch_count: Option<usize>,
+    pub origin_main_cached: Option<String>,
+    pub remote_main_verified: bool,
+    pub worktrees: WorktreeObservation,
+    pub disk_available_kib: Option<u64>,
+    pub artifact_candidates: Vec<ArtifactCandidate>,
+    pub native_checks: &'static [&'static str],
+    pub build_executed: bool,
+    pub cleanup_authorized: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WorktreeObservation {
+    pub status: ObservationStatus,
+    pub count: Option<usize>,
+    pub locked: Option<usize>,
+    pub prunable: Option<bool>,
+    pub cleanup_authorized: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ArtifactCandidate {
+    pub path: &'static str,
+    pub directory: bool,
+    pub symlink: bool,
+    pub cleanup_authorized: bool,
+    pub stale: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct InventoryObservation {
+    pub schema_version: u32,
+    pub read_only: bool,
+    /// Start of this non-atomic observation, never proof of remote freshness.
+    pub observed_at_unix_ms: Option<u64>,
+    pub projects: Vec<ProjectObservation>,
+}
+
+/// Static, local, read-only provider. The host adapter supplies its own home;
+/// it must never derive that trusted context from caller-controlled parameters.
+/// No public MCP registration, transport routing or additional grant is implied.
+pub struct ProjectInventoryProvider<'a> {
+    home: &'a Path,
+}
+
+impl<'a> ProjectInventoryProvider<'a> {
+    pub fn new(home: &'a Path) -> Result<Self, &'static str> {
+        if !home.is_absolute() || home.as_os_str().len() > 256 {
+            return Err("home invalid");
+        }
+        Ok(Self { home })
+    }
+
+    pub fn read(&self, request: InventoryRead) -> InventoryObservation {
+        match request.view {
+            InventoryView::Inventory => InventoryObservation {
+                schema_version: 1,
+                read_only: true,
+                observed_at_unix_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .and_then(|duration| duration.as_millis().try_into().ok()),
+                projects: PROJECTS
+                    .iter()
+                    .map(|name| observe(self.home, name))
+                    .collect(),
+            },
+        }
+    }
+}
+
+fn observe(home: &Path, project: &'static str) -> ProjectObservation {
+    let mut result = ProjectObservation {
+        project,
+        status: ObservationStatus::Unavailable,
+        head: None,
+        branch: None,
+        on_main: None,
+        tracked_clean: None,
+        untracked_count: None,
+        local_branch_count: None,
+        origin_main_cached: None,
+        remote_main_verified: false,
+        worktrees: WorktreeObservation {
+            status: ObservationStatus::Unverified,
+            count: None,
+            locked: None,
+            prunable: None,
+            cleanup_authorized: false,
+        },
+        disk_available_kib: None,
+        artifact_candidates: Vec::new(),
+        native_checks: checks(project),
+        build_executed: false,
+        cleanup_authorized: false,
     };
-    let head = head_sha(&root, "HEAD");
-    let local_tracking = head_sha(&root, "refs/remotes/origin/main");
-    let branch = metadata_text(&root.metadata, "HEAD")
+    let Some(root) = project_root(home, project) else {
+        return result;
+    };
+    result.head = head_sha(&root, "HEAD");
+    result.status = if result.head.is_some() {
+        ObservationStatus::Observed
+    } else {
+        ObservationStatus::Unverified
+    };
+    result.origin_main_cached = head_sha(&root, "refs/remotes/origin/main");
+    result.branch = metadata_text(&root.metadata, "HEAD")
         .and_then(|text| {
             text.trim()
                 .strip_prefix("ref: refs/heads/")
                 .map(str::to_owned)
         })
         .filter(|name| ref_name(&format!("refs/heads/{name}")));
-    let branch_count = branch_count(&root);
-    json!({
-        "project":project,
-        "status":if head.is_some() {"observed"} else {"unverified"},
-        "head":head,
-        "branch":branch,
-        "on_main":branch.as_deref()==Some("main"),
-        "tracked_clean":Value::Null,
-        "tracked_clean_note":"unverified: inventory never invokes Git status or reads working-file contents",
-        "untracked_count":Value::Null,
-        "local_branch_count":branch_count,
-        "origin_main_cached":local_tracking,
-        // Remote tracking refs can be stale. A live GitHub main read
-        // through the independent connector is required to assess currency.
-        "remote_main_verified":false,
-        "worktrees":worktree_counts(&root),
-        "disk_available_kib":free_kib(&fd_path(&root.root)),
-        "artifact_candidates":artifact_snapshot(&root.root),
-        "native_checks":checks(project),
-        "build_executed":false,
-        "cleanup_authorized":false
-    })
+    result.on_main = result.branch.as_ref().map(|branch| branch == "main");
+    result.local_branch_count = branch_count(&root);
+    result.worktrees = worktree_counts(&root);
+    result.disk_available_kib = free_kib(&fd_path(&root.root));
+    result.artifact_candidates = artifact_snapshot(&root.root);
+    result
 }
 
-/// Only the empty argument object is accepted by the dispatching caller.
-pub fn inventory(home: &Path) -> Result<String, String> {
-    if !home.is_absolute() || home.as_os_str().len() > 256 {
-        return Err("home invalid".into());
-    }
-    Ok(json!({"api_revision":9, "read_only":true,
-        "projects":PROJECTS.iter().map(|name| one(home,name)).collect::<Vec<_>>(),
-        "note":"Live GitHub main and real checks require separate provider evidence; no cleanup is authorized."
-    }).to_string())
+// Keep the existing security regressions on exactly the provider's reader.
+#[cfg(test)]
+fn one(home: &Path, project: &'static str) -> Value {
+    serde_json::to_value(observe(home, project)).unwrap()
+}
+
+#[cfg(test)]
+fn inventory(home: &Path) -> Result<String, String> {
+    let provider = ProjectInventoryProvider::new(home).map_err(str::to_owned)?;
+    serde_json::to_string(&provider.read(InventoryRead {
+        view: InventoryView::Inventory,
+    }))
+    .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn typed_read_rejects_unknown_views_selectors_hosts_and_mutations() {
+        for request in [
+            json!({}),
+            json!({"view":"status"}),
+            json!({"view":"inventory", "host":"other"}),
+            json!({"view":"inventory", "project":"relayforge"}),
+            json!({"view":"inventory", "path":"/etc"}),
+            json!({"view":"inventory", "action":"delete"}),
+            json!({"view":"inventory", "parameters":{"command":"id"}}),
+        ] {
+            assert!(serde_json::from_value::<InventoryRead>(request).is_err());
+        }
+        let f = Fixture::new();
+        let request = serde_json::from_value(json!({"view":"inventory"})).unwrap();
+        let observation = ProjectInventoryProvider::new(&f.0).unwrap().read(request);
+        assert_eq!(observation.schema_version, 1);
+        assert!(observation.read_only);
+        assert_eq!(
+            observation
+                .projects
+                .iter()
+                .map(|p| p.project)
+                .collect::<Vec<_>>(),
+            PROJECTS
+        );
+        assert_eq!(
+            observation.projects[1].status,
+            ObservationStatus::Unverified
+        );
+        assert!(observation.projects.iter().all(|p| !p.remote_main_verified
+            && !p.build_executed
+            && !p.cleanup_authorized
+            && p.tracked_clean.is_none()));
+    }
+
+    #[test]
+    fn internal_provider_does_not_expand_mcp_capabilities() {
+        let capabilities: Value = serde_json::from_str(
+            &crate::workstation_dev::execute(&json!({"operation":"capabilities"})).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(capabilities["api_revision"], 9);
+        assert!(!capabilities["operations"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("projects.inventory")));
+        assert!(
+            crate::workstation_dev::execute(&json!({"operation":"projects.inventory"})).is_err()
+        );
+    }
 
     struct Fixture(PathBuf);
     impl Fixture {
@@ -813,7 +1001,7 @@ mod tests {
             metadata_text(&repo.metadata, "HEAD").unwrap().trim(),
             "ref: refs/heads/main"
         );
-        assert_eq!(artifact_snapshot(&repo.root), json!([]));
+        assert!(artifact_snapshot(&repo.root).is_empty());
         assert!(project_root(&f.0, "relayforge").is_none());
     }
 
@@ -823,7 +1011,8 @@ mod tests {
         fs::create_dir_all(f.0.join("outside/node_modules")).unwrap();
         symlink(f.0.join("outside"), f.root().join("web")).unwrap();
         symlink(f.0.join("outside"), f.root().join("target")).unwrap();
-        let out = artifact_snapshot(&open_directory(&f.root()).unwrap());
+        let out =
+            serde_json::to_value(artifact_snapshot(&open_directory(&f.root()).unwrap())).unwrap();
         assert_eq!(out.as_array().unwrap().len(), 1);
         assert_eq!(out[0]["path"], "target");
         assert_eq!(out[0]["symlink"], true);
@@ -892,7 +1081,8 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(base.join("target")).unwrap();
         fs::write(base.join("target/unique-report.txt"), b"unique").unwrap();
-        let snapshot = artifact_snapshot(&open_directory(&base).unwrap());
+        let snapshot =
+            serde_json::to_value(artifact_snapshot(&open_directory(&base).unwrap())).unwrap();
         assert_eq!(snapshot[0]["cleanup_authorized"], false);
         assert!(snapshot[0]["stale"].is_null());
         let _ = fs::remove_dir_all(base);

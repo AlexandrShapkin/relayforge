@@ -1,3 +1,6 @@
+> Legacy deployment notes below are historical. For new Arch installations use
+> [package-managed tunnel migration](managed-tunnel.md); do not restore old paths or keys.
+
 # Connecting RelayForge to ChatGPT with Secure MCP Tunnel
 
 The preferred remote transport is OpenAI Secure MCP Tunnel (outbound-only),

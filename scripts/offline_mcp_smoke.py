@@ -56,24 +56,29 @@ def main():
          "params": {"name": "relayforge_workstation_develop",
                     "arguments": {"operation": "job.stop",
                                   "task_id": "systemd.service"}}},
-        {"jsonrpc": "2.0", "id": 15, "method": "tools/call",
-         "params": {"name": "relayforge_workstation_develop",
-                    "arguments": {"operation": "projects.inventory"}}},
-        {"jsonrpc": "2.0", "id": 16, "method": "tools/call",
-         "params": {"name": "relayforge_workstation_develop",
-                    "arguments": {"operation": "projects.inventory",
-                                  "parameters": {"project": "../../outside"}}}},
     ]
     serialized = "".join(json.dumps(item) + "\n" for item in requests)
-    completed = subprocess.run(
-        [sys.argv[1], "--readonly-stdio"],
-        input=serialized, text=True, capture_output=True, timeout=20,
-        check=True,
-    )
+    # Never consult the workstation's HOME, grants, runtime sockets or credentials.
+    with tempfile.TemporaryDirectory(prefix="relayforge-offline-home-") as home:
+        env = {"PATH": "/usr/bin:/bin", "HOME": home, "XDG_RUNTIME_DIR": home + "/run",
+               "XDG_CONFIG_HOME": home + "/config", "LC_ALL": "C"}
+        # Sentinel images prove the smoke neither selects nor overwrites runtime.
+        legacy = pathlib.Path(home) / "Projects/relayforge/target/release/relayforge-mcp"
+        installed = pathlib.Path(home) / ".local/libexec/relayforge/runtime/artifacts/fixture/relayforge-mcp"
+        for sentinel in [legacy, installed]:
+            sentinel.parent.mkdir(parents=True, exist_ok=True)
+            sentinel.write_bytes(b"runtime sentinel")
+        before = [(p.read_bytes(), p.stat().st_mtime_ns) for p in [legacy, installed]]
+        completed = subprocess.run(
+            [sys.argv[1], "--readonly-stdio"],
+            input=serialized, text=True, capture_output=True, timeout=20,
+            check=True, env=env,
+        )
+        assert before == [(p.read_bytes(), p.stat().st_mtime_ns) for p in [legacy, installed]], "offline smoke changed runtime artifacts"
     responses = [json.loads(line) for line in completed.stdout.splitlines()
                  if line.strip()]
     by_id = {r["id"]: r for r in responses}
-    assert set(by_id) == set(range(1, 17)), "MCP responses missing or malformed"
+    assert set(by_id) == set(range(1, 15)), "MCP responses missing or malformed"
     assert by_id[1]["result"]["protocolVersion"] == "2025-11-25"
     names = {tool["name"] for tool in by_id[2]["result"]["tools"]}
     expected = {"relayforge_status", "relayforge_routeros_health",
@@ -102,7 +107,6 @@ def main():
     assert by_id[8]["result"]["isError"] is False
     capabilities = json.loads(by_id[8]["result"]["content"][0]["text"])
     assert capabilities["api_revision"] == 9
-    assert "projects.inventory" in capabilities["operations"]
     assert "repo.sync" in capabilities["operations"]
     assert "task.list" in capabilities["operations"]
     assert "tunnel.inspect" in capabilities["operations"]
@@ -116,14 +120,6 @@ def main():
     assert "job.chain.output" in capabilities["operations"]
     assert "dependency.audit" in capabilities["operations"]
     assert "ssh.retire.config" in capabilities["operations"]
-    assert by_id[15]["result"]["isError"] is False
-    project_snapshot = json.loads(by_id[15]["result"]["content"][0]["text"])
-    assert [p["project"] for p in project_snapshot["projects"]] == [
-        "codex-smart", "relayforge", "assistant-hub", "rustcraft"]
-    assert all(p["remote_main_verified"] is False
-               for p in project_snapshot["projects"])
-    assert by_id[16]["result"]["isError"] is True, (
-        "project inventory accepted untrusted selector")
     assert by_id[13]["result"]["isError"] is True, (
         "background job started without local development grant")
     assert by_id[14]["result"]["isError"] is True, (
@@ -133,17 +129,15 @@ def main():
     assert capabilities["arbitrary_host_shell"] is False
     assert by_id[9]["result"]["isError"] is True, (
         "capabilities operation accepted unrecognized nested parameters")
-    # An invalid on-disk release must not kill the stable parent or cause
-    # arbitrary command execution. The fallback invokes the already-running
-    # parent executable via /proc/<parent-pid>/exe, never /proc/self/exe of
-    # the child timeout process.
+    # Cargo output must never be selected by the parent, even if executable.
+    # Pin the parent image; never /proc/self/exe of the timeout child.
     with tempfile.TemporaryDirectory(prefix="relayforge-hot-smoke-") as home:
         fake_dir = pathlib.Path(home) / "Projects/relayforge/target/release"
         fake_dir.mkdir(parents=True)
         broken = fake_dir / "relayforge-mcp"
-        broken.write_text("#!/bin/sh\nexit 7\n")
+        broken.write_text("#!/bin/sh\ntouch "+str(pathlib.Path(home) / "unexpected-worker")+"\nexit 7\n")
         broken.chmod(0o700)
-        env = dict(os.environ, HOME=home)
+        env = {"PATH": "/usr/bin:/bin", "HOME": home, "XDG_RUNTIME_DIR": home + "/run", "LC_ALL": "C"}
         ping = {"jsonrpc": "2.0", "id": 51, "method": "ping"}
         fallback = subprocess.run(
             [sys.argv[1], "--readonly-stdio"],
@@ -152,14 +146,15 @@ def main():
         response = json.loads(fallback.stdout.strip())
         assert response["id"] == 51
         assert response.get("result") == {}, (
-            "hot stdio fallback failed when the on-disk worker crashed")
+            "hot stdio did not use its pinned parent image")
+        assert not (pathlib.Path(home) / "unexpected-worker").exists()
     # CI has no ThinkPad systemd user manager. Any result must remain
     # a bounded read-only diagnostic or fail closed, never a remote command.
     for ident in (10, 11):
         reply = by_id[ident]["result"]
         assert isinstance(reply["isError"], bool)
         assert all(item["type"] == "text" for item in reply["content"])
-    print("Hot stdio: broken worker fallback to mapped parent: PASS")
+    print("Hot stdio: Cargo output ignored, parent image pinned: PASS")
     print("Offline MCP handshake/tool discovery/workstation/deny-by-default: PASS")
     print("No physical device, tunnel, remote shell or credentials were used.")
 

@@ -45,3 +45,22 @@ relayforge-mcp-http.service` starts it at boot provided systemd user
 lingering is enabled. No root service, public listener or inbound firewall
 rule is created. On ThinkPad it has been tested with systemd and the
 local authenticated HTTP MCP call.
+
+API9 artifact read/list requires durable audit append. The current candidate
+service uses `ProtectHome=false` so owner-authorized operations can use real HOME;
+it has no home mask, scaffold or single-file mount prerequisite. It retains
+`ProtectSystem=full`, `PrivateTmp=true`, `NoNewPrivileges=true` and private umask.
+Application allowlists, mutation grants, strict authorization-object ownership
+and audit checks remain enforced. This is a source template change, not evidence
+that an installed service has changed.
+
+The attended package creates missing private directories/audit files safely and
+preserves existing contents. Its read-only preflight distinguishes those creations
+from metadata, ownership, filesystem and recovery blockers. The Rust artifact
+reader anchors trust at an exact-UID-owned HOME descriptor; namespace-translated
+system ancestor ownership cannot authorize data. UID 65534 is not an ownership
+exception. See [activation and recovery](runtime-artifacts.md#self-contained-attended-activation-issue-77).
+
+`scripts/test_tunnel_artifact_isolation.py BINARY` tests actual authenticated HTTP
+and readonly-stdio discovery/read/list/denials in disposable user services with
+the candidate hardening, without touching installed services or credentials.

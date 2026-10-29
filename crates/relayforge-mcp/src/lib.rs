@@ -32,6 +32,7 @@ pub mod bridge;
 pub mod changes;
 pub mod fleet;
 pub mod http;
+mod oauth;
 pub mod routeros;
 pub mod routeros_health;
 pub mod ssh;
@@ -42,6 +43,7 @@ pub mod workstation_dev;
 pub mod workstation_transfer;
 
 pub mod workstation_chain;
+mod workstation_development;
 pub mod workstation_jobs;
 
 pub mod workstation_dependency;
@@ -49,5 +51,9 @@ pub mod workstation_dependency;
 pub mod workstation_retire;
 
 pub mod workstation_recovery;
+
+mod runtime;
+
+mod workstation_artifacts;
 
 pub mod workstation_projects;

@@ -1,0 +1,12 @@
+{
+  "version": "0.0.18",
+  "pkgrel": 1,
+  "source_sha": "274a5588414819f063d27100a4fb1096aae3830f",
+  "repository": "openai/tunnel-client",
+  "workflow": "openai/tunnel-client/.github/workflows/release.yml",
+  "assets": {
+    "tunnel-client-v0.0.18-linux-amd64.zip": "3c82307316acd93c88a384b62af1d81d3f4cb0efa975f9c0bfaef922866a04c4",
+    "SHA256SUMS.txt": "63f9996246424301c8b0680c943c67d0ea7fe2f0853a234649104f8062c67329",
+    "tunnel-client-v0.0.18-provenance.sigstore.json": "c7ae172ff3a12b14eabb7996f1e77e58def625c00f9b6f807dc82bbd5f6ee346"
+  }
+}
