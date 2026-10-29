@@ -1,9 +1,11 @@
 name: Publish tested Linux packages
 on:
-  workflow_run:
-    workflows: [Rust checks, RDC-independent development verification]
-    types: [completed]
-    branches: [main]
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full reviewed main SHA to publish (owner release approval)
+        required: true
+        type: string
 permissions:
   contents: read
   actions: read
@@ -15,10 +17,7 @@ jobs:
   gate:
     if: >-
       github.repository == 'AlexandrShapkin/relayforge' &&
-      github.event.workflow_run.event == 'push' &&
-      github.event.workflow_run.head_branch == 'main' &&
-      github.event.workflow_run.repository.full_name == github.repository &&
-      github.event.workflow_run.conclusion == 'success'
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     outputs:
       ready: ${{ steps.required.outputs.ready }}
@@ -32,7 +31,7 @@ jobs:
       - id: required
         env:
           GH_TOKEN: ${{ github.token }}
-          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
         run: python3 -B ci/release_arch.py gate --sha "$SOURCE_SHA"
   publish:
     needs: gate
@@ -48,10 +47,10 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: Download and verify approved pending main artifacts in order
+      - name: Download and verify explicitly selected main artifacts
         env:
           GH_TOKEN: ${{ github.token }}
-          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
           RELEASE_PLAN: ${{ needs.gate.outputs.plan }}
         run: python3 -B ci/release_arch.py download --sha "$SOURCE_SHA"
       - uses: actions/attest-build-provenance@v3
@@ -63,6 +62,6 @@ jobs:
       - name: Verify exact-head gate and publish without overwriting
         env:
           GH_TOKEN: ${{ github.token }}
-          SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
           RELEASE_PLAN: ${{ needs.gate.outputs.plan }}
         run: python3 -B ci/release_arch.py publish --sha "$SOURCE_SHA"

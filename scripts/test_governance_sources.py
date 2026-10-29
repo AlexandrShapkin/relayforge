@@ -41,7 +41,7 @@ class GovernanceSources(unittest.TestCase):
         verify(ROOT)
 
     def test_native_ci_gates_retained(self):
-        gates = {'tests.yml': ['cargo fmt --all -- --check', 'cargo clippy --workspace --all-targets --locked -- -D warnings', 'cargo test --workspace --locked'], 'rdc-independent.yml': ['cargo clippy --workspace --all-targets --locked -- -D warnings', 'cargo test --workspace --locked', 'python3 scripts/offline_mcp_smoke.py .build/ci/release/relayforge-mcp']}
+        gates = {'tests.yml': ['cargo fmt --all -- --check', 'cargo clippy --workspace --all-targets --locked -- -D warnings', 'cargo test --workspace --locked'], 'rdc-independent.yml': ['cargo build --release --locked -p relayforge-agent -p relayforge-mcp', 'python3 scripts/offline_mcp_smoke.py .build/ci/release/relayforge-mcp', 'python3 -B scripts/offline_artifact_acceptance.py .build/ci/release/relayforge-mcp']}
         for workflow, commands in gates.items():
             text = (ROOT / '.github/workflows' / workflow).read_text(encoding='utf-8')
             for command in commands:

@@ -1,6 +1,7 @@
 //! Read-only, privacy-filtered inventory of the local MCP workstation.
 //! Fixed paths and fixed commands; callers cannot select a host, path or
 //! executable. Never returns environment variables, file contents or logs.
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -199,13 +200,100 @@ fn classify(repo: &Value, tunnel: &Value) -> &'static str {
     }
 }
 
+/// Legacy MCP adapter: validation remains before any host observation.
 pub fn snapshot(args: &Value) -> Result<String, String> {
+    snapshot_with_provider(args, WorkstationProvider)
+}
+
+pub(crate) fn legacy_status_request(
+    args: &Value,
+) -> Result<crate::resources::ReadRequest<crate::resources::StatusQuery>, String> {
+    use crate::resources::{
+        Action, Host, Kind, ReadRequest, StatusQuery, StatusView, RESOURCE_VERSION,
+    };
     if args.as_object().is_none_or(|value| !value.is_empty()) {
         return Err("unexpected workstation arguments".into());
     }
+    Ok(ReadRequest {
+        schema_version: RESOURCE_VERSION,
+        host: Host::LocalWorkstation,
+        kind: Kind::Workstation,
+        id: "local".into(),
+        action: Action::Read,
+        options: StatusQuery {
+            view: StatusView::Status,
+        },
+    })
+}
+
+fn snapshot_with_provider(
+    args: &Value,
+    provider: impl crate::resources::ReadProvider<
+        Query = crate::resources::StatusQuery,
+        Output = WorkstationStatus,
+    >,
+) -> Result<String, String> {
+    let request = legacy_status_request(args)?;
+    let observation = crate::resources::Registry::new(provider)
+        .read_status(request)
+        .map_err(|error| error.to_string())?;
+    serde_json::to_string(&observation.data).map_err(|_| "status encoding failed".into())
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+pub struct WorkstationStatus {
+    pub status: String,
+    pub scope: String,
+    pub repository: RepositoryStatus,
+    pub tunnel: TunnelStatus,
+    pub resources: SystemResources,
+    pub permissions: StatusPermissions,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+pub struct RepositoryStatus {
+    pub present: bool,
+    pub on_main: Option<bool>,
+    pub tracked_clean: Option<bool>,
+    pub untracked_clean: Option<bool>,
+    pub head_commit: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+pub struct TunnelStatus {
+    pub service_active: Option<bool>,
+    pub authenticated_poll_recent: Option<bool>,
+    pub last_successful_poll_age_seconds: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+pub struct SystemResources {
+    pub uptime_seconds: Option<u64>,
+    pub memory_available_mib: Option<u64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+pub struct StatusPermissions {
+    pub shell: bool,
+    pub arbitrary_files: bool,
+    pub service_mutation: bool,
+}
+
+pub struct WorkstationProvider;
+
+impl crate::resources::ReadProvider for WorkstationProvider {
+    type Query = crate::resources::StatusQuery;
+    type Output = WorkstationStatus;
+
+    fn read(&self, _query: Self::Query) -> Result<Self::Output, &'static str> {
+        collect_status()
+    }
+}
+
+fn collect_status() -> Result<WorkstationStatus, &'static str> {
     let home = std::env::var("HOME").map_err(|_| "workstation home unavailable")?;
     if !home.starts_with('/') || home.len() > 256 {
-        return Err("workstation home invalid".into());
+        return Err("workstation home invalid");
     }
     let repo = repository_snapshot(&home);
     let tunnel = tunnel_snapshot(&home);
@@ -215,21 +303,65 @@ pub fn snapshot(args: &Value) -> Result<String, String> {
     let memory = std::fs::read_to_string("/proc/meminfo")
         .ok()
         .and_then(|s| available_memory_mib(&s));
-    Ok(json!({
-        "status":classify(&repo, &tunnel),
-        "scope":"local_workstation_only",
-        "repository":repo,
-        "tunnel":tunnel,
-        "resources":{"uptime_seconds":uptime, "memory_available_mib":memory},
-        "permissions":{"shell":false,"arbitrary_files":false,"service_mutation":false}
+    Ok(WorkstationStatus {
+        status: classify(&repo, &tunnel).into(),
+        scope: "local_workstation_only".into(),
+        repository: serde_json::from_value(repo).map_err(|_| "repository status invalid")?,
+        tunnel: serde_json::from_value(tunnel).map_err(|_| "tunnel status invalid")?,
+        resources: SystemResources {
+            uptime_seconds: uptime,
+            memory_available_mib: memory,
+        },
+        permissions: StatusPermissions {
+            shell: false,
+            arbitrary_files: false,
+            service_mutation: false,
+        },
     })
-    .to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::process::ExitStatusExt;
+
+    #[test]
+    fn legacy_adapter_preserves_payload_and_never_observes_invalid_input() {
+        struct Fixture;
+        impl crate::resources::ReadProvider for Fixture {
+            type Query = crate::resources::StatusQuery;
+            type Output = WorkstationStatus;
+            fn read(&self, _: Self::Query) -> Result<Self::Output, &'static str> {
+                Ok(serde_json::from_value(legacy_fixture()).unwrap())
+            }
+        }
+        fn legacy_fixture() -> Value {
+            json!({"status":"unverified","scope":"local_workstation_only",
+                "repository":{"present":false,"on_main":null,"tracked_clean":null,
+                    "untracked_clean":null,"head_commit":null},
+                "tunnel":{"service_active":null,"authenticated_poll_recent":null,
+                    "last_successful_poll_age_seconds":null},
+                "resources":{"uptime_seconds":12,"memory_available_mib":null},
+                "permissions":{"shell":false,"arbitrary_files":false,"service_mutation":false}})
+        }
+        let output = snapshot_with_provider(&json!({}), Fixture).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&output).unwrap(),
+            legacy_fixture()
+        );
+        struct MustNotRun;
+        impl crate::resources::ReadProvider for MustNotRun {
+            type Query = crate::resources::StatusQuery;
+            type Output = WorkstationStatus;
+            fn read(&self, _: Self::Query) -> Result<Self::Output, &'static str> {
+                panic!("invalid legacy request reached host execution")
+            }
+        }
+        assert_eq!(
+            snapshot_with_provider(&json!({"host":"ru0"}), MustNotRun).unwrap_err(),
+            "unexpected workstation arguments"
+        );
+    }
 
     #[test]
     fn strictly_denies_request_parameters() {

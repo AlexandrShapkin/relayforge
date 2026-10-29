@@ -90,32 +90,13 @@ def accepted_merge(sha, get=api):
     return False
 
 
-def elected_trigger(sha, event, get=api):
-    """Only the last completed required workflow scans history; keep both triggers.
-
-    A retry of either required workflow can recover a failed/pending counterpart.
-    The expensive gate still rechecks every required job and historical artifact.
-    """
-    completed = []
-    for workflow in REQUIRED:
-        runs = get(f'actions/workflows/{workflow}/runs?head_sha={sha}&event=push&per_page=100')['workflow_runs']
-        candidates = [r for r in runs if r['head_sha'] == sha and r['head_branch'] == 'main'
-                      and r['event'] == 'push' and r['repository']['full_name'] == REPO
-                      and r['path'] == f'.github/workflows/{workflow}']
-        if not candidates:
-            return False
-        latest = max(candidates, key=lambda r: (r['run_number'], r['run_attempt']))
-        if latest['status'] != 'completed' or latest['conclusion'] != 'success':
-            return False
-        completed.append(latest)
-    winner = max(completed, key=lambda r: (r['updated_at'], r['id']))
-    return (event['id'], event['run_attempt']) == (winner['id'], winner['run_attempt'])
-
-
 def release_plan(sha, event):
-    if not elected_trigger(sha, event):
-        return []
-    return pending_main(sha, main_history(), all_releases())
+    """Explicit approval selects one main revision, never a pending backlog."""
+    if event.get('inputs', {}).get('source_sha') != sha:
+        raise ValueError('explicit exact-source release approval required')
+    if not re.fullmatch('[0-9a-f]{40}', sha) or sha not in main_history():
+        raise ValueError('selected source must be a full first-parent main SHA')
+    return pending_main(sha, [sha], all_releases())
 
 
 def main_history():
@@ -544,12 +525,13 @@ if __name__ == '__main__':
     parser.add_argument('--sha', required=True)
     parser.add_argument('--directory', type=Path, default=Path('dist'))
     args = parser.parse_args()
-    if os.environ.get('GITHUB_REPOSITORY') != REPO or os.environ.get('GITHUB_EVENT_NAME') != 'workflow_run':
-        raise SystemExit('trusted workflow_run context required')
-    event = json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text())['workflow_run']
-    if (event['event'] != 'push' or event['head_branch'] != 'main' or event['head_sha'] != args.sha
-            or event['repository']['full_name'] != REPO):
-        raise SystemExit('only exact-source main push may release')
+    if (os.environ.get('GITHUB_REPOSITORY') != REPO
+            or os.environ.get('GITHUB_EVENT_NAME') != 'workflow_dispatch'
+            or os.environ.get('GITHUB_REF') != 'refs/heads/main'):
+        raise SystemExit('trusted main workflow_dispatch context required')
+    event = json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text())
+    if event.get('inputs', {}).get('source_sha') != args.sha:
+        raise SystemExit('explicit exact-source release approval required')
     if args.command == 'gate':
         plan = release_plan(args.sha, event)
         with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
@@ -557,7 +539,7 @@ if __name__ == '__main__':
             output.write('plan=' + json.dumps(plan, separators=(',', ':')) + '\n')
     else:
         plan = json.loads(os.environ['RELEASE_PLAN'])
-        if not plan or len(plan) > 100:
+        if len(plan) != 1 or plan[0].get('sha') != args.sha:
             raise SystemExit('bounded approved release plan required')
         for item in plan:
             sha = item['sha']

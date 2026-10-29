@@ -35,25 +35,6 @@ class HandoffTests(unittest.TestCase):
         comments.pop()
         self.assertFalse(review.accepted(comments, head, base))
 
-    def test_only_latest_completed_workflow_scans_backlog(self):
-        sha = 'a' * 40
-        runs = {}
-        for i, workflow in enumerate(release.REQUIRED, 1):
-            runs[workflow] = dict(id=i, run_attempt=1, run_number=1, head_sha=sha,
-                head_branch='main', event='push', repository={'full_name': release.REPO},
-                path=f'.github/workflows/{workflow}', status='completed', conclusion='success',
-                updated_at=f'2026-10-29T00:00:0{i}Z')
-        def get(path):
-            return {'workflow_runs': [runs[path.split('/')[2]]]}
-        first, last = runs.values()
-        self.assertFalse(release.elected_trigger(sha, first, get))
-        self.assertTrue(release.elected_trigger(sha, last, get))
-        last['status'] = 'in_progress'
-        self.assertFalse(release.elected_trigger(sha, first, get))
-        last['status'] = 'completed'
-        first.update(run_attempt=2, updated_at='2026-10-29T00:01:00Z')
-        self.assertTrue(release.elected_trigger(sha, first, get))
-        self.assertFalse(release.elected_trigger(sha, dict(first, run_attempt=1), get))
 
 
 class CoverageTests(unittest.TestCase):
@@ -421,23 +402,25 @@ class CoverageFilterTests(unittest.TestCase):
 
 
 class ElectionPlanTests(unittest.TestCase):
-    def test_non_elected_event_never_scans_history(self):
+    def test_no_implicit_release_approval(self):
         from unittest.mock import patch
-        with patch.object(release, 'elected_trigger', return_value=False), \
-                patch.object(release, 'main_history') as history:
-            self.assertEqual(release.release_plan('a' * 40, {}), [])
+        with patch.object(release, 'main_history') as history:
+            with self.assertRaises(ValueError):
+                release.release_plan('a' * 40, {})
             history.assert_not_called()
 
-    def test_elected_event_preserves_backlog_plan(self):
+    def test_explicit_selection_never_drains_backlog(self):
         from unittest.mock import patch
         commits = ['a' * 40, 'b' * 40]
-        plan = [{'sha': sha, 'run_id': i} for i, sha in enumerate(commits)]
-        with patch.object(release, 'elected_trigger', return_value=True), \
-                patch.object(release, 'main_history', return_value=commits), \
+        plan = [{'sha': commits[-1], 'run_id': 1}]
+        with patch.object(release, 'main_history', return_value=commits), \
                 patch.object(release, 'all_releases', return_value=[]), \
                 patch.object(release, 'pending_main', return_value=plan) as pending:
-            self.assertEqual(release.release_plan(commits[-1], {}), plan)
-            pending.assert_called_once_with(commits[-1], commits, [])
+            event = {'inputs': {'source_sha': commits[-1]}}
+            self.assertEqual(release.release_plan(commits[-1], event), plan)
+            pending.assert_called_once_with(commits[-1], [commits[-1]], [])
+            with self.assertRaises(ValueError):
+                release.release_plan('c' * 40, {'inputs': {'source_sha': 'c' * 40}})
 
 
 class CoalescingTests(unittest.TestCase):
