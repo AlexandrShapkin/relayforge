@@ -517,3 +517,31 @@ the current live runtime or local grants during source development.
 
 Offline verification (disposable HOME/config only):
 `python3 -B scripts/offline_artifact_acceptance.py <isolated-built-mcp>`.
+
+## Internal four-project inventory provider (#75 / #92)
+
+`workstation_projects::ProjectInventoryProvider` adapts the retained #76 reader
+as a static, typed, read-only Rust provider, following ADR-0001. It is not
+registered in MCP discovery or dispatch; `projects.inventory` is denied and
+existing MCP API revision 9 and operations remain unchanged. The internal
+`InventoryRead` contract accepts only `view: inventory`, rejects unknown fields,
+and returns `InventoryObservation` schema version 1 with typed project,
+worktree and artifact observations. The local adapter supplies trusted home
+context; callers cannot select a host, path, project, command or mutation.
+There is no generic dispatcher, host router or new filesystem backend.
+
+The fixed projects remain codex-smart, relayforge, assistant-hub and rustcraft.
+The existing Linux descriptor-pinned, no-follow traversal and bounded metadata
+reader are reused. Inventory never executes Git, interprets config/filters,
+commondir, alternates or registered worktree gitdir targets, or reads index or
+working-file contents. Only fixed, bounded df diagnostics run. Linked-worktree
+roots with .git files remain unavailable. Symlink/hardlink metadata, unsafe
+ownership/modes and excessive or unsupported metadata fail closed.
+
+Missing or denied roots are unavailable; unreadable/corrupt HEAD is unverified.
+Tracked cleanliness, untracked counts and prunability remain null/unverified;
+cached origin/main is never fresh remote proof. Observation time is the start
+of a non-atomic local read, not a snapshot or authenticated host identity.
+Artifact candidates never authorize deletion; check names are text only.
+Future host binding, discovery and public resource contracts belong to #92;
+this provider grants no host access and makes no installation/live claim.

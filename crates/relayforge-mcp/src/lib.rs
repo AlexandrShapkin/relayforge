@@ -55,3 +55,7 @@ pub mod workstation_recovery;
 mod runtime;
 
 mod workstation_artifacts;
+
+// Internal provider awaits host routing; it is not part of the public MCP API.
+#[allow(dead_code)]
+pub(crate) mod workstation_projects;

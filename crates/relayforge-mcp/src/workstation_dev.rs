@@ -75,7 +75,7 @@ fn source_edit_enabled(home: &Path) -> bool {
 
 // Parse /proc/self/status rather than running id or accepting UID from MCP.
 // Filesystem ownership checks must use the real local process identity.
-fn unsafe_uid() -> u32 {
+pub(crate) fn unsafe_uid() -> u32 {
     let Ok(status) = fs::read_to_string("/proc/self/status") else {
         return u32::MAX;
     };
@@ -121,7 +121,7 @@ fn source_file(path: &str) -> bool {
             ))
 }
 
-fn read_capped<R: Read>(reader: R) -> Result<Vec<u8>, String> {
+pub(crate) fn read_capped<R: Read>(reader: R) -> Result<Vec<u8>, String> {
     let mut output = Vec::new();
     reader
         .take((MAX_OUTPUT + 1) as u64)
