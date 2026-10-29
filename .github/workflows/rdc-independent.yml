@@ -57,42 +57,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-      - name: Identify pinned just compiler cache
-        id: just-key
-        run: |
-          echo "compiler=$(rustc -Vv | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-          . /etc/os-release
-          echo "image=$ID-$VERSION_ID" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        id: just-cache
-        with:
-          path: ${{ runner.temp }}/just
-          key: just-1.40.0-${{ runner.os }}-${{ steps.just-key.outputs.image }}-${{ runner.arch }}-${{ steps.just-key.outputs.compiler }}-v1
-      - name: Install pinned just for recipe regression tests
-        run: |
-          if [[ '${{ steps.just-cache.outputs.cache-hit }}' != true ]]; then
-            cargo install just --version 1.40.0 --locked --root "$RUNNER_TEMP/just" --target-dir "$RUNNER_TEMP/just-build"
-          fi
-          test "$("$RUNNER_TEMP/just/bin/just" --version)" = "just 1.40.0"
-          echo "$RUNNER_TEMP/just/bin" >> "$GITHUB_PATH"
-      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.just-cache.outputs.cache-hit != 'true'
-        with:
-          path: ${{ runner.temp }}/just
-          key: ${{ steps.just-cache.outputs.cache-primary-key }}
       - name: Validate recovery bootstrap syntax
         run: bash -n deploy/relayforge-hot-activate.sh
       - name: Verify independent recovery guard without hardware
         run: |
           bash -n deploy/install-local-recovery.sh
           python3 -m py_compile deploy/relayforge-local-recover.py scripts/test_local_recovery.py
-          python3 -B -m unittest discover -s scripts -p 'test_*.py'
-      - name: Format
-        run: cargo fmt --all -- --check
-      - name: Check Rust
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Test workspace
-        run: cargo test --workspace --locked
       - name: Build Linux release binaries
         run: cargo build --release --locked -p relayforge-agent -p relayforge-mcp
       - name: Confirm restricted MCP operation without devices

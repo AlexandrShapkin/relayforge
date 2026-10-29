@@ -115,7 +115,9 @@ Existing Ubuntu native and security gates remain mandatory. Skips/unknowns for
 required checks block publication. Physical authenticated tunnel and recovery
 are host-only attestations; CI proves neither live readiness nor installation.
 
-The release workflow responds only to completed main **push** workflows. A
+The release workflow requires an explicit owner `workflow_dispatch` on `main`,
+with one full reviewed first-parent main `source_sha`. Main CI never publishes
+a package automatically; dispatch approves only that revision, never a backlog. A
 read-only gate queries both workflow identities, exact source SHA and latest
 attempts, requiring Rust `test` plus independent `verify-offline`, `arch-source`
 and `sandbox-integration` success. Only its trusted publication job has contents
@@ -134,7 +136,7 @@ provenance from this repository's `release-arch.yml` publisher on `refs/heads/ma
 using GitHub-hosted runners. That authenticated manifest covers the package,
 source identity, installed lifecycle evidence and release/build/run records;
 rewriting assets and self-reported checksums cannot replace the signed evidence.
-The publisher may run on a newer main revision while draining earlier revisions;
+The publisher may run on a newer main revision than the explicitly selected source;
 the signed manifest binds the package source rather than treating the publisher's
 checkout SHA as the package source. Both package and manifest attestations are
 required publication outputs. Missing/unsupported provenance fails closed.
