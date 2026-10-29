@@ -315,7 +315,24 @@ unsafe extern "C" {
     fn flock(fd: std::os::raw::c_int, operation: std::os::raw::c_int) -> std::os::raw::c_int;
 }
 
-fn approval_lock(parent: &File) -> Result<File, String> {
+struct ApprovalLock {
+    file: File,
+    owner_pid: u32,
+}
+
+impl Drop for ApprovalLock {
+    fn drop(&mut self) {
+        // A concurrent fork may retain a duplicate of this open file description
+        // until exec. Closing our descriptor alone need not release the lock.
+        // A forked child must never unlock its parent's transaction.
+        const LOCK_UN: i32 = 8;
+        if std::process::id() == self.owner_pid {
+            unsafe { flock(self.file.as_raw_fd(), LOCK_UN) };
+        }
+    }
+}
+
+fn approval_lock(parent: &File) -> Result<ApprovalLock, String> {
     let file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -337,7 +354,10 @@ fn approval_lock(parent: &File) -> Result<File, String> {
     if unsafe { flock(file.as_raw_fd(), 2 | 4) } != 0 {
         return Err("artifact approval busy".into());
     }
-    Ok(file)
+    Ok(ApprovalLock {
+        file,
+        owner_pid: std::process::id(),
+    })
 }
 
 // Called only by the existing one-time, physical-owner-approved change executor.
@@ -780,6 +800,48 @@ mod tests {
         assert_eq!(fs::read(&config).unwrap(), before);
         assert!(f.call("artifact.read", "issue77/AUTHORIZATION.md").is_err());
         assert!(revoke_root(&f.home, "issue77").is_err());
+    }
+
+    #[test]
+    fn approval_unlock_does_not_wait_for_inherited_descriptor_close() {
+        let f = Fixture::new();
+        let config = config_directory(&f.home).unwrap();
+        let lock = approval_lock(&config).unwrap();
+        // dup shares the open file description, just like inheritance at fork.
+        let inherited = lock.file.try_clone().unwrap();
+        assert!(approval_lock(&config).is_err());
+        drop(lock);
+        let next = approval_lock(&config).unwrap();
+        drop(inherited);
+        assert!(approval_lock(&config).is_err());
+        drop(next);
+        assert!(approval_lock(&config).is_ok());
+    }
+
+    #[test]
+    fn forked_child_drop_cannot_unlock_parent_transaction() {
+        unsafe extern "C" {
+            fn fork() -> i32;
+            fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
+            fn _exit(status: i32) -> !;
+        }
+        let f = Fixture::new();
+        let config = config_directory(&f.home).unwrap();
+        let lock = approval_lock(&config).unwrap();
+        let pid = unsafe { fork() };
+        assert!(pid >= 0);
+        if pid == 0 {
+            // Only close/unlock syscalls in the child: no allocator, locks or
+            // Rust test-harness/fixture destructors after a multithreaded fork.
+            drop(lock);
+            unsafe { _exit(0) };
+        }
+        let mut status = 0;
+        assert_eq!(unsafe { waitpid(pid, &mut status, 0) }, pid);
+        assert_eq!(status, 0);
+        assert!(approval_lock(&config).is_err());
+        drop(lock);
+        assert!(approval_lock(&config).is_ok());
     }
 
     #[test]
