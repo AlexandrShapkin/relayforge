@@ -130,39 +130,91 @@ fn diagnostic_command(program: &str, args: &[&str]) -> Result<Output, String> {
 // Git is deliberately not invoked for inventory. Even nominally read-only Git
 // commands interpret mutable config, commondir, ref symlinks and object stores.
 // These bounded reads never interpret config, alternates, gitdir or commondir.
-fn metadata_text(root: &File, relative: &str) -> Option<String> {
-    let mut directory = root.try_clone().ok()?;
+// Ok(None) means verified absence; every rejected or unreadable entry is Err.
+fn metadata_read(root: &File, relative: &str) -> Result<Option<String>, ()> {
+    metadata_read_checked(root, relative, &mut || {})
+}
+
+fn metadata_read_checked(
+    root: &File,
+    relative: &str,
+    after_open: &mut impl FnMut(),
+) -> Result<Option<String>, ()> {
+    let mut directory = root.try_clone().map_err(|_| ())?;
     let mut parts = relative.split('/').peekable();
     while let Some(name) = parts.next() {
         if name.is_empty() || name == "." || name == ".." {
-            return None;
+            return Err(());
         }
         let path = fd_path(&directory).join(name);
+        let before = match fs::symlink_metadata(&path) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(()),
+        };
         if parts.peek().is_some() {
-            directory = open_directory(&path)?;
-            if !trusted_directory(&directory) {
-                return None;
+            let child = open_directory(&path).ok_or(())?;
+            let pinned = child.metadata().map_err(|_| ())?;
+            if !before.is_dir() || !same_entry(&before, &pinned) || !trusted_directory(&child) {
+                return Err(());
             }
+            directory = child;
         } else {
             // NONBLOCK avoids waiting on a substituted FIFO before fstat.
             let file = OpenOptions::new()
                 .read(true)
                 .custom_flags(0x20000 | 0x800)
-                .open(path)
-                .ok()?;
-            let meta = file.metadata().ok()?;
-            if !meta.is_file()
+                .open(&path)
+                .map_err(|_| ())?;
+            let meta = file.metadata().map_err(|_| ())?;
+            if !before.is_file()
+                || !same_entry(&before, &meta)
+                || !meta.is_file()
                 || meta.nlink() != 1
                 || meta.uid() != unsafe_uid()
                 || meta.permissions().mode() & 0o022 != 0
+                || meta.permissions().mode() & 0o400 == 0
                 || meta.len() > 65536
             {
-                return None;
+                return Err(());
             }
-            return String::from_utf8(read_capped(file).ok()?).ok();
+            after_open();
+            let mut bytes = Vec::new();
+            use std::io::Read;
+            (&file)
+                .take(65537)
+                .read_to_end(&mut bytes)
+                .map_err(|_| ())?;
+            if bytes.len() > 65536 {
+                return Err(());
+            }
+            let text = String::from_utf8(bytes).map_err(|_| ())?;
+            let after = file.metadata().map_err(|_| ())?;
+            let current = fs::symlink_metadata(&path).map_err(|_| ())?;
+            if !same_entry(&meta, &after) || !same_entry(&meta, &current) {
+                return Err(());
+            }
+            return Ok(Some(text));
         }
     }
-    None
+    Err(())
+}
+
+fn same_entry(a: &fs::Metadata, b: &fs::Metadata) -> bool {
+    a.dev() == b.dev()
+        && a.ino() == b.ino()
+        && a.len() == b.len()
+        && a.mode() == b.mode()
+        && a.nlink() == b.nlink()
+        && a.uid() == b.uid()
+        && a.mtime() == b.mtime()
+        && a.mtime_nsec() == b.mtime_nsec()
+        && a.ctime() == b.ctime()
+        && a.ctime_nsec() == b.ctime_nsec()
+}
+
+fn metadata_text(root: &File, relative: &str) -> Option<String> {
+    metadata_read(root, relative).ok().flatten()
 }
 
 fn sha(value: &str) -> Option<String> {
@@ -187,11 +239,9 @@ fn ref_name(value: &str) -> bool {
 }
 
 fn packed_refs(repo: &Repository) -> Option<std::collections::BTreeMap<String, String>> {
-    let path = fd_path(&repo.metadata).join("packed-refs");
-    if fs::symlink_metadata(path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
+    let Some(text) = metadata_read(&repo.metadata, "packed-refs").ok()? else {
         return Some(std::collections::BTreeMap::new());
-    }
-    let text = metadata_text(&repo.metadata, "packed-refs")?;
+    };
     let mut refs = std::collections::BTreeMap::new();
     for line in text
         .lines()
@@ -206,7 +256,7 @@ fn packed_refs(repo: &Repository) -> Option<std::collections::BTreeMap<String, S
 }
 
 fn head_sha(repo: &Repository, reference: &str) -> Option<String> {
-    let text = metadata_text(&repo.metadata, reference);
+    let text = metadata_read(&repo.metadata, reference).ok()?;
     if let Some(value) = text.as_deref().and_then(sha) {
         return Some(value);
     }
@@ -221,20 +271,29 @@ fn head_sha(repo: &Repository, reference: &str) -> Option<String> {
     if !ref_name(reference) {
         return None;
     }
+    if text.is_some() {
+        return None;
+    }
     packed_refs(repo)?.get(reference).cloned()
 }
 
 fn branch_count(repo: &Repository) -> Option<usize> {
+    branch_count_checked(repo, &mut || {})
+}
+
+fn branch_count_checked(repo: &Repository, after_entry: &mut impl FnMut()) -> Option<usize> {
     fn visit(
         dir: &File,
         prefix: &str,
         names: &mut std::collections::BTreeSet<String>,
         budget: &mut usize,
         depth: usize,
+        after_entry: &mut impl FnMut(),
     ) -> Option<()> {
         if depth > 16 {
             return None;
         }
+        let before = dir.metadata().ok()?;
         for item in fs::read_dir(fd_path(dir)).ok()? {
             if *budget == 0 {
                 return None;
@@ -246,34 +305,54 @@ fn branch_count(repo: &Repository) -> Option<usize> {
             if !ref_name(&relative) {
                 return None;
             }
-            let meta = item.file_type().ok()?;
+            let meta = fs::symlink_metadata(item.path()).ok()?;
+            after_entry();
             if meta.is_dir() {
                 let child = open_directory(&fd_path(dir).join(name))?;
-                if !trusted_directory(&child) {
+                if !trusted_directory(&child) || !same_entry(&meta, &child.metadata().ok()?) {
                     return None;
                 }
-                visit(&child, &relative, names, budget, depth + 1)?;
+                visit(&child, &relative, names, budget, depth + 1, after_entry)?;
+                if !same_entry(&meta, &fs::symlink_metadata(item.path()).ok()?) {
+                    return None;
+                }
             } else if meta.is_file() {
+                let text = metadata_read(dir, &name).ok()??;
+                sha(&text)?;
+                if !same_entry(&meta, &fs::symlink_metadata(item.path()).ok()?) {
+                    return None;
+                }
                 names.insert(relative);
             } else {
                 return None;
             }
         }
-        Some(())
+        same_entry(&before, &dir.metadata().ok()?).then_some(())
     }
     let mut names: std::collections::BTreeSet<_> = packed_refs(repo)?
         .into_keys()
         .filter(|name| name.starts_with("refs/heads/"))
         .collect();
-    let refs = open_directory(&fd_path(&repo.metadata).join("refs"))?;
+    let refs_path = fd_path(&repo.metadata).join("refs");
+    let refs_before = fs::symlink_metadata(&refs_path).ok()?;
+    let refs = open_directory(&refs_path)?;
     if !trusted_directory(&refs) {
         return None;
     }
-    let heads = open_directory(&fd_path(&refs).join("heads"))?;
+    let heads_path = fd_path(&refs).join("heads");
+    let heads_before = fs::symlink_metadata(&heads_path).ok()?;
+    let heads = open_directory(&heads_path)?;
     if !trusted_directory(&heads) {
         return None;
     }
-    visit(&heads, "refs/heads", &mut names, &mut 1024, 0)?;
+    visit(&heads, "refs/heads", &mut names, &mut 1024, 0, after_entry)?;
+    if !same_entry(&refs_before, &refs.metadata().ok()?)
+        || !same_entry(&refs_before, &fs::symlink_metadata(refs_path).ok()?)
+        || !same_entry(&heads_before, &heads.metadata().ok()?)
+        || !same_entry(&heads_before, &fs::symlink_metadata(heads_path).ok()?)
+    {
+        return None;
+    }
     Some(names.len())
 }
 
@@ -856,6 +935,113 @@ mod tests {
         assert_eq!(after["local_branch_count"], 1);
         let repo = project_root(&f.0, "relayforge").unwrap();
         assert!(head_sha(&repo, "refs/../../outside").is_none());
+    }
+
+    fn packed_fixture() -> Fixture {
+        let f = Fixture::new();
+        fs::create_dir_all(f.root().join(".git/refs/heads")).unwrap();
+        fs::write(f.root().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::write(
+            f.root().join(".git/packed-refs"),
+            format!("{} refs/heads/main\n", "a".repeat(40)),
+        )
+        .unwrap();
+        f
+    }
+
+    #[test]
+    fn packed_refs_never_mask_rejected_loose_overrides() {
+        for reference in ["refs/heads/main", "refs/remotes/origin/main"] {
+            for kind in [
+                "malformed",
+                "oversized",
+                "writable",
+                "unreadable",
+                "symlink",
+                "hardlink",
+            ] {
+                let f = packed_fixture();
+                fs::write(
+                    f.root().join(".git/packed-refs"),
+                    format!("{} {reference}\n", "a".repeat(40)),
+                )
+                .unwrap();
+                let repo = project_root(&f.0, "relayforge").unwrap();
+                assert!(head_sha(&repo, reference).is_some());
+                let path = f.root().join(".git").join(reference);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                let target = f.0.join("target-ref");
+                fs::write(&target, "b".repeat(40)).unwrap();
+                match kind {
+                    "symlink" => symlink(&target, &path).unwrap(),
+                    "hardlink" => fs::hard_link(&target, &path).unwrap(),
+                    _ => {
+                        fs::write(
+                            &path,
+                            match kind {
+                                "malformed" => "private invalid".to_owned(),
+                                "oversized" => "a".repeat(65537),
+                                _ => "b".repeat(40),
+                            },
+                        )
+                        .unwrap();
+                        if kind == "writable" || kind == "unreadable" {
+                            fs::set_permissions(
+                                &path,
+                                fs::Permissions::from_mode(if kind == "writable" {
+                                    0o666
+                                } else {
+                                    0o200
+                                }),
+                            )
+                            .unwrap();
+                        }
+                    }
+                }
+                assert!(head_sha(&repo, reference).is_none(), "{reference}: {kind}");
+                if reference.starts_with("refs/heads/") {
+                    assert!(branch_count(&repo).is_none(), "{kind}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn loose_branch_entries_require_valid_bounded_contents() {
+        for content in [
+            "invalid".to_owned(),
+            "a".repeat(65537),
+            "ref: refs/heads/main".to_owned(),
+        ] {
+            let f = packed_fixture();
+            fs::write(f.root().join(".git/refs/heads/extra"), content).unwrap();
+            assert!(branch_count(&project_root(&f.0, "relayforge").unwrap()).is_none());
+        }
+    }
+
+    #[test]
+    fn replacement_after_enumeration_or_open_is_unverified() {
+        for remove in [false, true] {
+            let f = packed_fixture();
+            let path = f.root().join(".git/refs/heads/main");
+            fs::write(&path, "b".repeat(40)).unwrap();
+            let repo = project_root(&f.0, "relayforge").unwrap();
+            let replace = || {
+                if remove {
+                    fs::remove_file(&path).unwrap();
+                } else {
+                    let next = f.0.join("next-ref");
+                    fs::write(&next, "c".repeat(40)).unwrap();
+                    fs::rename(next, &path).unwrap();
+                }
+            };
+            assert!(branch_count_checked(&repo, &mut || replace()).is_none());
+            fs::write(&path, "b".repeat(40)).unwrap();
+            assert!(
+                metadata_read_checked(&repo.metadata, "refs/heads/main", &mut || replace())
+                    .is_err()
+            );
+        }
     }
 
     #[test]
