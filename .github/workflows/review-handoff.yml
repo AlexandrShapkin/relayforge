@@ -7,6 +7,10 @@ on:
     types: [created, edited, deleted]
   push:
     branches: [main]
+  # Offset from the hourly peak. GitHub schedules are best-effort and run only
+  # from the default branch; this adds no Rust/package/release trigger.
+  schedule:
+    - cron: '7,22,37,52 * * * *'
 permissions:
   contents: read
   pull-requests: read
@@ -19,11 +23,12 @@ jobs:
   handoff:
     if: github.repository == 'AlexandrShapkin/relayforge' && (github.event_name != 'issue_comment' || github.event.issue.pull_request)
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
       # Only trusted base/default source. Never fetch or execute the PR head.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          ref: ${{ github.event_name == 'schedule' && 'refs/heads/main' || github.event.pull_request.base.sha || github.sha }}
           persist-credentials: false
       - env:
           GH_TOKEN: ${{ github.token }}

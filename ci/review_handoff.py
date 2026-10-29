@@ -4,10 +4,12 @@ import json
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 
 REPO = 'AlexandrShapkin/relayforge'
 CONTEXT = 'Independent technical ACCEPT'
+IDENTITY_RETRY_DELAYS = (2, 5)
 
 
 def api(path, *args):
@@ -77,13 +79,27 @@ def main():
     # revocation. No event-supplied head or comment body is trusted.
     prs = api('pulls?state=open&base=main&per_page=100')
     failures = []
-    for pr in prs:
-        if pr['state'] != 'open' or pr['base']['ref'] != 'main':
-            continue
-        try:
-            evaluate(pr)
-        except Exception as error:
-            failures.append(f"PR {pr['number']}: {type(error).__name__}")
+    pending = prs
+    # Shared rounds bound waiting to seven seconds for the entire population,
+    # not seven seconds per PR. Only null identities are retried; API errors
+    # remain failures even if other PRs recover. Later scheduled sweeps reconcile
+    # identities still unavailable after this budget.
+    for attempt in range(1 + len(IDENTITY_RETRY_DELAYS)):
+        retry = []
+        for pr in pending:
+            try:
+                if attempt:
+                    pr = api(f"pulls/{pr['number']}")
+                if pr['state'] != 'open' or pr['base']['ref'] != 'main':
+                    continue
+                if evaluate(pr) is None:
+                    retry.append(pr)
+            except Exception as error:
+                failures.append(f"PR {pr['number']}: {type(error).__name__}")
+        if not retry or attempt == len(IDENTITY_RETRY_DELAYS):
+            break
+        time.sleep(IDENTITY_RETRY_DELAYS[attempt])
+        pending = retry
     if len(prs) >= 100:
         failures.append('open PR pagination requires reconciliation')
     if failures:
