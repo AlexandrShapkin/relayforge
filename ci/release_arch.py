@@ -312,16 +312,21 @@ def all_releases():
     return [r for page in pages for r in page]
 
 
+def narrative_text(body):
+    """Validate narrative structure; editorial review remains a separate gate."""
+    heading = '## Problem and resulting behavior\n'
+    if heading not in (body or ''):
+        raise ValueError('reviewed PR narrative required for release notes')
+    text = body.split(heading, 1)[1].split('\n## ', 1)[0].strip()
+    if not 80 <= len(text) <= 12000:
+        raise ValueError('reviewed release narrative missing or excessive')
+    return text
+
+
 def merge_narrative(sha, get=api):
     for pr in get(f'commits/{sha}/pulls'):
         if pr['merged_at'] and pr['merge_commit_sha'] == sha and pr['base']['ref'] == 'main':
-            body = pr.get('body') or ''
-            heading = '## Problem and resulting behavior\n'
-            if heading not in body:
-                raise ValueError('reviewed PR narrative required for release notes')
-            text = body.split(heading, 1)[1].split('\n## ', 1)[0].strip()
-            if not 80 <= len(text) <= 12000:
-                raise ValueError('reviewed release narrative missing or excessive')
+            text = narrative_text(pr.get('body'))
             return text + f"\n\nReviewed change: {pr['html_url']}"
     raise ValueError('merged PR narrative unavailable')
 

@@ -42,6 +42,9 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
+      - name: Check release narrative before merge
+        if: github.event_name == 'pull_request'
+        run: python3 -B ci/check_pr_narrative.py
       - name: Parse inert autonomy metadata (Python 3.11+)
         run: |
           python3 - <<'PY'
