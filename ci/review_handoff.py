@@ -41,6 +41,12 @@ def evaluate(pr, get=api):
     # the head SHA, where it could survive a base change. A missing/changed merge
     # identity has no successful status and blocks the required merge check.
     merge = pr.get('merge_commit_sha')
+    if merge is None:
+        # GitHub may not have computed a synthetic merge (or the PR conflicts).
+        # There is no identity to mark pending: leave acceptance unevaluable and
+        # retry on a later sweep, without blocking evaluation of other PRs.
+        print(f"PR {pr['number']}: merge identity unavailable; review pending")
+        return None
     status(merge, 'pending', 'Rechecking independent review handoff', get)
     try:
         head, base = pr['head']['sha'], pr['base']['sha']

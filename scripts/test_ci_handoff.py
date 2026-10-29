@@ -143,6 +143,104 @@ class ReevaluationTests(unittest.TestCase):
             review.evaluate(self.pr, api)
         self.assertIn('state=failure', self.writes[-1][1])
 
+    def test_null_identity_then_valid_identity(self):
+        pending = dict(self.pr, merge_commit_sha=None)
+        def unavailable(path, *args):
+            self.fail('unevaluable PR must not read review or write status')
+        self.assertIsNone(review.evaluate(pending, unavailable))
+        self.assertEqual(self.writes, [])
+        self.assertTrue(review.evaluate(self.pr, self.api))
+        self.assertIn('state=success', self.writes[-1][1])
+
+    def test_identity_changes_at_either_revalidation_fail_closed(self):
+        for field in ('head', 'base', 'merge_commit_sha'):
+            for read in (1, 2):
+                with self.subTest(field=field, read=read):
+                    self.writes.clear()
+                    count = 0
+                    def api(path, *args):
+                        nonlocal count
+                        if path.startswith('pulls/'):
+                            count += 1
+                            if count == read:
+                                value = {'sha': 'd' * 40} if field != 'merge_commit_sha' else None
+                                return dict(self.pr, **{field: value})
+                        return self.api(path, *args)
+                    with self.assertRaises(ValueError):
+                        review.evaluate(self.pr, api)
+                    self.assertIn('state=failure', self.writes[-1][1])
+                    self.assertFalse(any('state=success' in args for _, args in self.writes))
+
+    def test_missing_rejected_or_stale_review_fails(self):
+        for comments in ([], self.comments + [{'user': {'login': 'AlexandrShapkin'},
+                'body': f'Independent technical REJECT: {self.head}'}],
+                [{'user': {'login': 'AlexandrShapkin'}, 'body':
+                  f'Independent technical ACCEPT: {self.head}\nIndependent technical ACCEPT base: {"d" * 40}'}]):
+            with self.subTest(comments=comments):
+                self.comments = comments
+                self.assertFalse(review.evaluate(self.pr, self.api))
+                self.assertIn('state=failure', self.writes[-1][1])
+
+    def test_transient_api_failure_then_retry(self):
+        def api(path, *args):
+            if path.startswith('pulls/'):
+                raise OSError('transient API failure')
+            return self.api(path, *args)
+        with self.assertRaises(OSError):
+            review.evaluate(self.pr, api)
+        self.assertIn('state=failure', self.writes[-1][1])
+        self.assertTrue(review.evaluate(self.pr, self.api))
+
+    def test_status_write_failures_propagate(self):
+        for state in ('pending', 'success', 'failure'):
+            with self.subTest(state=state):
+                self.writes.clear()
+                def api(path, *args):
+                    if f'state={state}' in args:
+                        raise OSError('status write failed')
+                    if state == 'failure' and path.startswith('issues/'):
+                        return []
+                    return self.api(path, *args)
+                with self.assertRaises(OSError):
+                    review.evaluate(self.pr, api)
+                self.assertFalse(any('state=success' in args for _, args in self.writes))
+
+    def test_mixed_population_sweep(self):
+        import os
+        import tempfile
+        from unittest.mock import patch
+        for broken in (False, True):
+            with self.subTest(api_failure=broken), tempfile.TemporaryDirectory() as tmp:
+                self.writes.clear()
+                event = Path(tmp) / 'event.json'
+                event.write_text('{}')
+                prs = [dict(self.pr, number=n, state='open', base=dict(self.pr['base'], ref='main'),
+                            merge_commit_sha=None if n in (64, 66, 76) else str(n) * 40)
+                       for n in (64, 1, 66, 2, 76, 3)]
+                def api(path, *args):
+                    if path.startswith('pulls?'):
+                        return prs
+                    if path.startswith('pulls/'):
+                        return next(pr for pr in prs if pr['number'] == int(path.split('/')[1]))
+                    if path.startswith('issues/2/'):
+                        if broken:
+                            raise OSError('transient API failure')
+                        return []
+                    return self.api(path, *args)
+                evaluate = review.evaluate
+                with patch.dict(os.environ, GITHUB_EVENT_PATH=str(event), GITHUB_REPOSITORY=review.REPO), \
+                        patch.object(review, 'api', side_effect=api), \
+                        patch.object(review, 'evaluate', side_effect=lambda pr: evaluate(pr, api)):
+                    if broken:
+                        with self.assertRaisesRegex(SystemExit, 'PR 2: OSError'):
+                            review.main()
+                    else:
+                        review.main()
+                self.assertEqual([(path, next(a for a in args if a.startswith('state=')))
+                                  for path, args in self.writes],
+                    [(f'statuses/{str(n) * 40}', f'state={state}')
+                     for n in (1, 2, 3) for state in ('pending', 'failure' if n == 2 else 'success')])
+
     def test_new_release_policy_requires_first_parent_base(self):
         from unittest.mock import patch
         pr = dict(self.pr, merged_at='now', merge_commit_sha=self.merge,
