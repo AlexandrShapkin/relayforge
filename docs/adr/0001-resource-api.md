@@ -1,3 +1,8 @@
+> **Scope correction 2026-11-10:** development/job orchestration and Git sync/build
+> routes are retired. Their descriptions below are historical design evidence,
+> not supported capabilities or development commitments. See README.md for
+> current host-MCP scope and checks. No runtime migration is authorized here.
+
 # ADR-0001: Resource-oriented RelayForge API
 
 - **Status:** Accepted as the target architecture by the project owner on 2026-10-22; **not implemented**.

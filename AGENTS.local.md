@@ -1,8 +1,6 @@
 # Project-local rules
 
-Follow root AGENTS.md; load canonical interface sections only when task-triggered, while preserving all binding requirements. These retained native
-rules may strengthen it; shared lifecycle policy belongs to Project Template.
-This migration grants no merge, deployment or runtime authority.
+Follow root AGENTS.md. This repository owns its native procedures and security boundaries.
 
 # RelayForge agent entry point
 
@@ -57,11 +55,6 @@ verification. Consult [docs/development-without-rdc.md](docs/development-without
 for the isolated JSON-RPC smoke and artifact limitations. If a dependency,
 runner or environment is unavailable, report the result as **unverified**.
 
-`automation/project.toml` is **declarative, disabled-by-default metadata**.
-It is not an authorization source, executable recipe, or implemented
-Codex Smart integration. No agent may promote its candidate paths, profile
-names, or limits into runtime authority without an independently pinned,
-validated contract plus stricter external operator policy.
 
 ## Mandatory cleanup after each task
 

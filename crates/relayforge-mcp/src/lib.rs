@@ -42,10 +42,6 @@ pub mod workstation_dev;
 
 pub mod workstation_transfer;
 
-pub mod workstation_chain;
-mod workstation_development;
-pub mod workstation_jobs;
-
 pub mod workstation_dependency;
 
 pub mod workstation_retire;
@@ -55,9 +51,5 @@ pub mod workstation_recovery;
 mod runtime;
 
 mod workstation_artifacts;
-
-// Internal provider awaits host routing; it is not part of the public MCP API.
-#[allow(dead_code)]
-pub(crate) mod workstation_projects;
 
 pub mod resources;

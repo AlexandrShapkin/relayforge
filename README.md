@@ -3,6 +3,14 @@
 RelayForge is a Rust-based, permission-limited MCP bridge for
 personally operated Linux, MikroTik RouterOS and Android devices.
 
+**Scope:** MCP access to authorized hosts: discovery, bounded commands, filesystem
+operations and system/service management with platform-specific access. GitHub
+development orchestration, agent workflows, calendars and general automation are
+outside the product. Existing deny-by-default policy, authentication, local approvals,
+audit and independent host allowlists remain mandatory. The legacy
+`relayforge_workstation_develop` name is retained for compatible host operations;
+development/job execution, source writes and Git sync/build routes are retired.
+
 **Current status:** deployed read-only diagnostics and narrowly scoped,
 human-approved Linux pilot. This is **not** a general remote device
 administration system.

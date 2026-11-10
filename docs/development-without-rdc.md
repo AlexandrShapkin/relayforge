@@ -1,3 +1,8 @@
+> **Scope correction 2026-11-10:** development/job orchestration and Git sync/build
+> routes are retired. Their descriptions below are historical design evidence,
+> not supported capabilities or development commitments. See README.md for
+> current host-MCP scope and checks. No runtime migration is authorized here.
+
 > P0 runtime notice: old build/hot-swap instructions below are historical where
 > inconsistent with [runtime artifacts](runtime-artifacts.md). Never compile to
 > legacy `target/release`; no source-only action authorizes activation.

@@ -25,8 +25,8 @@ No live migration follows from source CI or acceptance alone.
 ## Outstanding work
 
 1. Validate Android health parsing against physically authorized devices.
-2. Add per-source calendar sync receipts and investigate the VPN health
-   probe failure; local database integrity does not guarantee sync.
+2. Keep bounded host/service and file-integrity diagnostics maintainable;
+   calendar collection and application monitoring belong to their owning tools.
 3. Exercise tunnel reconnect, identity revocation and recovery under
    realistic failure conditions.
 4. Design RouterOS writes with tested independent access, local rollback
@@ -38,3 +38,10 @@ No live migration follows from source CI or acceptance alone.
 
 No internet-facing executor, silent pairing or unrestricted remote
 shell is planned for this stage.
+
+## Architecture boundary
+
+Maintain the existing protocol, policy, host agent and MCP gateway layers. Host
+access providers own platform differences; all mutations retain local grants,
+audit, expiration and host-side validation. Retired development/job providers
+remain in Git history. No new monitoring or orchestration service is planned.

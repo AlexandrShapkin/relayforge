@@ -19,7 +19,7 @@ change installed units/launchers. The working installation must be preserved.
 - `just verify` fixes `CARGO_TARGET_DIR` and explicit compile target arguments
   to `.build/verification`, overriding a stale inherited Cargo target setting.
 - `just release-build` uses explicit `.build/release`.
-- Workstation `build.start` uses explicit `.build/workstation`; it never deploys.
+- Workstation the retired `build.start` route (historical evidence only) uses explicit `.build/workstation`; it never deploys.
 - Hosted CI uses `.build/ci`, runs full native checks/smoke, then records the
   actual checked-out full commit and MCP SHA-256 in `manifest.json`.
 - Offline smoke runs in a temporary HOME with no real grants/runtime sockets.

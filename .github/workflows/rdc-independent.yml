@@ -208,10 +208,6 @@ jobs:
           sudo apt-get install --yes bubblewrap
       - name: Build exact-head sandbox worker for this runner
         run: cargo build --release --locked -p relayforge-mcp
-      - name: Exercise real sandbox development fixture without grants or devices
-        run: python3 -B scripts/offline_development_workflow.py .build/ci-sandbox/release/relayforge-mcp
-      - name: Exercise expiring task authorization and editable sandbox workspace
-        run: python3 -B scripts/offline_authorized_development.py .build/ci-sandbox/release/relayforge-mcp
       - name: Exercise hardened HTTP and stdio and scheduled rollback
         # System manager on this disposable hosted runner supports namespace
         # hardening that the hosted user manager rejects (EXIT_NAMESPACE 226).

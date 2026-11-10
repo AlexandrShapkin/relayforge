@@ -3,8 +3,8 @@
 //! host, credentials or arbitrary filesystem root. Mutations require a
 //! separate local operator-created, permission-checked opt-in file.
 use crate::{
-    workstation_artifacts, workstation_dependency, workstation_development, workstation_jobs,
-    workstation_recovery, workstation_retire, workstation_transfer,
+    workstation_artifacts, workstation_dependency, workstation_recovery, workstation_retire,
+    workstation_transfer,
 };
 use serde_json::{json, Value};
 use std::{
@@ -21,11 +21,10 @@ use std::{
 const MAX_OUTPUT: usize = 64 * 1024;
 const MAX_CONTENT: usize = 48 * 1024;
 const OPT_IN: &str = ".config/relayforge/allow-workstation-development";
-const SOURCE_EDIT_OPT_IN: &str = ".config/relayforge/allow-workstation-source-edits";
 
 pub fn tool() -> Value {
     json!({"name":"relayforge_workstation_develop",
-        "description":"ThinkPad-only bounded development: tracked repository inventory/reads, isolated read-only offline shell, process status, Git sync/build and tunnel restart. Source writes need a separate local opt-in. No unrestricted host shell.",
+        "description":"Legacy-named host access tool: bounded filesystem reads/transfers, process/service status and locally authorized maintenance. No development orchestration or unrestricted host shell.",
         "inputSchema":{"type":"object","properties":{
             "operation":{"type":"string","minLength":1,"maxLength":48,
                 "description":"Server-validated operation name. Use capabilities for the current allowlist; unknown values always denied."},
@@ -33,7 +32,7 @@ pub fn tool() -> Value {
             "content":{"type":"string","maxLength":49152},
             "task_id":{"type":"string","maxLength":32},
             "script":{"type":"string","maxLength":2048},
-            "parameters":{"type":"object","description":"Strict server-validated development, job.chain or artifact.root.prepare proposal; other nested payloads denied."}
+            "parameters":{"type":"object","description":"Strict server-validated artifact root proposal; other nested payloads denied."}
         },"required":["operation"],"additionalProperties":false}})
 }
 
@@ -69,12 +68,6 @@ pub(crate) fn dev_enabled(home: &Path) -> bool {
     local_opt_in(home, OPT_IN, b"ALLOW_RELAYFORGE_DEVELOPMENT\n")
 }
 
-fn source_edit_enabled(home: &Path) -> bool {
-    local_opt_in(home, SOURCE_EDIT_OPT_IN, b"ALLOW_RELAYFORGE_SOURCE_EDITS\n")
-}
-
-// Parse /proc/self/status rather than running id or accepting UID from MCP.
-// Filesystem ownership checks must use the real local process identity.
 pub(crate) fn unsafe_uid() -> u32 {
     let Ok(status) = fs::read_to_string("/proc/self/status") else {
         return u32::MAX;
@@ -391,98 +384,6 @@ fn task_lock(repo: &Path) -> Result<String, String> {
 // Only the fixed Git fast-forward and locked Cargo build may be retried:
 // both are idempotent and share a single file lock. In particular, NEVER
 // apply this retry policy to tunnel.restart or any other service mutation.
-fn spawn_task(repo: &Path, kind: &str) -> Result<String, String> {
-    if !matches!(kind, "repo.sync" | "build.start") {
-        return Err("task denied".into());
-    }
-    let repo_string = repo.to_str().ok_or("invalid repo path")?;
-    let lock = task_lock(repo)?;
-    let build_target = repo.join(".build/workstation");
-    let build_target = build_target.to_str().ok_or("build target unavailable")?;
-    let workdir = format!("--working-directory={repo_string}");
-    let mut last_reason = "unavailable";
-    for attempt in 1..=3 {
-        let unit = new_unit_id()?;
-        let unit_opt = format!("--unit={unit}");
-        let mut args = vec![
-            "--user",
-            &unit_opt,
-            "--collect",
-            &workdir,
-            "--property=Type=oneshot",
-            "--property=TimeoutStartSec=1800",
-            "flock",
-            "-w",
-            "600",
-            &lock,
-        ];
-        match kind {
-            "repo.sync" => args.extend([
-                "git",
-                "-c",
-                "core.hooksPath=/dev/null",
-                "-C",
-                repo_string,
-                "pull",
-                "--ff-only",
-                "origin",
-                "main",
-            ]),
-            "build.start" => args.extend([
-                "cargo",
-                "build",
-                "--release",
-                "--locked",
-                "--target-dir",
-                build_target,
-                "-p",
-                "relayforge-mcp",
-                "-p",
-                "relayforge-agent",
-            ]),
-            _ => unreachable!(),
-        }
-        match command("systemd-run", &args, 10) {
-            Ok(output) if output.status.success() => {
-                return Ok(json!({
-                    "task_id":unit, "started":true, "kind":kind,
-                    "schedule_attempts":attempt
-                })
-                .to_string());
-            }
-            Ok(output) => last_reason = schedule_failure_class(&output),
-            Err(_) => last_reason = "client_unavailable",
-        }
-        if attempt < 3 {
-            // A previous transient unit may have been queued despite a
-            // client-side error. Distinct IDs + the shared lock ensure that
-            // at worst the fixed idempotent operation is repeated serially.
-            // Do not expose stderr: systemd diagnostics can contain paths.
-            thread::sleep(std::time::Duration::from_millis(350 * attempt));
-        }
-    }
-    Err(format!(
-        "development task scheduling failed after three attempts ({last_reason})"
-    ))
-}
-
-fn schedule_failure_class(output: &Output) -> &'static str {
-    let msg = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
-    if msg.contains("connection") || msg.contains("connect to bus") {
-        "bus_unavailable"
-    } else if msg.contains("already exists") {
-        "unit_conflict"
-    } else if msg.contains("start request repeated") || msg.contains("rate limit") {
-        "rate_limited"
-    } else if msg.contains("timed out") || output.status.code() == Some(124) {
-        "timeout"
-    } else if msg.contains("permission") || msg.contains("access denied") {
-        "permission_denied"
-    } else {
-        "systemd_rejected"
-    }
-}
-
 // Materialize a read-only view of allowlisted, currently tracked source
 // files inside the sandbox. Never bind the repository directory itself:
 // that would expose .git, private untracked files and hidden local state.
@@ -617,6 +518,14 @@ pub fn execute(args: &Value) -> Result<String, String> {
         .get("operation")
         .and_then(Value::as_str)
         .ok_or("missing operation")?;
+    if operation.starts_with("development.")
+        || operation.starts_with("job.")
+        || matches!(operation, "repo.write" | "repo.sync" | "build.start")
+    {
+        return Err(
+            "operation retired: development orchestration is outside host MCP scope".into(),
+        );
+    }
     // Tool discovery also runs on disposable CI without a ThinkPad checkout.
     if operation == "capabilities" {
         if obj.len() != 1 {
@@ -627,43 +536,28 @@ pub fn execute(args: &Value) -> Result<String, String> {
             return Err("home invalid".into());
         }
         return Ok(json!({
-            "api_revision": 9,
+            "api_revision": 10,
             "transport": "private_secure_mcp_tunnel",
             "operations": [
                 "capabilities", "repo.status", "repo.list", "repo.read",
-                "repo.write", "repo.sync", "build.start",
+
                 "task.status", "task.logs", "task.list",
                 "tunnel.inspect", "tunnel.restart", "recovery.inspect",
                 "workspace.list", "workspace.read", "workspace.put",
                 "workspace.remove", "artifact.list", "artifact.read",
                 "artifact.root.prepare", "artifact.root.revoke.prepare",
                 "artifact.root.inspect",
-                "job.start", "job.list", "job.status", "job.output",
-                "job.stop", "job.remove",
-                "job.chain.start", "job.chain.status", "job.chain.output",
-                "development.prepare", "development.run", "development.inspect",
                 "dependency.audit",
                 "ssh.retire.plan", "ssh.retire.config", "ssh.retire.known_hosts",
                 "shell.sandbox", "process.list", "user.services"
             ],
             "write_grants": {
                 "development": dev_enabled(&home),
-                "source_edit": source_edit_enabled(&home)
+                "source_edit": false
             },
             "artifacts": workstation_artifacts::discovery(&home),
             "arbitrary_host_shell": false,
             "arbitrary_host_files": false,
-            "development_tasks": {
-                "schema_version":1,
-                "repositories":["relayforge"],
-                "profiles":["python-stdlib-v1"],
-                "max_files":4,
-                "max_proposal_bytes":24576,
-                "task_grant_required":true,
-                "max_authorization_lifetime_seconds":3600,
-                "checkout_writes":false,
-                "publication":"external_github_only"
-            },
             "local_grants_required_for_mutations": true
         })
         .to_string());
@@ -734,15 +628,6 @@ pub fn execute(args: &Value) -> Result<String, String> {
             audit(&home, operation)?;
             workstation_artifacts::execute(&home, args)
         }
-        "development.prepare" | "development.run" | "development.inspect" => {
-            if operation != "development.inspect" {
-                if !dev_enabled(&home) {
-                    return Err("local development opt-in missing".into());
-                }
-                audit(&home, operation)?;
-            }
-            workstation_development::execute(&home, &repo, args)
-        }
         "ssh.retire.plan" if obj.len() == 1 => workstation_retire::plan(&home),
         "ssh.retire.config" | "ssh.retire.known_hosts" if obj.len() == 1 => {
             if !dev_enabled(&home) {
@@ -760,19 +645,6 @@ pub fn execute(args: &Value) -> Result<String, String> {
             workstation_recovery::snapshot(opted_in)
         }
         "dependency.audit" if obj.len() == 1 => workstation_dependency::snapshot(&home),
-        "job.start" | "job.list" | "job.status" | "job.output" | "job.stop" | "job.remove"
-        | "job.chain.start" | "job.chain.status" | "job.chain.output" => {
-            if matches!(
-                operation,
-                "job.start" | "job.stop" | "job.remove" | "job.chain.start"
-            ) {
-                if !dev_enabled(&home) {
-                    return Err("local development opt-in missing".into());
-                }
-                audit(&home, operation)?;
-            }
-            workstation_jobs::execute(&home, args)
-        }
         "workspace.list" | "workspace.read" | "workspace.put" | "workspace.remove" => {
             if matches!(operation, "workspace.put" | "workspace.remove") {
                 if !dev_enabled(&home) {
@@ -891,43 +763,6 @@ pub fn execute(args: &Value) -> Result<String, String> {
             }
             let value = String::from_utf8(data).map_err(|_| "source is not UTF-8")?;
             Ok(json!({"path":path,"utf8_text":value}).to_string())
-        }
-        "repo.write" if obj.len() == 3 => {
-            if !dev_enabled(&home) || !source_edit_enabled(&home) {
-                return Err("local development opt-in missing".into());
-            }
-            let path = obj
-                .get("path")
-                .and_then(Value::as_str)
-                .ok_or("path required")?;
-            let content = obj
-                .get("content")
-                .and_then(Value::as_str)
-                .ok_or("content required")?;
-            if content.len() > MAX_CONTENT {
-                return Err("content too large".into());
-            }
-            let safe = safe_existing_file(&repo, path)?;
-            audit(&home, operation)?;
-            // Refuse links at open; never follow paths outside the fixed workspace.
-            let mut file = OpenOptions::new()
-                .write(true)
-                .truncate(true)
-                .custom_flags(0x20000)
-                .open(safe)
-                .map_err(|_| "source not writable")?;
-            file.write_all(content.as_bytes())
-                .map_err(|_| "write failed")?;
-            file.sync_all().map_err(|_| "write failed")?;
-            Ok(json!({"written":true,"byte_length":content.len()}).to_string())
-        }
-        "repo.sync" | "build.start" if obj.len() == 1 => {
-            if !dev_enabled(&home) {
-                return Err("local development opt-in missing".into());
-            }
-            clean_main_checkout(&repo)?;
-            audit(&home, operation)?;
-            spawn_task(&repo, operation)
         }
         "task.status" | "task.logs" if obj.len() == 2 => {
             let task = obj
@@ -1105,29 +940,6 @@ mod tests {
         assert!(response.is_err() || response.is_ok_and(|value| value.contains("exit_code")));
     }
     #[test]
-    fn scheduling_errors_are_classified_without_raw_output() {
-        use std::os::unix::process::ExitStatusExt;
-        let fail = |message: &str| Output {
-            status: std::process::ExitStatus::from_raw(1 << 8),
-            stdout: vec![],
-            stderr: message.as_bytes().to_vec(),
-        };
-        assert_eq!(
-            schedule_failure_class(&fail("Failed to connect to bus: Connection refused")),
-            "bus_unavailable"
-        );
-        assert_eq!(
-            schedule_failure_class(&fail("Unit name already exists")),
-            "unit_conflict"
-        );
-        assert_eq!(
-            schedule_failure_class(&fail("Sensitive path /home/private/secret-key")),
-            "systemd_rejected"
-        );
-        assert!(spawn_task(Path::new("/tmp"), "tunnel.restart").is_err());
-    }
-
-    #[test]
     fn bounded_stdin_is_passed_without_argv_script() {
         let out = command_input("sh", &["-s"], Some("printf 'FROM_STDIN'"), 5).unwrap();
         assert!(out.status.success());
@@ -1160,6 +972,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn retired_development_operations_are_always_denied() {
+        let capabilities: Value =
+            serde_json::from_str(&execute(&json!({"operation":"capabilities"})).unwrap()).unwrap();
+        for operation in [
+            "development.prepare",
+            "development.run",
+            "development.inspect",
+            "job.start",
+            "job.chain.start",
+            "job.list",
+            "repo.write",
+            "repo.sync",
+            "build.start",
+        ] {
+            assert!(!capabilities["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v == operation));
+            assert!(execute(&json!({"operation":operation}))
+                .unwrap_err()
+                .contains("retired"));
+        }
+    }
     #[test]
     fn open_schema_remains_server_validated() {
         let schema = tool();

@@ -55,7 +55,7 @@ def main():
         config.write_text(json.dumps({"roots": {"activation": str(root)}}))
         config.chmod(0o600)
         caps = json.loads(call("capabilities")["content"][0]["text"])
-        assert caps["api_revision"] == 9
+        assert caps["api_revision"] == 10
         assert caps["artifacts"]["configured"] is True
         assert caps["artifacts"]["read_only"] is True
         assert caps["arbitrary_host_shell"] is False
