@@ -84,7 +84,7 @@ def inside(home, binary, transport, port, negative, evidence_mode):
                 time.sleep(.05)
         else:
             raise AssertionError('fixture endpoint unavailable')
-        assert caps['api_revision'] == 9 and caps['artifacts']['configured'] is (negative not in ('home', 'config'))
+        assert caps['api_revision'] == 10 and caps['artifacts']['configured'] is (negative not in ('home', 'config'))
         assert caps['artifacts']['read_only'] and not caps['write_grants']['source_edit']
         assert not caps['arbitrary_host_shell']
         assert any(t['name'] == 'relayforge_workstation_develop' for t in rpc('tools/list', {})['tools'])
