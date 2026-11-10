@@ -141,8 +141,7 @@ def main():
     smoke()
     assert hashlib.sha256(Path('/usr/bin/relayforge-mcp').read_bytes()).hexdigest() == installed_hash
     # Integration must use installed bytes; absence/failure is fatal, never skipped.
-    for script in (
-                   'test_tunnel_artifact_isolation.py'):
+    for script in ('test_tunnel_artifact_isolation.py',):
         print(run('runuser', '-u', 'builder', '--', 'env', 'RELAYFORGE_CI_SYSTEMD_SYSTEM=1',
                   'python3', '-B', f'scripts/{script}', '/usr/bin/relayforge-mcp'), flush=True)
     # Unit definition from the installed package, not legacy deploy templates.
