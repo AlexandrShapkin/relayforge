@@ -1,3 +1,8 @@
+> **Scope correction 2026-11-10:** development/job orchestration and Git sync/build
+> routes are retired. Their descriptions below are historical design evidence,
+> not supported capabilities or development commitments. See README.md for
+> current host-MCP scope and checks. No runtime migration is authorized here.
+
 # Sequential sandbox jobs on ThinkPad
 
 RelayForge's existing job.start runs one isolated, offline script in a fixed

@@ -535,7 +535,7 @@ def candidate_operations():
         return json.loads(''.join(item['text'] for item in result.get('content', []) if item.get('type') == 'text'))
 
     caps = payload(call('capabilities'))
-    m.require(caps.get('api_revision') == 9 and caps.get('artifacts', {}).get('configured') is True
+    m.require(caps.get('api_revision') == 10 and caps.get('artifacts', {}).get('configured') is True
               and caps['artifacts'].get('read_only') is True
               and caps.get('arbitrary_host_shell') is False
               and caps.get('write_grants', {}).get('source_edit') is False, 'artifact capabilities incorrect')
